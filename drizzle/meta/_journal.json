@@ -29,6 +29,13 @@
       "when": 1773388866446,
       "tag": "0003_sticky_husk",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1774045200000,
+      "tag": "0004_api_tokens",
+      "breakpoints": true
     }
   ]
 }

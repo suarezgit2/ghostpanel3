@@ -102,6 +102,21 @@ export const settingsRouter = router({
     return { success: true };
   }),
 
+  /**
+   * Retorna o health summary dos provedores SMS (scores, cooldowns, taxa de sucesso)
+   */
+  getSmsHealth: protectedProcedure.query(async () => {
+    return smsService.getProviderHealthSummary();
+  }),
+
+  /**
+   * Reseta o health tracker dos provedores SMS (útil após mudança de configuração)
+   */
+  resetSmsHealth: protectedProcedure.mutation(async () => {
+    smsService.resetProviderHealth();
+    return { success: true, message: "Health tracker dos provedores SMS resetado" };
+  }),
+
   // Providers management
   listProviders: protectedProcedure.query(async () => {
     const db = await getDb();

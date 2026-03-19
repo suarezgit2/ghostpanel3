@@ -12,6 +12,10 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { ENV } from "./env";
 import { autoSeedDefaults } from "../utils/autoSeed";
+import { getDb } from "../db";
+import { jobs } from "../../drizzle/schema";
+import { eq } from "drizzle-orm";
+import { orchestrator } from "../core/orchestrator";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -30,6 +34,60 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
     }
   }
   throw new Error(`No available port found starting from ${startPort}`);
+}
+
+/**
+ * Monitor de jobs travados.
+ * Roda a cada 10 minutos e marca como "failed" qualquer job com status "running"
+ * que não esteja na memória ativa do orchestrator e não tenha progresso há 30+ minutos.
+ */
+function startStaleJobsMonitor(): void {
+  const INTERVAL_MS = 10 * 60 * 1000;       // Checar a cada 10 minutos
+  const STALE_THRESHOLD_MS = 30 * 60 * 1000; // Job travado = sem progresso há 30+ min
+
+  const check = async () => {
+    try {
+      const db = await getDb();
+      if (!db) return;
+
+      const cutoffDate = new Date(Date.now() - STALE_THRESHOLD_MS);
+      const activeJobIds = orchestrator.getActiveJobs();
+
+      const runningJobs = await db
+        .select({ id: jobs.id, updatedAt: jobs.updatedAt, startedAt: jobs.startedAt })
+        .from(jobs)
+        .where(eq(jobs.status, "running"));
+
+      const staleJobs = runningJobs.filter((job) => {
+        if (activeJobIds.includes(job.id)) return false;
+        const lastActivity = job.updatedAt || job.startedAt;
+        if (!lastActivity) return true;
+        return lastActivity < cutoffDate;
+      });
+
+      if (staleJobs.length > 0) {
+        console.warn(`[StaleJobsMonitor] ${staleJobs.length} job(s) travado(s) detectado(s): ${staleJobs.map(j => j.id).join(", ")}`);
+        for (const staleJob of staleJobs) {
+          await db.update(jobs).set({
+            status: "failed",
+            error: "Job travado detectado automaticamente (sem progresso por 30+ minutos)",
+            completedAt: new Date(),
+          }).where(eq(jobs.id, staleJob.id));
+          console.warn(`[StaleJobsMonitor] Job ${staleJob.id} marcado como failed`);
+        }
+      }
+    } catch (err) {
+      console.warn("[StaleJobsMonitor] Erro ao verificar jobs travados:", err);
+    }
+  };
+
+  // Rodar a primeira verificação após 2 minutos do boot (dar tempo ao orchestrator de inicializar)
+  setTimeout(() => {
+    check();
+    setInterval(check, INTERVAL_MS);
+  }, 2 * 60 * 1000);
+
+  console.log("[StaleJobsMonitor] Monitor de jobs travados iniciado (intervalo: 10min, threshold: 30min)");
 }
 
 async function startServer() {
@@ -89,6 +147,9 @@ async function startServer() {
     } catch (err) {
       console.warn("[AutoSeed] Falhou (não-crítico):", err);
     }
+
+    // Iniciar monitor de jobs travados
+    startStaleJobsMonitor();
   });
 }
 

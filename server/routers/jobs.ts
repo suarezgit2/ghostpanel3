@@ -58,7 +58,6 @@ export const jobsRouter = router({
 
   /**
    * Job Rápido - Envio de créditos para múltiplos destinatários
-   * Cada conta envia 500 créditos. Cria jobs independentes por destinatário.
    */
   quickJob: protectedProcedure
     .input(z.object({
@@ -87,7 +86,77 @@ export const jobsRouter = router({
       return { success: true };
     }),
 
+  /**
+   * Resume - Retoma um job pausado
+   */
+  resume: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database não disponível");
+
+      const result = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, input.id)).limit(1);
+      if (result.length === 0) throw new Error(`Job ${input.id} não encontrado`);
+
+      const currentStatus = result[0].status;
+      if (currentStatus !== "paused") {
+        throw new Error(`Job ${input.id} não está pausado (status atual: ${currentStatus})`);
+      }
+
+      await orchestrator.resumeJob(input.id);
+      return { success: true };
+    }),
+
   getActive: protectedProcedure.query(async () => {
     return { activeJobIds: orchestrator.getActiveJobs() };
+  }),
+
+  /**
+   * Detecta e corrige jobs travados (status "running" sem progresso por mais de 30 min)
+   * Pode ser chamado manualmente pelo admin ou pelo cron interno
+   */
+  fixStaleJobs: protectedProcedure.mutation(async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database não disponível");
+
+    const STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutos
+    const cutoffDate = new Date(Date.now() - STALE_THRESHOLD_MS);
+
+    // Busca jobs com status "running" que foram atualizados há mais de 30 minutos
+    // e que NÃO estão na lista de jobs ativos em memória
+    const activeJobIds = orchestrator.getActiveJobs();
+
+    const runningJobs = await db
+      .select({ id: jobs.id, updatedAt: jobs.updatedAt, startedAt: jobs.startedAt })
+      .from(jobs)
+      .where(eq(jobs.status, "running"));
+
+    const staleJobs = runningJobs.filter((job) => {
+      const isActiveInMemory = activeJobIds.includes(job.id);
+      if (isActiveInMemory) return false; // Job está rodando normalmente
+
+      const lastActivity = job.updatedAt || job.startedAt;
+      if (!lastActivity) return true;
+      return lastActivity < cutoffDate;
+    });
+
+    if (staleJobs.length === 0) {
+      return { fixed: 0, message: "Nenhum job travado encontrado" };
+    }
+
+    // Marcar jobs travados como failed
+    for (const staleJob of staleJobs) {
+      await db.update(jobs).set({
+        status: "failed",
+        error: "Job travado detectado automaticamente (sem progresso por 30+ minutos)",
+        completedAt: new Date(),
+      }).where(eq(jobs.id, staleJob.id));
+    }
+
+    return {
+      fixed: staleJobs.length,
+      message: `${staleJobs.length} job(s) travado(s) marcado(s) como falha`,
+      jobIds: staleJobs.map((j) => j.id),
+    };
   }),
 });

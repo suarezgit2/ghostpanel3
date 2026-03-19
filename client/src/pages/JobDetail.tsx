@@ -4,7 +4,7 @@
 
 import { useParams, Link } from "wouter";
 import { motion } from "framer-motion";
-import { ArrowLeft, RefreshCw, Copy, StopCircle } from "lucide-react";
+import { ArrowLeft, RefreshCw, Copy, StopCircle, PauseCircle, PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import StatusBadge from "@/components/StatusBadge";
 import { trpc } from "@/lib/trpc";
@@ -26,6 +26,17 @@ export default function JobDetail() {
 
   const cancelMutation = trpc.jobs.cancel.useMutation({
     onSuccess: () => { toast.success("Job cancelado"); refetchAll(); },
+    onError: (err) => toast.error(`Erro ao cancelar: ${err.message}`),
+  });
+
+  const pauseMutation = trpc.jobs.pause.useMutation({
+    onSuccess: () => { toast.success("Job pausado"); refetchAll(); },
+    onError: (err) => toast.error(`Erro ao pausar: ${err.message}`),
+  });
+
+  const resumeMutation = trpc.jobs.resume.useMutation({
+    onSuccess: () => { toast.success("Job retomado"); refetchAll(); },
+    onError: (err) => toast.error(`Erro ao retomar: ${err.message}`),
   });
 
   const accounts = jobAccounts?.accounts ?? [];
@@ -93,7 +104,37 @@ export default function JobDetail() {
             Copiar Contas
           </Button>
           {job.status === "running" && (
-            <Button variant="destructive" size="sm" onClick={() => cancelMutation.mutate({ id: job.id })} className="gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => pauseMutation.mutate({ id: job.id })}
+              disabled={pauseMutation.isPending}
+              className="gap-2"
+            >
+              <PauseCircle className="w-3.5 h-3.5" />
+              Pausar
+            </Button>
+          )}
+          {job.status === "paused" && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => resumeMutation.mutate({ id: job.id })}
+              disabled={resumeMutation.isPending}
+              className="gap-2 text-green-600 border-green-600 hover:bg-green-50 dark:hover:bg-green-950"
+            >
+              <PlayCircle className="w-3.5 h-3.5" />
+              Retomar
+            </Button>
+          )}
+          {(job.status === "running" || job.status === "paused") && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => cancelMutation.mutate({ id: job.id })}
+              disabled={cancelMutation.isPending}
+              className="gap-2"
+            >
               <StopCircle className="w-3.5 h-3.5" />
               Cancelar
             </Button>
