@@ -634,7 +634,6 @@ class SmsService {
 
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
-      await logger.error("sms", `Provedor #${providerId} falhou: ${error.message}`, {}, opts.jobId);
 
       // Cancelar número se foi alugado
       if (numberData) {
@@ -645,7 +644,23 @@ class SmsService {
         }
       }
 
-      this.providerHealth.recordFailure(providerId);
+      // IMPORTANT: Distinguish between SMS provider errors and target API errors.
+      // Errors from manus.im (permission_denied, invalid_argument, etc.) are NOT
+      // the SMS provider's fault — the number was delivered correctly, but the
+      // target rejected it. Don't penalize the provider for these.
+      const isTargetApiError = error.message.includes("RPC ") ||
+        error.message.includes("permission_denied") ||
+        error.message.includes("invalid_argument") ||
+        error.message.includes("Failed to send the code") ||
+        error.message.includes("resource_exhausted");
+
+      if (isTargetApiError) {
+        await logger.warn("sms", `Provedor #${providerId}: número rejeitado pela API do alvo (NÃO penalizado): ${error.message}`, {}, opts.jobId);
+        // Don't record failure — the provider did its job, the target rejected the number
+      } else {
+        await logger.error("sms", `Provedor #${providerId} falhou: ${error.message}`, {}, opts.jobId);
+        this.providerHealth.recordFailure(providerId);
+      }
 
       // Erros fatais: não adianta tentar outros provedores
       if (error.message.includes("Saldo insuficiente") || error.message.includes("API key inválida")) {

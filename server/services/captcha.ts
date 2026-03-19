@@ -6,6 +6,9 @@
  *   captcha_provider = "capsolver" | "2captcha"  (default: capsolver)
  *   capsolver_api_key = "CAP-xxx"
  *   twocaptcha_api_key = "xxx"
+ *
+ * FIX (v5.3): Safe JSON parsing — quando a API retorna HTML (502/503 temporário)
+ * em vez de JSON, o erro é tratado graciosamente com retry em vez de crash.
  */
 
 import { getSetting } from "../utils/settings";
@@ -22,6 +25,27 @@ interface ProxyInfo {
   port: number;
   username?: string | null;
   password?: string | null;
+}
+
+/**
+ * Safely parse a fetch response as JSON.
+ * If the response is HTML (e.g., 502/503 gateway error), throws a descriptive error
+ * instead of a cryptic "Unexpected token '<'" SyntaxError.
+ */
+async function safeJsonParse(resp: Response, context: string): Promise<Record<string, unknown>> {
+  const text = await resp.text();
+
+  if (!resp.ok && text.trimStart().startsWith("<!")) {
+    throw new Error(`${context}: API retornou HTTP ${resp.status} (HTML) — provável erro temporário do servidor`);
+  }
+
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    // Truncar a resposta para log legível
+    const preview = text.substring(0, 150).replace(/\n/g, " ");
+    throw new Error(`${context}: resposta não-JSON (HTTP ${resp.status}): ${preview}`);
+  }
 }
 
 class CaptchaService {
@@ -102,7 +126,7 @@ class CaptchaService {
       body: JSON.stringify({ clientKey: this.capsolverKey, task: taskPayload }),
     });
 
-    const createData = (await createResp.json()) as Record<string, unknown>;
+    const createData = await safeJsonParse(createResp, "CapSolver createTask");
 
     if (createData.errorId !== 0) {
       throw new Error(`CapSolver createTask: ${createData.errorCode} - ${createData.errorDescription}`);
@@ -118,29 +142,50 @@ class CaptchaService {
     const taskId = createData.taskId as string;
     await logger.info("captcha", `CapSolver task criada: ${taskId}, aguardando...`, {}, jobId);
 
+    let consecutiveApiErrors = 0;
+
     for (let attempt = 0; attempt < 60; attempt++) {
       await sleep(2000);
 
-      const resultResp = await fetch(`${CAPSOLVER_API}/getTaskResult`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientKey: this.capsolverKey, taskId }),
-      });
+      try {
+        const resultResp = await fetch(`${CAPSOLVER_API}/getTaskResult`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientKey: this.capsolverKey, taskId }),
+        });
 
-      const resultData = (await resultResp.json()) as Record<string, unknown>;
+        const resultData = await safeJsonParse(resultResp, "CapSolver getTaskResult");
+        consecutiveApiErrors = 0; // Reset on success
 
-      if (resultData.errorId !== 0) {
-        throw new Error(`CapSolver getTaskResult: ${resultData.errorCode} - ${resultData.errorDescription}`);
-      }
+        if (resultData.errorId !== 0) {
+          throw new Error(`CapSolver getTaskResult: ${resultData.errorCode} - ${resultData.errorDescription}`);
+        }
 
-      const sol = resultData.solution as Record<string, unknown> | undefined;
-      if (resultData.status === "ready" && sol?.token) {
-        await logger.info("captcha", `Turnstile resolvido em ${(attempt + 1) * 2}s (CapSolver)`, {}, jobId);
-        return sol.token as string;
-      }
+        const sol = resultData.solution as Record<string, unknown> | undefined;
+        if (resultData.status === "ready" && sol?.token) {
+          await logger.info("captcha", `Turnstile resolvido em ${(attempt + 1) * 2}s (CapSolver)`, {}, jobId);
+          return sol.token as string;
+        }
 
-      if (resultData.status === "failed") {
-        throw new Error("CapSolver task failed");
+        if (resultData.status === "failed") {
+          throw new Error("CapSolver task failed");
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+
+        // Se é erro de API temporário (HTML/502), tolerar até 3 consecutivos
+        if (msg.includes("HTML") || msg.includes("não-JSON")) {
+          consecutiveApiErrors++;
+          await logger.warn("captcha", `CapSolver API temporariamente indisponível (${consecutiveApiErrors}/3): ${msg}`, {}, jobId);
+          if (consecutiveApiErrors >= 3) {
+            throw new Error(`CapSolver API indisponível após 3 tentativas consecutivas: ${msg}`);
+          }
+          await sleep(3000); // Extra wait before retry
+          continue;
+        }
+
+        // Outros erros (task failed, error code) — propagar
+        throw err;
       }
     }
 
@@ -181,7 +226,7 @@ class CaptchaService {
       body: JSON.stringify({ clientKey: this.twocaptchaKey, task: taskPayload }),
     });
 
-    const createData = (await createResp.json()) as Record<string, unknown>;
+    const createData = await safeJsonParse(createResp, "2Captcha createTask");
 
     if (createData.errorId !== 0) {
       throw new Error(`2Captcha createTask: ${createData.errorCode} - ${createData.errorDescription}`);
@@ -193,27 +238,48 @@ class CaptchaService {
     // 2Captcha recomenda esperar 5s antes do primeiro polling
     await sleep(5000);
 
+    let consecutiveApiErrors = 0;
+
     for (let attempt = 0; attempt < 60; attempt++) {
-      const resultResp = await fetch(`${TWOCAPTCHA_API}/getTaskResult`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientKey: this.twocaptchaKey, taskId }),
-      });
+      try {
+        const resultResp = await fetch(`${TWOCAPTCHA_API}/getTaskResult`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientKey: this.twocaptchaKey, taskId }),
+        });
 
-      const resultData = (await resultResp.json()) as Record<string, unknown>;
+        const resultData = await safeJsonParse(resultResp, "2Captcha getTaskResult");
+        consecutiveApiErrors = 0; // Reset on success
 
-      if (resultData.errorId !== 0) {
-        throw new Error(`2Captcha getTaskResult: ${resultData.errorCode} - ${resultData.errorDescription}`);
-      }
-
-      if (resultData.status === "ready") {
-        const sol = resultData.solution as Record<string, unknown>;
-        const token = sol?.token as string;
-        if (token) {
-          const totalTime = 5 + (attempt + 1) * 3;
-          await logger.info("captcha", `Turnstile resolvido em ~${totalTime}s (2Captcha)`, {}, jobId);
-          return token;
+        if (resultData.errorId !== 0) {
+          throw new Error(`2Captcha getTaskResult: ${resultData.errorCode} - ${resultData.errorDescription}`);
         }
+
+        if (resultData.status === "ready") {
+          const sol = resultData.solution as Record<string, unknown>;
+          const token = sol?.token as string;
+          if (token) {
+            const totalTime = 5 + (attempt + 1) * 3;
+            await logger.info("captcha", `Turnstile resolvido em ~${totalTime}s (2Captcha)`, {}, jobId);
+            return token;
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+
+        // Se é erro de API temporário (HTML/502), tolerar até 3 consecutivos
+        if (msg.includes("HTML") || msg.includes("não-JSON")) {
+          consecutiveApiErrors++;
+          await logger.warn("captcha", `2Captcha API temporariamente indisponível (${consecutiveApiErrors}/3): ${msg}`, {}, jobId);
+          if (consecutiveApiErrors >= 3) {
+            throw new Error(`2Captcha API indisponível após 3 tentativas consecutivas: ${msg}`);
+          }
+          await sleep(3000); // Extra wait before retry
+          continue;
+        }
+
+        // Outros erros — propagar
+        throw err;
       }
 
       // 2Captcha recomenda polling a cada 3-5s
@@ -245,7 +311,7 @@ class CaptchaService {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ clientKey: this.capsolverKey }),
       });
-      const data = (await resp.json()) as Record<string, unknown>;
+      const data = await safeJsonParse(resp, "CapSolver getBalance");
       return (data.balance as number) || 0;
     } catch {
       return 0;
@@ -261,7 +327,7 @@ class CaptchaService {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ clientKey: this.twocaptchaKey }),
       });
-      const data = (await resp.json()) as Record<string, unknown>;
+      const data = await safeJsonParse(resp, "2Captcha getBalance");
       return (data.balance as number) || 0;
     } catch {
       return 0;

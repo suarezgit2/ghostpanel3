@@ -301,6 +301,7 @@ export class ManusProvider {
       // Simulates visiting: https://manus.im/invitation?code=XXX&type=signUp
       let inviteAccepted = false;
       let inviteFreeCredits = 0;
+      let lastInviteError: string | undefined;
       const rawInviteCode = await getSetting("invite_code");
       const inviteCode = rawInviteCode ? extractInviteCode(rawInviteCode) : "";
       const MAX_INVITE_RETRIES = 3;
@@ -355,6 +356,7 @@ export class ManusProvider {
 
           } catch (inviteErr) {
             const inviteErrMsg = inviteErr instanceof Error ? inviteErr.message : String(inviteErr);
+            lastInviteError = inviteErrMsg;
             await logger.warn("step_8_invite", `[Tentativa ${attempt}] Falha: ${inviteErrMsg}`, {
               email, inviteCode: inviteCode.trim(), attempt,
             }, jobId);
@@ -368,13 +370,24 @@ export class ManusProvider {
         }
 
         if (!inviteAccepted) {
-          await logger.warn("step_8_invite", `Convite não confirmado após ${MAX_INVITE_RETRIES} tentativas. freeCredits=${inviteFreeCredits}`, {
-            email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
-          }, jobId);
+          // Distinguish between invalid code (permanent) and temporary failures
+          const isInvalidCode = lastInviteError?.includes("invalid_argument") ||
+            lastInviteError?.includes("invalid invitation code");
+
+          if (isInvalidCode) {
+            await logger.error("step_8_invite", `Código de convite INVÁLIDO: "${inviteCode.trim()}" — verifique se o código está correto e não expirou`, {
+              email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
+            }, jobId);
+          } else {
+            await logger.warn("step_8_invite", `Convite não confirmado após ${MAX_INVITE_RETRIES} tentativas. freeCredits=${inviteFreeCredits}`, {
+              email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
+            }, jobId);
+          }
         }
       }
 
-      // SUCCESS
+      // SUCCESS — account was created and phone verified.
+      // inviteAccepted=false means invite failed but account is still usable.
       return {
         email,
         password,
