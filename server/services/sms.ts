@@ -508,23 +508,26 @@ class SmsService {
    *      encontra novos provedores (para dar chance aos descobertos).
    */
   async getCodeWithRetry(options: RetryOptions = {}): Promise<RetryResult> {
-    // Always reload config from DB to reflect any changes made in Settings
+    // Reload config from DB and take a LOCAL SNAPSHOT to avoid cross-job interference.
+    // Each concurrent job works with its own copy of the config.
     await this.reloadConfig();
+    const configSnapshot = { ...this.config! };
+    configSnapshot.providerIds = [...this.config!.providerIds]; // deep copy array
 
-    const maxRetries = options.maxRetries ?? this.config!.maxRetries;
-    const waitTimeMs = options.waitTimeMs ?? this.config!.waitTimeMs;
+    const maxRetries = options.maxRetries ?? configSnapshot.maxRetries;
+    const waitTimeMs = options.waitTimeMs ?? configSnapshot.waitTimeMs;
     const onNumberRented = options.onNumberRented || null;
     const jobId = options.jobId;
 
-    const country = options.country || this.config!.country;
-    const service = options.service || this.config!.service;
-    const maxPrice = options.maxPrice || this.config!.maxPrice;
+    const country = options.country || configSnapshot.country;
+    const service = options.service || configSnapshot.service;
+    const maxPrice = options.maxPrice || configSnapshot.maxPrice;
 
     // 1. Montar fila de provedores
-    let configuredProviders = options.providerIds || this.config!.providerIds;
+    let configuredProviders = options.providerIds || [...configSnapshot.providerIds];
 
     // If Auto-Discover is ON, discover providers UPFRONT (replaces manual list)
-    if (this.config!.autoDiscover && !options.providerIds) {
+    if (configSnapshot.autoDiscover && !options.providerIds) {
       await logger.info("sms", `Auto-Discover ATIVO — buscando provedores via getPricesV3 (país=${country}, serviço=${service}, maxPrice=$${maxPrice})...`, {}, jobId);
       try {
         const discovered = await this.discoverProviders(country, service, maxPrice);
@@ -552,7 +555,7 @@ class SmsService {
       if (toRemove.length > 0) {
         configuredProviders = configuredProviders.filter(id => !toRemove.includes(id));
         // Only update saved list if NOT using auto-discover (otherwise the list is ephemeral)
-        if (!this.config!.autoDiscover) {
+        if (!configSnapshot.autoDiscover) {
           const newList = configuredProviders.join(",");
           await setSetting("sms_provider_ids", newList);
         }
@@ -598,17 +601,22 @@ class SmsService {
       if (result.success) {
         totalCost += result.cost;
 
-        // Se o provedor veio do Auto-Discover e não está na lista salva, auto-adicioná-lo
-        if (!options.providerIds && !this.config!.providerIds.includes(currentProviderId)) {
-          const updatedList = [...this.config!.providerIds, currentProviderId];
-          const newListStr = updatedList.join(",");
-          await setSetting("sms_provider_ids", newListStr);
-          this.config!.providerIds = updatedList;
-          await logger.info("sms",
-            `Provedor #${currentProviderId} teve SUCESSO — adicionado permanentemente à lista. ` +
-            `Lista atualizada: [${newListStr}]`,
-            { providerId: currentProviderId, newList: updatedList }, jobId
-          );
+        // Se o provedor veio do Auto-Discover e não está na lista salva, auto-adicioná-lo.
+        // Thread-safe: re-read current list from DB before modifying to avoid overwriting
+        // changes made by other concurrent jobs.
+        if (!options.providerIds) {
+          const currentSavedList = ((await getSetting("sms_provider_ids")) || "")
+            .split(",").map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+          if (!currentSavedList.includes(currentProviderId)) {
+            const updatedList = [...currentSavedList, currentProviderId];
+            const newListStr = updatedList.join(",");
+            await setSetting("sms_provider_ids", newListStr);
+            await logger.info("sms",
+              `Provedor #${currentProviderId} teve SUCESSO — adicionado permanentemente à lista. ` +
+              `Lista atualizada: [${newListStr}]`,
+              { providerId: currentProviderId, newList: updatedList }, jobId
+            );
+          }
         }
 
         return {
@@ -624,7 +632,7 @@ class SmsService {
       lastError = result.error || null;
 
       // Fallback: se Auto-Discover estava OFF, todos da lista falharam, e ainda temos tentativas
-      if (queueIndex === providerQueue.length - 1 && attempt < effectiveMaxRetries && !usedFallbackDiscover && !this.config!.autoDiscover) {
+      if (queueIndex === providerQueue.length - 1 && attempt < effectiveMaxRetries && !usedFallbackDiscover && !configSnapshot.autoDiscover) {
         usedFallbackDiscover = true;
         await logger.info("sms", `Todos os ${providerQueue.length} provedores da lista falharam. Tentando Auto-Discover como fallback...`, {}, jobId);
 
@@ -652,7 +660,7 @@ class SmsService {
 
       // Delay entre tentativas
       if (attempt < effectiveMaxRetries && queueIndex < providerQueue.length - 1) {
-        const delay = this.config!.retryDelayMin + Math.random() * (this.config!.retryDelayMax - this.config!.retryDelayMin);
+        const delay = configSnapshot.retryDelayMin + Math.random() * (configSnapshot.retryDelayMax - configSnapshot.retryDelayMin);
         await sleep(delay);
       }
     }
