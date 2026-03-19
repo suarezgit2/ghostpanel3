@@ -66,25 +66,46 @@ interface CreateAccountResult {
  *
  * Reverse-engineered from manus.im frontend (chunk 40513-27240ebdd145eda3.js):
  *   authCommandCmd: {
- *     ...e,
+ *     ...e,                          // e = f.$() from module 66888
  *     locale: translationManager.locale,
  *     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
  *     tzOffset: String(new Date().getTimezoneOffset()),
- *     firstEntry: getFirstEntry(),  // URL or undefined
- *     fbp: cookies.get("_fbp")      // Facebook Pixel cookie
+ *     firstEntry: getFirstEntry(),   // URL or undefined
+ *     fbp: cookies.get("_fbp")       // Facebook Pixel cookie
  *   }
  *
- * IMPORTANT FIXES (v5.1):
+ * The spread object e (module 66888, function u, exported as $) returns:
+ *   {
+ *     firstFromPlatform: "web",      // always "web" for desktop browser
+ *     utmSource: undefined,          // from localStorage
+ *     utmCampaign: undefined,
+ *     utmContent: undefined,
+ *     utmMedium: undefined,
+ *     refer: undefined,              // first_referral from localStorage
+ *   }
+ *
+ * FIXES (v5.1):
  * - Field name is "tz" NOT "timezone" (confirmed from source code)
  * - firstEntry is a full URL or undefined (NOT "direct"/"google")
  * - fbp is generated when firstEntry is a Facebook URL
  * - When firstEntry is undefined, the field is NOT sent (matches real behavior)
+ *
+ * FIX (v5.2):
+ * - Added firstFromPlatform: "web" (from module 66888 spread — was MISSING)
  */
 function buildAuthCommandCmd(fingerprint: BrowserProfile): Record<string, unknown> {
+  // Fields from the spread object f.$() (module 66888, function u)
+  // These come FIRST because the explicit fields below override them via JS spread semantics
   const cmd: Record<string, unknown> = {
+    firstFromPlatform: "web",                          // FIXED v5.2: was MISSING — always "web" for desktop
+    // utmSource, utmCampaign, utmContent, utmMedium, refer:
+    // These are undefined for most users (no UTM params, no referral).
+    // undefined fields are omitted from JSON.stringify, matching real behavior.
+
+    // Explicit fields (override spread):
     locale: fingerprint.locale,
-    tz: fingerprint.timezone,                        // FIXED: was "timezone", real frontend uses "tz"
-    tzOffset: String(fingerprint.timezoneOffset),     // DST-aware real offset
+    tz: fingerprint.timezone,                          // FIXED v5.1: was "timezone", real uses "tz"
+    tzOffset: String(fingerprint.timezoneOffset),       // DST-aware real offset
   };
 
   // firstEntry: only include if defined (real frontend omits it for direct access)
