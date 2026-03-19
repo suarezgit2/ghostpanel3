@@ -12,6 +12,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { ENV } from "./env";
 import { autoSeedDefaults } from "../utils/autoSeed";
+import { proxyService } from "../services/proxy";
 import { getDb } from "../db";
 import { jobs } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
@@ -146,6 +147,13 @@ async function startServer() {
       await autoSeedDefaults();
     } catch (err) {
       console.warn("[AutoSeed] Falhou (não-crítico):", err);
+    }
+
+    // Recovery de proxies usados: recoloca na fila de replace após reinicialização
+    try {
+      await proxyService.recoverUsedProxies();
+    } catch (err) {
+      console.warn("[ProxyRecovery] Falhou (não-crítico):", err);
     }
 
     // Iniciar monitor de jobs travados

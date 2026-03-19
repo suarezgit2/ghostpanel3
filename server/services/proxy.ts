@@ -35,6 +35,43 @@ class ProxyService {
     this.apiKey = (await getSetting("webshare_api_key")) || "";
   }
 
+  /**
+   * Recovery on boot: verifica o banco por proxies com enabled=false (usados)
+   * que não estão na fila de replace e os coloca na fila automaticamente.
+   * Chamado uma vez na inicialização do servidor.
+   */
+  async recoverUsedProxies(): Promise<void> {
+    try {
+      const db = await getDb();
+      if (!db) return;
+
+      // Busca todos os proxies marcados como usados (enabled=false)
+      const usedProxies = await db
+        .select({ host: proxies.host })
+        .from(proxies)
+        .where(eq(proxies.enabled, false));
+
+      if (usedProxies.length === 0) return;
+
+      const ipsToRecover = usedProxies
+        .map(p => p.host)
+        .filter(ip => !this.replaceQueue.includes(ip));
+
+      if (ipsToRecover.length === 0) return;
+
+      console.log(`[ProxyService] Recovery: ${ipsToRecover.length} proxy(ies) usados encontrados no banco, adicionando à fila de replace...`);
+
+      this.replaceQueue.push(...ipsToRecover);
+
+      // Inicia o worker se não estiver rodando
+      if (!this.replaceWorkerRunning) {
+        this.startReplaceWorker();
+      }
+    } catch (err) {
+      console.warn("[ProxyService] Erro no recovery de proxies usados:", err);
+    }
+  }
+
   private async ensureApiKey(): Promise<void> {
     if (!this.apiKey) await this.init();
     if (!this.apiKey) throw new Error("Webshare API key não configurada");
