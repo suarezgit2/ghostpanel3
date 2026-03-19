@@ -298,16 +298,25 @@ class SmsService {
     const priceLimit = parseFloat(maxPrice);
     const data = await this.getProviders(country, service);
 
+    // getPricesV3 response structure: { [country]: { [service]: { [providerId]: { price, count, provider_id } } } }
+    // NOTE: The field is "price" (number), NOT "cost" (string) — this was the bug.
     const providers: Array<{ id: number; cost: number; count: number }> = [];
-    const countryData = data?.[country] as Record<string, Record<string, { cost: string; count: string }>> | undefined;
-    if (!countryData) return [];
+    const countryData = data?.[country] as Record<string, Record<string, { price: number; cost?: string; count: number; provider_id?: number }>> | undefined;
+    if (!countryData) {
+      await logger.warn("sms", `Auto-Discover: país "${country}" não encontrado na resposta do getPricesV3`, {});
+      return [];
+    }
 
     const serviceData = countryData[service];
-    if (!serviceData) return [];
+    if (!serviceData) {
+      await logger.warn("sms", `Auto-Discover: serviço "${service}" não encontrado para o país "${country}" na resposta do getPricesV3`, {});
+      return [];
+    }
 
     for (const [providerId, info] of Object.entries(serviceData)) {
-      const cost = parseFloat(info.cost);
-      const count = parseInt(info.count) || 0;
+      // getPricesV3 uses "price" (number), getPricesV2 uses "cost" (string) — support both
+      const cost = typeof info.price === "number" ? info.price : parseFloat(info.cost || "999");
+      const count = typeof info.count === "number" ? info.count : (parseInt(String(info.count)) || 0);
       if (cost <= priceLimit && count > 0) {
         providers.push({ id: parseInt(providerId), cost, count });
       }
@@ -588,23 +597,50 @@ class SmsService {
       // Se é o último provedor da fila E ainda temos tentativas, ativar Auto-Discover
       if (queueIndex === providerQueue.length - 1 && attempt < maxRetries && !usedAutoDiscover) {
         usedAutoDiscover = true;
-        await logger.info("sms", `Todos os ${providerQueue.length} provedores da lista falharam. Ativando Auto-Discover...`, {}, jobId);
 
-        try {
-          const discovered = await this.discoverProviders(country, service, maxPrice);
-          // Filtrar provedores que já tentamos
-          const newProviders = discovered.filter(id => !providerQueue.includes(id));
+        if (!this.config!.autoDiscover) {
+          await logger.warn("sms",
+            `Todos os ${providerQueue.length} provedores da lista falharam e Auto-Discover está DESATIVADO. ` +
+            `Ative "sms_auto_discover" nas configurações para buscar provedores automaticamente.`,
+            {}, jobId
+          );
+        } else {
+          await logger.info("sms", `Todos os ${providerQueue.length} provedores da lista falharam. Ativando Auto-Discover...`, {}, jobId);
 
-          if (newProviders.length > 0) {
-            await logger.info("sms", `Auto-Discover encontrou ${newProviders.length} novos provedores: [${newProviders.join(", ")}]`, {}, jobId);
-            // Adicionar ao final da fila
-            providerQueue.push(...newProviders);
-          } else {
-            await logger.warn("sms", `Auto-Discover não encontrou provedores novos além dos ${providerQueue.length} já tentados`, {}, jobId);
+          try {
+            const discovered = await this.discoverProviders(country, service, maxPrice);
+            // Filtrar provedores que já tentamos
+            const newProviders = discovered.filter(id => !providerQueue.includes(id));
+
+            if (newProviders.length > 0) {
+              await logger.info("sms",
+                `Auto-Discover encontrou ${newProviders.length} novos provedores dentro do limite de $${maxPrice}: [${newProviders.join(", ")}]`,
+                {}, jobId
+              );
+              // Adicionar ao final da fila
+              providerQueue.push(...newProviders);
+            } else {
+              // Log all discovered providers (even expensive ones) to help diagnose
+              const allDiscovered = await this.discoverProviders(country, service, "999").catch(() => []);
+              const expensive = allDiscovered.filter(id => !providerQueue.includes(id));
+              if (expensive.length > 0) {
+                await logger.warn("sms",
+                  `Auto-Discover: nenhum provedor novo dentro do limite de $${maxPrice}. ` +
+                  `Há ${expensive.length} provedor(es) disponíveis acima do limite: [${expensive.join(", ")}]. ` +
+                  `Considere aumentar o sms_max_price.`,
+                  {}, jobId
+                );
+              } else {
+                await logger.warn("sms",
+                  `Auto-Discover não encontrou provedores novos além dos ${providerQueue.length} já tentados`,
+                  {}, jobId
+                );
+              }
+            }
+          } catch (discoverErr) {
+            const msg = discoverErr instanceof Error ? discoverErr.message : String(discoverErr);
+            await logger.warn("sms", `Auto-Discover falhou: ${msg}`, {}, jobId);
           }
-        } catch (discoverErr) {
-          const msg = discoverErr instanceof Error ? discoverErr.message : String(discoverErr);
-          await logger.warn("sms", `Auto-Discover falhou: ${msg}`, {}, jobId);
         }
       }
 
