@@ -12,6 +12,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { ENV } from "./env";
 import { autoSeedDefaults } from "../utils/autoSeed";
+import { runMigrations } from "../db";
 import { proxyService } from "../services/proxy";
 import { getDb } from "../db";
 import { jobs } from "../../drizzle/schema";
@@ -141,6 +142,13 @@ async function startServer() {
 
   server.listen(port, async () => {
     console.log(`Server running on http://localhost:${port}/`);
+
+    // Aplicar migrations pendentes antes de qualquer outra operação no banco
+    try {
+      await runMigrations();
+    } catch (err) {
+      console.warn("[Migrations] Falhou (não-crítico):", err);
+    }
 
     // Auto-seed defaults on first boot (provider + settings)
     try {

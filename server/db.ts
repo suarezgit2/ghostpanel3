@@ -1,7 +1,13 @@
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import { migrate } from "drizzle-orm/mysql2/migrator";
+import mysql from "mysql2/promise";
 import { InsertUser, users } from "../drizzle/schema";
 import { ENV } from './_core/env';
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -16,6 +22,38 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+/**
+ * Roda todas as migrations pendentes usando drizzle-orm/mysql2/migrator.
+ * Deve ser chamado uma vez no startup do servidor, antes de qualquer query.
+ * É idempotente: migrations já aplicadas são ignoradas.
+ */
+export async function runMigrations(): Promise<void> {
+  if (!process.env.DATABASE_URL) {
+    console.warn("[Migrations] DATABASE_URL não definida, pulando migrations");
+    return;
+  }
+
+  let connection: mysql.Connection | null = null;
+  try {
+    connection = await mysql.createConnection(process.env.DATABASE_URL);
+    const db = drizzle(connection);
+
+    const migrationsFolder = path.resolve(__dirname, "../../drizzle");
+
+    console.log("[Migrations] Aplicando migrations pendentes...");
+    await migrate(db, { migrationsFolder });
+    console.log("[Migrations] Migrations aplicadas com sucesso");
+  } catch (error) {
+    console.error("[Migrations] Erro ao aplicar migrations:", error);
+    // Não lança o erro para não impedir o boot do servidor
+    // O servidor pode funcionar mesmo se uma migration falhar (ex: já aplicada manualmente)
+  } finally {
+    if (connection) {
+      await connection.end().catch(() => {});
+    }
+  }
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
