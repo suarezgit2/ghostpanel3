@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, inArray } from "drizzle-orm";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { jobs, accounts } from "../../drizzle/schema";
@@ -115,6 +115,58 @@ export const jobsRouter = router({
    * Detecta e corrige jobs travados (status "running" sem progresso por mais de 30 min)
    * Pode ser chamado manualmente pelo admin ou pelo cron interno
    */
+  /**
+   * Delete - Remove um job específico (apenas concluído, falhou ou cancelado)
+   */
+  delete: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database não disponível");
+
+      const result = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, input.id)).limit(1);
+      if (result.length === 0) throw new Error(`Job ${input.id} não encontrado`);
+
+      const { status } = result[0];
+      if (status === "running" || status === "paused") {
+        throw new Error(`Não é possível deletar um job com status "${status}". Cancele-o primeiro.`);
+      }
+
+      // Deleta contas associadas e depois o job
+      await db.delete(accounts).where(eq(accounts.jobId, input.id));
+      await db.delete(jobs).where(eq(jobs.id, input.id));
+
+      return { success: true };
+    }),
+
+  /**
+   * deleteCompleted - Remove todos os jobs com status completed, failed ou cancelled
+   */
+  deleteCompleted: protectedProcedure
+    .input(z.object({
+      statuses: z.array(z.enum(["completed", "failed", "cancelled"])).min(1).default(["completed", "failed", "cancelled"]),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database não disponível");
+
+      // Busca IDs dos jobs a deletar
+      const toDelete = await db
+        .select({ id: jobs.id })
+        .from(jobs)
+        .where(inArray(jobs.status, input.statuses));
+
+      if (toDelete.length === 0) return { deleted: 0 };
+
+      const ids = toDelete.map((j) => j.id);
+
+      // Deleta contas associadas e depois os jobs
+      await db.delete(accounts).where(inArray(accounts.jobId, ids));
+      await db.delete(jobs).where(inArray(jobs.id, ids));
+
+      return { deleted: ids.length };
+    }),
+
   fixStaleJobs: protectedProcedure.mutation(async () => {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");

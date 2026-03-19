@@ -235,7 +235,7 @@ export default function QuickJob() {
                     <Calculator className="w-4 h-4 text-primary" />
                     <span className="text-sm font-medium text-primary">Estimativa</span>
                   </div>
-                  <div className="grid grid-cols-3 gap-4 text-center">
+                  <div className="grid grid-cols-3 gap-2 text-center">
                     <div>
                       <p className="text-2xl font-bold text-foreground">{recipients.filter(r => r.inviteCode.trim()).length}</p>
                       <p className="text-xs text-muted-foreground">Destinatários</p>

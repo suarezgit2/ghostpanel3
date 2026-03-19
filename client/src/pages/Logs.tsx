@@ -67,7 +67,7 @@ export default function Logs() {
       </div>
 
       {/* Filters */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Filter className="w-4 h-4 text-muted-foreground" />
         <Select value={levelFilter} onValueChange={(v) => { setLevelFilter(v); setPage(1); }}>
           <SelectTrigger className="w-[160px] bg-ghost-surface-2 border-border">
@@ -88,7 +88,7 @@ export default function Logs() {
         animate={{ opacity: 1 }}
         className="rounded-xl border border-border bg-card overflow-hidden"
       >
-        <div className="divide-y divide-border font-mono text-xs">
+        <div className="divide-y divide-border font-mono text-xs overflow-x-auto">
           {logEntries.length === 0 ? (
             <div className="px-5 py-12 text-center text-sm text-muted-foreground font-sans">
               {isLoading ? "Carregando..." : "Nenhum log encontrado"}
@@ -100,22 +100,22 @@ export default function Logs() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ delay: i * 0.01 }}
-                className="flex items-start gap-3 px-4 py-2.5 hover:bg-ghost-surface-1/50 transition-colors"
+                className="flex items-start gap-2 px-4 py-2.5 hover:bg-ghost-surface-1/50 transition-colors min-w-0"
               >
-                <span className="text-muted-foreground shrink-0 w-[140px]">
+                <span className="hidden sm:block text-muted-foreground shrink-0 w-[130px]">
                   {log.createdAt ? new Date(log.createdAt).toLocaleString("pt-BR", { hour12: false }) : "—"}
                 </span>
                 <span className={cn(
-                  "shrink-0 w-[52px] px-1.5 py-0.5 rounded text-center font-semibold uppercase",
+                  "shrink-0 w-[46px] px-1 py-0.5 rounded text-center font-semibold uppercase text-[10px]",
                   LEVEL_BG[log.level] || "bg-muted",
                   LEVEL_COLORS[log.level] || "text-muted-foreground"
                 )}>
                   {log.level}
                 </span>
-                <span className="text-muted-foreground shrink-0 w-[140px] truncate">
+                <span className="hidden md:block text-muted-foreground shrink-0 w-[120px] truncate">
                   {log.source || "—"}
                 </span>
-                <span className="text-foreground flex-1 break-all">
+                <span className="text-foreground flex-1 break-all min-w-0">
                   {log.message}
                 </span>
               </motion.div>

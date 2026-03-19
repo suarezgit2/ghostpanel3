@@ -168,7 +168,7 @@ export default function Proxies() {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="rounded-xl border border-border bg-card p-4 flex items-center gap-3">
           <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-blue-500/10">
             <Globe className="w-4 h-4 text-blue-400" />
@@ -257,7 +257,7 @@ export default function Proxies() {
       )}
 
       {/* Filters + Search */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1 max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <Input
@@ -295,7 +295,8 @@ export default function Proxies() {
         animate={{ opacity: 1 }}
         className="rounded-xl border border-border bg-card overflow-hidden"
       >
-        <table className="w-full">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[600px]">
           <thead>
             <tr className="border-b border-border bg-ghost-surface-1">
               <th className="text-left px-5 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Host</th>
@@ -396,6 +397,7 @@ export default function Proxies() {
             )}
           </tbody>
         </table>
+        </div>
       </motion.div>
     </div>
   );

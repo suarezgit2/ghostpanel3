@@ -158,7 +158,7 @@ export default function JobDetail() {
             style={{ width: `${progress}%` }}
           />
         </div>
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div>
             <p className="text-xs text-muted-foreground">Quantidade</p>
             <p className="text-lg font-bold font-mono text-foreground">{job.totalAccounts}</p>

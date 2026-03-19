@@ -147,7 +147,7 @@ export default function CreateJob() {
             <Info className="w-4 h-4 text-ghost-info" />
             <h2 className="text-sm font-semibold text-foreground">Estimativa</h2>
           </div>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <p className="text-xs text-muted-foreground mb-1">Custo estimado</p>
               <p className="text-lg font-bold font-mono text-foreground">${estimatedCost}</p>

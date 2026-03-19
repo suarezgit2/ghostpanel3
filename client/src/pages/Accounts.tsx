@@ -98,7 +98,7 @@ export default function Accounts() {
       </div>
 
       {/* Filters */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(1); }}>
           <SelectTrigger className="w-[180px] bg-ghost-surface-2 border-border">
             <SelectValue placeholder="Filtrar status" />
@@ -118,7 +118,8 @@ export default function Accounts() {
         animate={{ opacity: 1 }}
         className="rounded-xl border border-border bg-card overflow-hidden"
       >
-        <table className="w-full">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[520px]">
           <thead>
             <tr className="border-b border-border bg-ghost-surface-1">
               <th className="text-left px-5 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Email</th>
@@ -185,6 +186,7 @@ export default function Accounts() {
             )}
           </tbody>
         </table>
+        </div>
       </motion.div>
 
       {/* Pagination */}

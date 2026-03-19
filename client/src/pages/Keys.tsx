@@ -112,7 +112,7 @@ export default function Keys() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { label: "Total", value: stats?.total ?? 0, color: "text-blue-400 bg-blue-400/10", icon: Key },
           { label: "Ativas", value: stats?.active ?? 0, color: "text-green-400 bg-green-400/10", icon: CheckCircle2 },
@@ -131,7 +131,7 @@ export default function Keys() {
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Generate Form */}
         <div className="col-span-1">
           <Card>
