@@ -52,6 +52,13 @@ export async function runMigrations(): Promise<void> {
         ADD COLUMN IF NOT EXISTS \`folderId\` int NULL
     `);
 
+    // Migration 0006: add 'partial' to jobs status enum
+    // MODIFY COLUMN is idempotent in MySQL/TiDB — safe to run multiple times
+    await db.execute(sql`
+      ALTER TABLE \`jobs\`
+        MODIFY COLUMN \`status\` ENUM('pending','running','paused','completed','partial','failed','cancelled') NOT NULL DEFAULT 'pending'
+    `);
+
     console.log("[Migrations] DDL aplicado com sucesso");
   } catch (error) {
     console.error("[Migrations] Erro ao aplicar DDL:", error);

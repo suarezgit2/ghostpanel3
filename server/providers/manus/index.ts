@@ -58,6 +58,8 @@ interface CreateAccountResult {
   token?: string;
   status: "active" | "failed";
   error?: string;
+  /** true se o convite foi confirmado com sucesso (freeCredits >= 1500) */
+  inviteAccepted?: boolean;
   metadata: Record<string, unknown>;
 }
 
@@ -394,6 +396,7 @@ export class ManusProvider {
         password,
         token: jwtToken,
         status: "active",
+        inviteAccepted,
         metadata: {
           userId: registerResult.userId,
           phoneNumber: smsResult.phoneNumber,

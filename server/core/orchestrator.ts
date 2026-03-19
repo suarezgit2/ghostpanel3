@@ -217,6 +217,7 @@ class Orchestrator {
     let currentBackoffMs = BACKOFF_CONFIG.initialBackoffMs;
 
     let successCount = 0;
+    let inviteConfirmedCount = 0; // contas criadas com convite confirmado
     let totalAttempts = 0;
     const maxAttempts = options.quantity * MAX_ATTEMPTS_MULTIPLIER;
 
@@ -296,11 +297,15 @@ class Orchestrator {
 
         if (result.status === "active") {
           successCount++;
+          if (result.inviteAccepted) {
+            inviteConfirmedCount++;
+          }
           await db.update(jobs).set({
             completedAccounts: sql`${jobs.completedAccounts} + 1`,
           }).where(eq(jobs.id, jobId));
           await logger.info("orchestrator",
-            `SUCESSO! Conta ${successCount}/${options.quantity} criada (tentativa ${totalAttempts})`,
+            `SUCESSO! Conta ${successCount}/${options.quantity} criada (tentativa ${totalAttempts})` +
+            (result.inviteAccepted === false ? " [convite NÃO confirmado]" : ""),
             { email }, jobId
           );
 
@@ -357,12 +362,22 @@ class Orchestrator {
 
     const fj = finalJob[0];
 
-    let finalStatus: "completed" | "failed";
+    let finalStatus: "completed" | "partial" | "failed";
     if (fj && fj.completed >= fj.total) {
-      finalStatus = "completed";
+      // Todas as contas foram criadas — mas verifica se o convite foi confirmado em todas
+      if (jobInviteCode && inviteConfirmedCount < successCount) {
+        finalStatus = "partial";
+        await logger.warn("orchestrator",
+          `Job ${jobId}: contas criadas mas convite não confirmado em todas ` +
+          `(${inviteConfirmedCount}/${successCount} com convite confirmado). Status: partial`,
+          {}, jobId
+        );
+      } else {
+        finalStatus = "completed";
+      }
     } else if (totalAttempts >= maxAttempts && successCount < options.quantity) {
       // Atingiu o limite de tentativas sem completar a meta
-      finalStatus = successCount > 0 ? "completed" : "failed";
+      finalStatus = successCount > 0 ? "partial" : "failed";
       await logger.warn("orchestrator",
         `Job ${jobId} atingiu o limite de ${maxAttempts} tentativas. ` +
         `Conseguiu ${successCount}/${options.quantity} contas.`,

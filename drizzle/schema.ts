@@ -55,7 +55,7 @@ export type InsertJobFolder = typeof jobFolders.$inferInsert;
 export const jobs = mysqlTable("jobs", {
   id: int("id").autoincrement().primaryKey(),
   providerId: int("providerId").notNull(),
-  status: mysqlEnum("status", ["pending", "running", "paused", "completed", "failed", "cancelled"]).default("pending").notNull(),
+  status: mysqlEnum("status", ["pending", "running", "paused", "completed", "partial", "failed", "cancelled"]).default("pending").notNull(),
   totalAccounts: int("totalAccounts").notNull(),
   completedAccounts: int("completedAccounts").default(0).notNull(),
   failedAccounts: int("failedAccounts").default(0).notNull(),

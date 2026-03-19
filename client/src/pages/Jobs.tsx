@@ -80,9 +80,11 @@ function getFolderStatus(folderJobs: { status: string }[]): string {
   if (statuses.some(s => s === "running")) return "running";
   if (statuses.some(s => s === "paused")) return "paused";
   if (statuses.every(s => s === "completed")) return "completed";
+  if (statuses.every(s => s === "partial")) return "partial";
   if (statuses.every(s => s === "failed")) return "failed";
   if (statuses.every(s => s === "cancelled")) return "cancelled";
-  if (statuses.some(s => s === "completed")) return "completed"; // partial
+  if (statuses.some(s => s === "partial")) return "partial";
+  if (statuses.some(s => s === "completed")) return "completed";
   return "pending";
 }
 
@@ -110,7 +112,7 @@ function JobRow({
   deletePending: boolean;
   indent?: boolean;
 }) {
-  const isDeletable = ["completed", "failed", "cancelled"].includes(job.status);
+  const isDeletable = ["completed", "partial", "failed", "cancelled"].includes(job.status);
   const label = (job.config as any)?.label;
 
   return (
@@ -221,7 +223,7 @@ function FolderRow({
   const folderStatus = getFolderStatus(folder.jobs);
   const totalAccounts = folder.jobs.reduce((s, j) => s + j.totalAccounts, 0);
   const completedAccounts = folder.jobs.reduce((s, j) => s + j.completedAccounts, 0);
-  const isDeletable = folder.jobs.every(j => ["completed", "failed", "cancelled"].includes(j.status));
+  const isDeletable = folder.jobs.every(j => ["completed", "partial", "failed", "cancelled"].includes(j.status));
 
   return (
     <>
@@ -340,7 +342,7 @@ export default function Jobs() {
   const standaloneJobs = (jobs ?? []).filter(j => !folderJobIds.has(j.id));
 
   const count = jobs?.length ?? 0;
-  const deletableCount = jobs?.filter((j) => ["completed", "failed", "cancelled"].includes(j.status)).length ?? 0;
+  const deletableCount = jobs?.filter((j) => ["completed", "partial", "failed", "cancelled"].includes(j.status)).length ?? 0;
   const folderCount = folders?.length ?? 0;
 
   const handleConfirm = () => {
@@ -414,7 +416,7 @@ export default function Jobs() {
               <DropdownMenuContent align="end" className="w-52">
                 <DropdownMenuItem
                   className="text-destructive focus:text-destructive focus:bg-destructive/10 gap-2"
-                  onClick={() => setConfirmDelete({ type: "bulk", statuses: ["completed", "failed", "cancelled"] })}
+                  onClick={() => setConfirmDelete({ type: "bulk", statuses: ["completed", "partial", "failed", "cancelled"] })}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   Deletar todos finalizados
@@ -425,6 +427,12 @@ export default function Jobs() {
                   onClick={() => setConfirmDelete({ type: "bulk", statuses: ["completed"] })}
                 >
                   Apenas concluídos
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="gap-2"
+                  onClick={() => setConfirmDelete({ type: "bulk", statuses: ["partial"] })}
+                >
+                  Apenas parciais
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="gap-2"
