@@ -61,7 +61,8 @@ export default function JobDetail() {
   });
 
   const accounts = jobAccounts?.accounts ?? [];
-  const logs = jobLogs?.logs ?? [];
+  // Backend retorna desc (mais recente primeiro) — invertemos para cronológico (mais antigo no topo)
+  const logs = [...(jobLogs?.logs ?? [])].reverse();
 
   const copyAccounts = async () => {
     const active = accounts.filter((a) => a.status === "active");
