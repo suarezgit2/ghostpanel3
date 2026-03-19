@@ -4,21 +4,30 @@
 
 import { useParams, Link } from "wouter";
 import { motion } from "framer-motion";
-import { ArrowLeft, RefreshCw, Copy, StopCircle, PauseCircle, PlayCircle } from "lucide-react";
+import { ArrowLeft, RefreshCw, Copy, StopCircle, PauseCircle, PlayCircle, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import StatusBadge from "@/components/StatusBadge";
 import { trpc } from "@/lib/trpc";
-import { formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow, format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
+import { useEffect, useRef } from "react";
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>();
   const jobId = parseInt(id || "0");
 
-  const { data: job, isLoading, refetch: refetchJob } = trpc.jobs.getById.useQuery({ id: jobId }, { enabled: jobId > 0 });
+  const { data: job, isLoading, refetch: refetchJob } = trpc.jobs.getById.useQuery({ id: jobId }, { enabled: jobId > 0, refetchInterval: job?.status === "running" ? 5000 : false });
   const { data: jobAccounts, refetch: refetchAccounts } = trpc.accounts.list.useQuery({ page: 1, limit: 100, jobId }, { enabled: jobId > 0 });
-  const { data: jobLogs, refetch: refetchLogs } = trpc.logs.list.useQuery({ page: 1, limit: 50, jobId }, { enabled: jobId > 0 });
+  const { data: jobLogs, refetch: refetchLogs } = trpc.logs.list.useQuery({ page: 1, limit: 100, jobId }, { enabled: jobId > 0, refetchInterval: job?.status === "running" ? 5000 : false });
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll para o último log quando novos logs chegam
+  useEffect(() => {
+    if (job?.status === "running") {
+      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [jobLogs?.logs?.length, job?.status]);
 
   const refetchAll = async () => {
     await Promise.all([refetchJob(), refetchAccounts(), refetchLogs()]);
@@ -216,31 +225,74 @@ export default function JobDetail() {
           transition={{ delay: 0.15 }}
           className="rounded-xl border border-border bg-card"
         >
-          <div className="px-5 py-4 border-b border-border">
+          <div className="px-5 py-4 border-b border-border flex items-center justify-between">
             <h2 className="text-sm font-semibold text-foreground">Logs ({logs.length})</h2>
+            {job?.status === "running" && (
+              <span className="flex items-center gap-1.5 text-[10px] text-ghost-info">
+                <span className="w-1.5 h-1.5 rounded-full bg-ghost-info animate-pulse" />
+                Atualizando automaticamente
+              </span>
+            )}
           </div>
-          <div className="divide-y divide-border max-h-[400px] overflow-y-auto font-mono text-xs">
+          <div className="divide-y divide-border max-h-[500px] overflow-y-auto font-mono text-xs">
             {logs.length === 0 ? (
               <div className="px-5 py-8 text-center text-sm text-muted-foreground font-sans">
                 Nenhum log registrado
               </div>
             ) : (
-              logs.map((log) => (
-                <div key={log.id} className="px-4 py-2 hover:bg-ghost-surface-1/50 transition-colors">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    <span className={`text-[10px] font-semibold uppercase ${
-                      log.level === "error" ? "text-ghost-error" :
-                      log.level === "warn" ? "text-ghost-warning" : "text-ghost-info"
-                    }`}>
-                      {log.level}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground">
-                      {log.source || "—"}
-                    </span>
-                  </div>
-                  <p className="text-muted-foreground">{log.message}</p>
-                </div>
-              ))
+              <>
+                {logs.map((log) => {
+                  const isWaiting = log.message.toLowerCase().includes("aguardando") ||
+                    log.message.toLowerCase().includes("polling") ||
+                    log.message.toLowerCase().includes("esperando") ||
+                    log.message.toLowerCase().includes("tentativa") ||
+                    log.message.toLowerCase().includes("task criada");
+                  const isSms = log.source === "sms" || log.source?.startsWith("step_6") || log.source?.startsWith("step_7");
+                  const isCaptcha = log.source === "captcha" || log.source === "turnstile";
+                  const isStep = log.source?.startsWith("step_");
+
+                  return (
+                    <div
+                      key={log.id}
+                      className={`px-4 py-2 hover:bg-ghost-surface-1/50 transition-colors ${
+                        isWaiting && job?.status === "running" ? "bg-ghost-surface-1/30" : ""
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className={`text-[10px] font-semibold uppercase ${
+                          log.level === "error" ? "text-ghost-error" :
+                          log.level === "warn" ? "text-ghost-warning" : "text-ghost-info"
+                        }`}>
+                          {log.level}
+                        </span>
+                        <span className={`text-[10px] font-medium ${
+                          isStep ? "text-primary/80" :
+                          isSms ? "text-yellow-500/80" :
+                          isCaptcha ? "text-purple-400/80" :
+                          "text-muted-foreground"
+                        }`}>
+                          {log.source || "—"}
+                        </span>
+                        {log.createdAt && (
+                          <span className="ml-auto text-[10px] text-muted-foreground/60 flex items-center gap-1">
+                            <Clock className="w-2.5 h-2.5" />
+                            {format(new Date(log.createdAt), "HH:mm:ss")}
+                          </span>
+                        )}
+                      </div>
+                      <p className={`text-muted-foreground leading-relaxed ${
+                        isWaiting && job?.status === "running" ? "text-foreground/70" : ""
+                      }`}>
+                        {isWaiting && job?.status === "running" && (
+                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse mr-1.5 mb-0.5" />
+                        )}
+                        {log.message}
+                      </p>
+                    </div>
+                  );
+                })}
+                <div ref={logsEndRef} />
+              </>
             )}
           </div>
         </motion.div>

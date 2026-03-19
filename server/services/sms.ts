@@ -13,7 +13,7 @@
  *   sms_retry_delay_min, sms_retry_delay_max, sms_cancel_wait, sms_auto_discover
  */
 
-import { getSetting } from "../utils/settings";
+import { getSetting, setSetting } from "../utils/settings";
 import { sleep, logger } from "../utils/helpers";
 
 const SMSBOWER_API = "https://smsbower.app/stubs/handler_api.php";
@@ -207,6 +207,26 @@ class ProviderHealthTracker {
       });
     }
     return result.sort((a, b) => (b.score as number) - (a.score as number));
+  }
+
+  /**
+   * Verifica se um provedor deve ser removido da lista por performance muito ruim.
+   * Threshold: 5+ falhas consecutivas E taxa de sucesso < 20% com pelo menos 5 tentativas.
+   */
+  shouldRemove(providerId: number): boolean {
+    const h = this.health.get(providerId);
+    if (!h) return false;
+    const total = h.successes + h.failures;
+    if (total < 5) return false; // Dados insuficientes para decidir
+    const successRate = h.successes / total;
+    return h.consecutiveFailures >= 5 && successRate < 0.20;
+  }
+
+  /**
+   * Retorna lista de provedores que devem ser removidos da lista configurada.
+   */
+  getProvidersToRemove(providerIds: number[]): number[] {
+    return providerIds.filter(id => this.shouldRemove(id));
   }
 
   /**
@@ -480,7 +500,8 @@ class SmsService {
    * Se maxRetries=10, tenta 7 da lista + até 3 do Auto-Discover.
    */
   async getCodeWithRetry(options: RetryOptions = {}): Promise<RetryResult> {
-    if (!this.config) await this.init();
+    // Always reload config from DB to reflect any changes made in Settings
+    await this.reloadConfig();
 
     const maxRetries = options.maxRetries ?? this.config!.maxRetries;
     const waitTimeMs = options.waitTimeMs ?? this.config!.waitTimeMs;
@@ -492,7 +513,24 @@ class SmsService {
     const maxPrice = options.maxPrice || this.config!.maxPrice;
 
     // 1. Montar fila de provedores, ordenada por health score
-    const configuredProviders = options.providerIds || this.config!.providerIds;
+    let configuredProviders = options.providerIds || this.config!.providerIds;
+
+    // Auto-remove provedores com performance muito ruim (5+ falhas consecutivas, <20% sucesso)
+    // Eles são removidos da lista salva no banco para poder ser redescobertos pelo Auto-Discover
+    if (!options.providerIds) { // Só auto-remove da lista global, não de listas passadas manualmente
+      const toRemove = this.providerHealth.getProvidersToRemove(configuredProviders);
+      if (toRemove.length > 0) {
+        configuredProviders = configuredProviders.filter(id => !toRemove.includes(id));
+        const newList = configuredProviders.join(",");
+        await setSetting("sms_provider_ids", newList);
+        await logger.warn("sms",
+          `Auto-removendo ${toRemove.length} provedor(es) com performance ruim: [${toRemove.join(", ")}]. ` +
+          `Lista atualizada: [${newList}]. Podem ser redescobertos pelo Auto-Discover.`,
+          { removed: toRemove }, jobId
+        );
+      }
+    }
+
     const rankedProviders = this.providerHealth.rankProviders(configuredProviders);
 
     // Adicionar provedores em cooldown ao final (segunda chance se os bons acabarem)
