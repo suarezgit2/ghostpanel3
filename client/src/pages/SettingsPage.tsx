@@ -235,6 +235,21 @@ export default function SettingsPage() {
   const { data: allSettings, isLoading: loading, refetch: loadSettings } = trpc.settings.getAll.useQuery();
   const { data: healthData, refetch: refetchHealth } = trpc.settings.getSmsHealth.useQuery();
   const { data: blacklistData, refetch: refetchBlacklist } = trpc.settings.getSmsBlacklist.useQuery();
+  const { data: countriesData, refetch: refetchCountries } = trpc.settings.getSmsCountries.useQuery();
+
+  // Multi-country state
+  const [editingCountries, setEditingCountries] = useState<any[]>([]);
+  const [countriesModified, setCountriesModified] = useState(false);
+  const [showAddCountry, setShowAddCountry] = useState(false);
+  const [newCountryCode, setNewCountryCode] = useState("");
+  const [newCountryMaxPrice, setNewCountryMaxPrice] = useState("0.01");
+
+  // Sync countries when loaded
+  useEffect(() => {
+    if (countriesData?.countries && !countriesModified) {
+      setEditingCountries(countriesData.countries);
+    }
+  }, [countriesData, countriesModified]);
 
   const discoverMutation = trpc.settings.discoverAndUpdateSmsProviders.useMutation({
     onSuccess: (data) => {
@@ -264,6 +279,33 @@ export default function SettingsPage() {
       refetchHealth();
     },
     onError: (err) => toast.error("Erro ao resetar health", { description: err.message }),
+  });
+
+  const saveCountriesMutation = trpc.settings.saveSmsCountries.useMutation({
+    onSuccess: (data) => {
+      toast.success("Países salvos!", { description: data.message });
+      setCountriesModified(false);
+      refetchCountries();
+    },
+    onError: (err) => toast.error("Erro ao salvar países", { description: err.message }),
+  });
+
+  const discoverForCountryMutation = trpc.settings.discoverProvidersForCountry.useMutation({
+    onSuccess: (data, vars) => {
+      if (data.success) {
+        toast.success(`Provedores descobertos!`, { description: data.message });
+        // Atualiza os providerIds do país na lista local
+        setEditingCountries(prev => prev.map(c =>
+          c.countryCode === vars.countryCode
+            ? { ...c, providerIds: data.providers }
+            : c
+        ));
+        setCountriesModified(true);
+      } else {
+        toast.warning("Sem provedores", { description: data.message });
+      }
+    },
+    onError: (err) => toast.error("Erro ao descobrir provedores", { description: err.message }),
   });
 
   // Sync settings when data loads
@@ -472,11 +514,262 @@ export default function SettingsPage() {
             </div>
           </motion.div>
 
-          {/* Número & Serviço */}
+          {/* Multi-Country Configuration */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.06 }}
+            className="rounded-xl border border-border bg-card"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-ghost-surface-2">
+                  <Globe className="w-4 h-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">Países de SMS</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Configure múltiplos países. O sistema tenta em ordem e rotaciona quando um falha.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {countriesModified && (
+                  <Button
+                    size="sm"
+                    onClick={() => saveCountriesMutation.mutate({ countries: editingCountries })}
+                    disabled={saveCountriesMutation.isPending}
+                    className="gap-1.5 text-xs bg-green-600 hover:bg-green-700"
+                  >
+                    <Save className="w-3 h-3" />
+                    {saveCountriesMutation.isPending ? "Salvando..." : "Salvar Países"}
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowAddCountry(!showAddCountry)}
+                  className="gap-1.5 text-xs"
+                >
+                  <span className="text-base leading-none">+</span>
+                  Adicionar País
+                </Button>
+              </div>
+            </div>
+
+            <div className="p-4 space-y-3">
+              {/* Add Country Form */}
+              {showAddCountry && (
+                <div className="rounded-lg border border-border/50 bg-ghost-surface-2 p-4 space-y-3">
+                  <p className="text-xs font-medium text-foreground">Adicionar novo país</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-xs text-muted-foreground mb-1 block">Código SMSBower</Label>
+                      <div className="flex gap-2">
+                        <select
+                          value={newCountryCode}
+                          onChange={(e) => setNewCountryCode(e.target.value)}
+                          className="flex-1 h-8 rounded-md border border-border bg-ghost-surface-2 px-2 text-xs text-foreground"
+                        >
+                          <option value="">Selecionar país...</option>
+                          {countriesData?.knownCountries && Object.entries(countriesData.knownCountries).map(([code, info]: [string, any]) => (
+                            <option key={code} value={code}>{info.name} ({info.regionCode}) — código {code}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <Label className="text-xs text-muted-foreground mb-1 block">Preço Máximo ($)</Label>
+                      <Input
+                        type="text"
+                        value={newCountryMaxPrice}
+                        onChange={(e) => setNewCountryMaxPrice(e.target.value)}
+                        placeholder="0.012"
+                        className="h-8 bg-ghost-surface-2 border-border font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 justify-end">
+                    <Button size="sm" variant="outline" onClick={() => setShowAddCountry(false)} className="text-xs">
+                      Cancelar
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        if (!newCountryCode) return;
+                        const known = countriesData?.knownCountries?.[newCountryCode] as any;
+                        if (!known) return;
+                        const already = editingCountries.find(c => c.countryCode === newCountryCode);
+                        if (already) {
+                          toast.warning("País já adicionado");
+                          return;
+                        }
+                        setEditingCountries(prev => [...prev, {
+                          countryCode: newCountryCode,
+                          regionCode: known.regionCode,
+                          name: known.name,
+                          maxPrice: newCountryMaxPrice,
+                          providerIds: [],
+                          enabled: true,
+                        }]);
+                        setCountriesModified(true);
+                        setShowAddCountry(false);
+                        setNewCountryCode("");
+                        setNewCountryMaxPrice("0.01");
+                      }}
+                      className="text-xs"
+                    >
+                      Adicionar
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Country List */}
+              {editingCountries.length === 0 ? (
+                <div className="text-center py-6">
+                  <p className="text-xs text-muted-foreground/60">
+                    Nenhum país configurado. Clique em "Adicionar País" para começar.
+                  </p>
+                  <p className="text-xs text-muted-foreground/40 mt-1">
+                    Enquanto não houver países configurados, o sistema usa as configurações legadas abaixo.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {editingCountries.map((country, idx) => (
+                    <div
+                      key={country.countryCode}
+                      className={`rounded-lg border p-3 ${
+                        country.enabled
+                          ? "border-border/50 bg-ghost-surface-2"
+                          : "border-border/20 bg-ghost-surface-2/30 opacity-60"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          {/* Order badge */}
+                          <span className="flex items-center justify-center w-5 h-5 rounded-full bg-border/50 text-[10px] font-mono font-bold text-muted-foreground shrink-0">
+                            {idx + 1}
+                          </span>
+                          {/* Enable toggle */}
+                          <Switch
+                            checked={country.enabled}
+                            onCheckedChange={(checked) => {
+                              setEditingCountries(prev => prev.map((c, i) =>
+                                i === idx ? { ...c, enabled: checked } : c
+                              ));
+                              setCountriesModified(true);
+                            }}
+                          />
+                          {/* Country info */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-semibold text-foreground">{country.name}</span>
+                              <span className="text-[10px] font-mono text-muted-foreground">{country.regionCode}</span>
+                              <span className="text-[10px] font-mono text-green-400">${country.maxPrice}</span>
+                              {country.providerIds.length > 0 && (
+                                <span className="text-[10px] text-muted-foreground/60">
+                                  {country.providerIds.length} provedor(es)
+                                </span>
+                              )}
+                            </div>
+                            {country.providerIds.length > 0 && (
+                              <p className="text-[10px] font-mono text-muted-foreground/50 truncate mt-0.5">
+                                [{country.providerIds.join(", ")}]
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {/* Max price edit */}
+                          <Input
+                            type="text"
+                            value={country.maxPrice}
+                            onChange={(e) => {
+                              setEditingCountries(prev => prev.map((c, i) =>
+                                i === idx ? { ...c, maxPrice: e.target.value } : c
+                              ));
+                              setCountriesModified(true);
+                            }}
+                            className="w-20 h-7 bg-ghost-surface-2 border-border font-mono text-xs text-center"
+                            placeholder="0.01"
+                          />
+                          {/* Discover button */}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => discoverForCountryMutation.mutate({
+                              countryCode: country.countryCode,
+                              maxPrice: country.maxPrice,
+                            })}
+                            disabled={discoverForCountryMutation.isPending}
+                            className="h-7 px-2 text-[10px] gap-1"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${
+                              discoverForCountryMutation.isPending &&
+                              (discoverForCountryMutation.variables as any)?.countryCode === country.countryCode
+                                ? "animate-spin" : ""
+                            }`} />
+                            Buscar
+                          </Button>
+                          {/* Move up/down */}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              if (idx === 0) return;
+                              const next = [...editingCountries];
+                              [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                              setEditingCountries(next);
+                              setCountriesModified(true);
+                            }}
+                            disabled={idx === 0}
+                            className="h-7 w-7 p-0 text-muted-foreground"
+                          >
+                            ↑
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              if (idx === editingCountries.length - 1) return;
+                              const next = [...editingCountries];
+                              [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                              setEditingCountries(next);
+                              setCountriesModified(true);
+                            }}
+                            disabled={idx === editingCountries.length - 1}
+                            className="h-7 w-7 p-0 text-muted-foreground"
+                          >
+                            ↓
+                          </Button>
+                          {/* Remove */}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setEditingCountries(prev => prev.filter((_, i) => i !== idx));
+                              setCountriesModified(true);
+                            }}
+                            className="h-7 w-7 p-0 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+
+          {/* Número & Serviço */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.12 }}
             className="rounded-xl border border-border bg-card"
           >
             <div className="flex items-center gap-3 px-6 py-4 border-b border-border">
@@ -484,8 +777,8 @@ export default function SettingsPage() {
                 <Hash className="w-4 h-4 text-muted-foreground" />
               </div>
               <div>
-                <h2 className="text-sm font-semibold text-foreground">Número & Serviço</h2>
-                <p className="text-xs text-muted-foreground">País, serviço e faixa de preço dos números SMS</p>
+                <h2 className="text-sm font-semibold text-foreground">Número & Serviço (Legado)</h2>
+                <p className="text-xs text-muted-foreground">Usado quando nenhum país está configurado acima</p>
               </div>
             </div>
             <div className="p-6 space-y-4">

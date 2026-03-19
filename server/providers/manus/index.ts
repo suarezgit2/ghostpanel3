@@ -260,18 +260,19 @@ export class ManusProvider {
 
       const smsResult = await smsService.getCodeWithRetry({
         jobId,
-        onNumberRented: async ({ phoneNumber, activationId, attempt }) => {
-          const formattedPhone = formatPhoneForManus(phoneNumber, MANUS_CONFIG.smsRegionCode);
+        onNumberRented: async ({ phoneNumber, activationId, attempt, regionCode }) => {
+          const formattedPhone = formatPhoneForManus(phoneNumber, regionCode);
 
-          await logger.info("step_6_sms", `[Tentativa ${attempt}] Enviando SMS para ${MANUS_CONFIG.smsRegionCode}${formattedPhone}`, {
+          await logger.info("step_6_sms", `[Tentativa ${attempt}] Enviando SMS para ${regionCode}${formattedPhone}`, {
             rawNumber: phoneNumber,
             formattedNumber: formattedPhone,
+            regionCode,
             activationId,
           }, jobId);
 
           await rpc.sendPhoneVerificationCode(
             formattedPhone,
-            MANUS_CONFIG.smsRegionCode,
+            regionCode,
             MANUS_CONFIG.smsLocale,
             authedRpcOptions
           );
@@ -281,16 +282,18 @@ export class ManusProvider {
       });
 
       // SMS received — verify phone
-      const formattedPhone = formatPhoneForManus(smsResult.phoneNumber, MANUS_CONFIG.smsRegionCode);
+      const smsRegionCode = smsResult.regionCode || MANUS_CONFIG.smsRegionCode;
+      const formattedPhone = formatPhoneForManus(smsResult.phoneNumber, smsRegionCode);
 
       await logger.info("step_7_verify", `Verificando telefone com código ${smsResult.code}`, {
         rawNumber: smsResult.phoneNumber,
         formattedNumber: formattedPhone,
+        regionCode: smsRegionCode,
       }, jobId);
 
       await rpc.bindPhoneTrait(
         formattedPhone,
-        MANUS_CONFIG.smsRegionCode,
+        smsRegionCode,
         smsResult.code,
         authedRpcOptions
       );

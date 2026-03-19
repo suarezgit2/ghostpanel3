@@ -1,27 +1,30 @@
 /**
- * SmsService - SMSBower Integration (v3.0 — Smart Provider Management)
+ * SmsService - SMSBower Integration (v3.1 — Multi-Country Support)
  *
- * Melhorias v3.0:
- *   1. Blacklist persistente: provedores com 10+ falhas consecutivas e 0% de sucesso
- *      são banidos permanentemente no banco (setting: sms_blacklisted_providers).
- *      Sobrevivem a restarts do servidor.
- *   2. Sem "segunda chance" para provedores em cooldown: se está em cooldown, não entra
- *      na fila nessa rodada. Cooldown é cooldown.
- *   3. Detecção de rejeição pelo alvo (target-rejection): quando o Manus retorna
- *      permission_denied, o provedor recebe penalidade de "target rejection". Provedores
- *      com alta taxa de rejeição pelo alvo entram em cooldown pois seus números não funcionam.
- *   4. Health persistido no banco: estado de saúde dos provedores (successes, failures,
- *      consecutiveFailures, targetRejections) é salvo em sms_provider_health como JSON.
- *      Ao reiniciar, o histórico é restaurado.
- *   5. Limpeza automática da lista manual: ao iniciar, remove da sms_provider_ids qualquer
- *      ID que esteja na blacklist.
- *   6. Auto-Discover como fallback quando a lista manual esgota (comportamento mantido).
+ * Melhorias v3.1:
+ *   - Suporte a múltiplos países: cada país tem seu próprio countryCode (SMSBower),
+ *     regionCode (ex: +55), maxPrice, providerIds e enabled.
+ *   - Setting sms_countries: JSON array com a configuração de cada país.
+ *   - O sistema tenta os países habilitados em ordem, rotacionando quando um falha.
+ *   - onNumberRented recebe regionCode do país para enviar ao Manus corretamente.
+ *   - RetryResult inclui regionCode para o provider usar no sendPhoneVerificationCode.
+ *   - Compatibilidade retroativa: se sms_countries não estiver configurado,
+ *     usa as settings legadas (sms_country, sms_provider_ids, etc.).
+ *
+ * Melhorias v3.0 (mantidas):
+ *   1. Blacklist persistente (sms_blacklisted_providers)
+ *   2. Sem segunda chance para provedores em cooldown
+ *   3. Target-rejection tracking (permission_denied)
+ *   4. Health persistido no banco (sms_provider_health)
+ *   5. Limpeza automática da lista manual
+ *   6. Auto-Discover como fallback
  *
  * Settings utilizados:
- *   smsbower_api_key, sms_country, sms_service, sms_max_price,
- *   sms_provider_ids, sms_max_retries, sms_wait_time, sms_poll_interval,
+ *   smsbower_api_key, sms_service, sms_max_retries, sms_wait_time, sms_poll_interval,
  *   sms_retry_delay_min, sms_retry_delay_max, sms_cancel_wait, sms_auto_discover,
- *   sms_blacklisted_providers (novo), sms_provider_health (novo)
+ *   sms_blacklisted_providers, sms_provider_health,
+ *   sms_countries (novo — JSON array de CountryConfig)
+ *   Legado (ainda suportado): sms_country, sms_max_price, sms_provider_ids
  */
 
 import { getSetting, setSetting } from "../utils/settings";
@@ -43,6 +46,39 @@ const DEFAULTS: Record<string, string> = {
   sms_auto_discover: "false",
   sms_blacklisted_providers: "",
   sms_provider_health: "{}",
+  sms_countries: "",
+};
+
+/**
+ * Configuração de um país para SMS multi-país.
+ * countryCode: código numérico do SMSBower (ex: "6" = Indonésia, "73" = Brasil)
+ * regionCode: prefixo telefônico internacional (ex: "+62", "+55")
+ * name: nome legível (ex: "Indonesia", "Brazil")
+ * maxPrice: preço máximo por número neste país
+ * providerIds: IDs dos provedores para este país (vazio = qualquer)
+ * enabled: se este país está ativo na rotação
+ */
+export interface CountryConfig {
+  countryCode: string;
+  regionCode: string;
+  name: string;
+  maxPrice: string;
+  providerIds: number[];
+  enabled: boolean;
+}
+
+/** Mapa de códigos SMSBower para regionCode e nome */
+export const KNOWN_COUNTRIES: Record<string, { regionCode: string; name: string }> = {
+  "0":  { regionCode: "+7",   name: "Russia" },
+  "6":  { regionCode: "+62",  name: "Indonesia" },
+  "7":  { regionCode: "+1",   name: "USA" },
+  "12": { regionCode: "+63",  name: "Philippines" },
+  "22": { regionCode: "+66",  name: "Thailand" },
+  "31": { regionCode: "+44",  name: "United Kingdom" },
+  "73": { regionCode: "+55",  name: "Brazil" },
+  "82": { regionCode: "+91",  name: "India" },
+  "86": { regionCode: "+84",  name: "Vietnam" },
+  "95": { regionCode: "+234", name: "Nigeria" },
 };
 
 interface SmsConfig {
@@ -57,6 +93,8 @@ interface SmsConfig {
   retryDelayMax: number;
   cancelWaitMs: number;
   autoDiscover: boolean;
+  /** Lista de países configurados (multi-país). Vazio = usa country/providerIds legados. */
+  countries: CountryConfig[];
 }
 
 interface NumberData {
@@ -82,7 +120,8 @@ interface RetryOptions {
   service?: string;
   maxPrice?: string;
   providerIds?: number[];
-  onNumberRented?: (data: { phoneNumber: string; activationId: string; attempt: number }) => Promise<void>;
+  /** Callback chamado quando um número é alugado. Inclui regionCode do país para enviar ao Manus. */
+  onNumberRented?: (data: { phoneNumber: string; activationId: string; attempt: number; regionCode: string }) => Promise<void>;
   jobId?: number;
 }
 
@@ -92,6 +131,8 @@ interface RetryResult {
   activationId: string;
   attempt: number;
   totalCost: number;
+  /** Prefixo telefônico do país do número (ex: "+62", "+55"). Usado pelo provider para sendPhoneVerificationCode. */
+  regionCode: string;
 }
 
 // ============================================================
@@ -394,6 +435,17 @@ class SmsService {
       }
     };
 
+    // Parse multi-country config
+    let countries: CountryConfig[] = [];
+    const countriesRaw = await get("sms_countries");
+    if (countriesRaw && countriesRaw.trim() !== "") {
+      try {
+        countries = JSON.parse(countriesRaw) as CountryConfig[];
+      } catch {
+        console.warn("[SmsService] sms_countries JSON inválido, ignorando");
+      }
+    }
+
     this.config = {
       country: await get("sms_country"),
       service: await get("sms_service"),
@@ -406,12 +458,16 @@ class SmsService {
       retryDelayMax: (parseInt(await get("sms_retry_delay_max")) || 8) * 1000,
       cancelWaitMs: (parseInt(await get("sms_cancel_wait")) || 125) * 1000,
       autoDiscover: (await get("sms_auto_discover")) === "true",
+      countries,
     };
 
+    const enabledCountries = this.config.countries.filter(c => c.enabled);
     await logger.info(
       "sms",
-      `Configuração carregada: país=${this.config.country}, serviço=${this.config.service}, ` +
-      `maxPrice=$${this.config.maxPrice}, providers=${this.config.providerIds.length}, ` +
+      `Configuração carregada: serviço=${this.config.service}, ` +
+      (enabledCountries.length > 0
+        ? `países=[${enabledCountries.map(c => `${c.name}($${c.maxPrice})`).join(", ")}], `
+        : `país=${this.config.country}(legado), maxPrice=$${this.config.maxPrice}, providers=${this.config.providerIds.length}, `) +
       `retries=${this.config.maxRetries}, wait=${this.config.waitTimeMs / 1000}s, ` +
       `autoDiscover=${this.config.autoDiscover}`
     );
@@ -426,6 +482,34 @@ class SmsService {
   async getConfig(): Promise<SmsConfig> {
     if (!this.config) await this.init();
     return { ...this.config! };
+  }
+
+  /**
+   * Retorna a lista de países configurados.
+   * Se sms_countries estiver vazio, retorna um país padrão baseado nas settings legadas.
+   */
+  async getCountries(): Promise<CountryConfig[]> {
+    if (!this.config) await this.init();
+    if (this.config!.countries.length > 0) return this.config!.countries;
+
+    // Fallback legado: cria um país a partir das settings antigas
+    const known = KNOWN_COUNTRIES[this.config!.country];
+    return [{
+      countryCode: this.config!.country,
+      regionCode: known?.regionCode || "+62",
+      name: known?.name || `País ${this.config!.country}`,
+      maxPrice: this.config!.maxPrice,
+      providerIds: this.config!.providerIds,
+      enabled: true,
+    }];
+  }
+
+  /**
+   * Salva a lista de países no banco e recarrega a config.
+   */
+  async saveCountries(countries: CountryConfig[]): Promise<void> {
+    await setSetting("sms_countries", JSON.stringify(countries), "Configuração multi-país para SMS");
+    await this.reloadConfig();
   }
 
   // ============================================================
@@ -577,23 +661,32 @@ class SmsService {
 
   /**
    * Descobre provedores e atualiza a lista manual no banco.
+   * Aceita countryCodeOverride e maxPriceOverride para descoberta por país específico.
    * Usado pelo botão "Descobrir Provedores Agora" na UI.
    */
-  async discoverAndUpdateProviderList(): Promise<{ providers: number[]; updated: boolean }> {
+  async discoverAndUpdateProviderList(
+    countryCodeOverride?: string,
+    maxPriceOverride?: string
+  ): Promise<{ providers: number[]; updated: boolean }> {
     if (!this.config) await this.init();
 
+    const country = countryCodeOverride || this.config!.country;
+    const maxPrice = maxPriceOverride || this.config!.maxPrice;
+
     const discovered = await this.discoverProviders(
-      this.config!.country,
+      country,
       this.config!.service,
-      this.config!.maxPrice,
+      maxPrice,
       true // força refresh
     );
 
     if (discovered.length > 0) {
-      await setSetting("sms_provider_ids", discovered.join(","), "IDs dos provedores SMS (atualizado via Auto-Discover)");
-      // Recarrega config para refletir a nova lista
-      await this.reloadConfig();
-      console.log(`[SmsService] Lista de provedores atualizada via Auto-Discover: [${discovered.join(", ")}]`);
+      // Se for o país padrão (legado), atualiza sms_provider_ids
+      if (!countryCodeOverride || countryCodeOverride === this.config!.country) {
+        await setSetting("sms_provider_ids", discovered.join(","), "IDs dos provedores SMS (atualizado via Auto-Discover)");
+        await this.reloadConfig();
+      }
+      console.log(`[SmsService] Provedores descobertos para país ${country}: [${discovered.join(", ")}]`);
       return { providers: discovered, updated: true };
     }
 
@@ -605,20 +698,15 @@ class SmsService {
   // ============================================================
 
   /**
-   * getCodeWithRetry v3.0 — Smart Provider Management
+   * getCodeWithRetry v3.1 — Multi-Country + Smart Provider Management
    *
    * Estratégia:
-   *   1. Carrega snapshot local da config (evita interferência entre jobs concorrentes).
-   *   2. Filtra provedores blacklistados da lista.
-   *   3. Ranqueia apenas provedores DISPONÍVEIS (sem cooldown) por score.
-   *      NÃO inclui provedores em cooldown como "segunda chance".
-   *   4. Cada tentativa usa um provedor específico da fila.
-   *   5. Falha de SMS → cooldown progressivo no provedor.
-   *   6. Rejeição pelo alvo (permission_denied) → penalidade de target rejection.
-   *      Se 5+ rejeições consecutivas → cooldown suave no provedor.
-   *   7. Provedores que atingem threshold de blacklist → banidos permanentemente.
-   *   8. Se todos da lista falharam e ainda há tentativas → Auto-Discover como fallback.
-   *   9. Health é persistido no banco após cada tentativa (debounced 30s).
+   *   1. Se sms_countries configurado: tenta cada país habilitado em ordem.
+   *      Cada país tem sua própria lista de provedores, maxPrice e regionCode.
+   *   2. Dentro de cada país: mesma lógica v3.0 (blacklist, cooldown, health).
+   *   3. Se um país falha completamente, passa para o próximo.
+   *   4. RetryResult inclui regionCode para o provider usar no sendPhoneVerificationCode.
+   *   5. Compatibilidade retroativa: se sms_countries vazio, usa config legada.
    */
   async getCodeWithRetry(options: RetryOptions = {}): Promise<RetryResult> {
     if (!this.initialized) await this.init();
@@ -627,18 +715,106 @@ class SmsService {
     await this.reloadConfig();
     const configSnapshot = { ...this.config! };
     configSnapshot.providerIds = [...this.config!.providerIds];
+    configSnapshot.countries = [...this.config!.countries];
 
     const maxRetries = options.maxRetries ?? configSnapshot.maxRetries;
     const waitTimeMs = options.waitTimeMs ?? configSnapshot.waitTimeMs;
     const onNumberRented = options.onNumberRented || undefined;
     const jobId = options.jobId;
-
-    const country = options.country || configSnapshot.country;
     const service = options.service || configSnapshot.service;
-    const maxPrice = options.maxPrice || configSnapshot.maxPrice;
 
-    // 1. Montar lista base de provedores
-    let configuredProviders = options.providerIds ? [...options.providerIds] : [...configSnapshot.providerIds];
+    // Determina a lista de países a tentar
+    const enabledCountries = configSnapshot.countries.filter(c => c.enabled);
+    const useMultiCountry = enabledCountries.length > 0 && !options.country && !options.providerIds;
+
+    if (useMultiCountry) {
+      // ============================================================
+      // MODO MULTI-PAÍS: tenta cada país em ordem
+      // ============================================================
+      await logger.info("sms",
+        `Modo multi-país: [${enabledCountries.map(c => `${c.name}($${c.maxPrice})`).join(", ")}]`,
+        {}, jobId
+      );
+
+      let lastCountryError: Error | null = null;
+
+      for (const countryConfig of enabledCountries) {
+        await logger.info("sms",
+          `--- Tentando país: ${countryConfig.name} (código ${countryConfig.countryCode}, ${countryConfig.regionCode}, max $${countryConfig.maxPrice}) ---`,
+          {}, jobId
+        );
+
+        try {
+          const result = await this._getCodeForCountry({
+            countryConfig,
+            service,
+            maxRetries,
+            waitTimeMs,
+            onNumberRented,
+            jobId,
+          });
+          return result;
+        } catch (err) {
+          lastCountryError = err instanceof Error ? err : new Error(String(err));
+          await logger.warn("sms",
+            `País ${countryConfig.name} falhou completamente: ${lastCountryError.message}. Tentando próximo país...`,
+            {}, jobId
+          );
+        }
+      }
+
+      throw new Error(
+        `SMS não recebido em nenhum dos ${enabledCountries.length} país(es) configurados. ` +
+        `Último erro: ${lastCountryError?.message || "timeout"}`
+      );
+    }
+
+    // ============================================================
+    // MODO LEGADO: um único país (compatibilidade retroativa)
+    // ============================================================
+    const country = options.country || configSnapshot.country;
+    const maxPrice = options.maxPrice || configSnapshot.maxPrice;
+    const known = KNOWN_COUNTRIES[country];
+    const regionCode = known?.regionCode || "+62";
+
+    const result = await this._getCodeForCountry({
+      countryConfig: {
+        countryCode: country,
+        regionCode,
+        name: known?.name || `País ${country}`,
+        maxPrice,
+        providerIds: options.providerIds ? [...options.providerIds] : [...configSnapshot.providerIds],
+        enabled: true,
+      },
+      service,
+      maxRetries,
+      waitTimeMs,
+      onNumberRented,
+      jobId,
+    });
+    return result;
+  }
+
+  /**
+   * Tenta obter código SMS para um país específico.
+   * Extrai toda a lógica de blacklist/cooldown/health/auto-discover do v3.0.
+   */
+  private async _getCodeForCountry(opts: {
+    countryConfig: CountryConfig;
+    service: string;
+    maxRetries: number;
+    waitTimeMs: number;
+    onNumberRented: RetryOptions["onNumberRented"];
+    jobId?: number;
+  }): Promise<RetryResult> {
+    const { countryConfig, service, maxRetries, waitTimeMs, onNumberRented, jobId } = opts;
+    const { countryCode, regionCode, maxPrice, name } = countryConfig;
+    const configSnapshot = this.config!;
+
+    // 1. Montar lista base de provedores para este país
+    let configuredProviders = countryConfig.providerIds.length > 0
+      ? [...countryConfig.providerIds]
+      : [...configSnapshot.providerIds];
 
     // 2. Filtrar blacklistados
     const blacklist = await this.getBlacklist();
@@ -647,7 +823,7 @@ class SmsService {
       configuredProviders = configuredProviders.filter(id => !blacklist.includes(id));
       if (configuredProviders.length < before) {
         await logger.info("sms",
-          `Blacklist: ${before - configuredProviders.length} provedor(es) excluído(s) da fila. Restam: [${configuredProviders.join(", ")}]`,
+          `[${name}] Blacklist: ${before - configuredProviders.length} provedor(es) excluído(s). Restam: [${configuredProviders.join(", ")}]`,
           {}, jobId
         );
       }
@@ -659,46 +835,41 @@ class SmsService {
 
     if (cooldownCount > 0) {
       await logger.info("sms",
-        `${cooldownCount} provedor(es) em cooldown ignorado(s) nesta rodada`,
+        `[${name}] ${cooldownCount} provedor(es) em cooldown ignorado(s)`,
         {}, jobId
       );
     }
 
-    // Fila final: apenas disponíveis
     const providerQueue = [...rankedProviders];
-
-    // Effective max retries: pelo menos o tamanho da fila
     const effectiveMaxRetries = Math.max(maxRetries, providerQueue.length);
 
     await logger.info("sms",
-      `Fila de provedores: [${providerQueue.join(", ")}] (${providerQueue.length} disponíveis, ${cooldownCount} em cooldown — ignorados). ` +
-      `Max tentativas: ${effectiveMaxRetries}`,
+      `[${name}] Fila: [${providerQueue.join(", ")}] (${providerQueue.length} disponíveis, ${cooldownCount} em cooldown). Max: ${effectiveMaxRetries}`,
       {}, jobId
     );
 
     if (providerQueue.length === 0) {
-      // Todos em cooldown ou blacklist — tenta Auto-Discover imediatamente
       await logger.warn("sms",
-        `Nenhum provedor disponível (todos em cooldown ou blacklist). Tentando Auto-Discover...`,
+        `[${name}] Nenhum provedor disponível. Tentando Auto-Discover...`,
         {}, jobId
       );
       try {
-        const discovered = await this.discoverProviders(country, service, maxPrice, true);
+        const discovered = await this.discoverProviders(countryCode, service, maxPrice, true);
         const newProviders = discovered.filter(id => !blacklist.includes(id));
         if (newProviders.length > 0) {
           providerQueue.push(...newProviders);
           await logger.info("sms",
-            `Auto-Discover encontrou ${newProviders.length} provedores como emergência: [${newProviders.join(", ")}]`,
+            `[${name}] Auto-Discover emergencial: ${newProviders.length} provedores: [${newProviders.join(", ")}]`,
             {}, jobId
           );
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        await logger.warn("sms", `Auto-Discover emergencial falhou: ${msg}`, {}, jobId);
+        await logger.warn("sms", `[${name}] Auto-Discover emergencial falhou: ${msg}`, {}, jobId);
       }
 
       if (providerQueue.length === 0) {
-        throw new Error("SMS indisponível: todos os provedores estão em cooldown ou blacklist. Aguarde alguns minutos e tente novamente.");
+        throw new Error(`[${name}] Nenhum provedor disponível (todos em cooldown ou blacklist)`);
       }
     }
 
@@ -707,35 +878,53 @@ class SmsService {
     let attempt = 0;
     let usedFallbackDiscover = false;
 
-    // 4. Tentar cada provedor da fila sequencialmente
     for (let queueIndex = 0; queueIndex < providerQueue.length && attempt < effectiveMaxRetries; queueIndex++) {
       attempt++;
       const currentProviderId = providerQueue[queueIndex];
 
-      await logger.info("sms", `=== Tentativa ${attempt}/${effectiveMaxRetries} — Provedor #${currentProviderId} ===`, {}, jobId);
+      await logger.info("sms",
+        `[${name}] === Tentativa ${attempt}/${effectiveMaxRetries} — Provedor #${currentProviderId} ===`,
+        {}, jobId
+      );
 
       const result = await this._tryProvider(currentProviderId, {
-        country, service, maxPrice, waitTimeMs, onNumberRented, jobId, attempt,
+        country: countryCode,
+        service,
+        maxPrice,
+        waitTimeMs,
+        onNumberRented,
+        jobId,
+        attempt,
+        regionCode,
       });
 
-      // Persiste health após cada tentativa (debounced)
       this.schedulePersistHealth();
 
       if (result.success) {
         totalCost += result.cost;
 
-        // Auto-adiciona à lista se veio do Auto-Discover
-        if (!options.providerIds) {
-          const currentSavedList = ((await getSetting("sms_provider_ids")) || "")
-            .split(",").map(id => parseInt(id.trim())).filter(id => !isNaN(id));
-          if (!currentSavedList.includes(currentProviderId)) {
-            const updatedList = [...currentSavedList, currentProviderId];
-            await setSetting("sms_provider_ids", updatedList.join(","));
-            await logger.info("sms",
-              `Provedor #${currentProviderId} teve SUCESSO — adicionado à lista. Lista: [${updatedList.join(", ")}]`,
-              { providerId: currentProviderId }, jobId
+        // Auto-adiciona à lista do país se veio do Auto-Discover
+        const currentList = countryConfig.providerIds;
+        if (!currentList.includes(currentProviderId)) {
+          countryConfig.providerIds.push(currentProviderId);
+          // Persiste no banco se for multi-país
+          if (configSnapshot.countries.length > 0) {
+            const updatedCountries = configSnapshot.countries.map(c =>
+              c.countryCode === countryCode ? { ...c, providerIds: countryConfig.providerIds } : c
             );
+            await setSetting("sms_countries", JSON.stringify(updatedCountries));
+          } else {
+            // Legado
+            const savedList = ((await getSetting("sms_provider_ids")) || "")
+              .split(",").map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+            if (!savedList.includes(currentProviderId)) {
+              await setSetting("sms_provider_ids", [...savedList, currentProviderId].join(","));
+            }
           }
+          await logger.info("sms",
+            `[${name}] Provedor #${currentProviderId} adicionado à lista do país`,
+            {}, jobId
+          );
         }
 
         return {
@@ -744,20 +933,19 @@ class SmsService {
           activationId: result.activationId!,
           attempt,
           totalCost,
+          regionCode,
         };
       }
 
-      // Falhou — verifica se deve ir para blacklist
-      if (!options.providerIds) {
-        const toBlacklist = this.providerHealth.getProvidersToBlacklist([currentProviderId]);
-        if (toBlacklist.length > 0) {
-          await this.addToBlacklist(toBlacklist, jobId);
-        }
+      // Falhou — verifica blacklist
+      const toBlacklist = this.providerHealth.getProvidersToBlacklist([currentProviderId]);
+      if (toBlacklist.length > 0) {
+        await this.addToBlacklist(toBlacklist, jobId);
       }
 
       lastError = result.error || null;
 
-      // Fallback: se todos da lista falharam e ainda há tentativas
+      // Fallback Auto-Discover quando todos da lista falharam
       if (
         queueIndex === providerQueue.length - 1 &&
         attempt < effectiveMaxRetries &&
@@ -766,29 +954,27 @@ class SmsService {
       ) {
         usedFallbackDiscover = true;
         await logger.info("sms",
-          `Todos os ${providerQueue.length} provedores da lista falharam. Tentando Auto-Discover como fallback...`,
+          `[${name}] Todos os ${providerQueue.length} provedores falharam. Tentando Auto-Discover...`,
           {}, jobId
         );
-
         try {
-          const discovered = await this.discoverProviders(country, service, maxPrice, true);
+          const discovered = await this.discoverProviders(countryCode, service, maxPrice, true);
           const newProviders = discovered.filter(id => !providerQueue.includes(id) && !blacklist.includes(id));
-
           if (newProviders.length > 0) {
             await logger.info("sms",
-              `Auto-Discover (fallback) encontrou ${newProviders.length} novos provedores: [${newProviders.join(", ")}]`,
+              `[${name}] Auto-Discover (fallback): ${newProviders.length} novos provedores: [${newProviders.join(", ")}]`,
               {}, jobId
             );
             providerQueue.push(...newProviders);
           } else {
             await logger.warn("sms",
-              `Auto-Discover (fallback) não encontrou provedores novos além dos ${providerQueue.length} já tentados`,
+              `[${name}] Auto-Discover (fallback): nenhum provedor novo encontrado`,
               {}, jobId
             );
           }
         } catch (discoverErr) {
           const msg = discoverErr instanceof Error ? discoverErr.message : String(discoverErr);
-          await logger.warn("sms", `Auto-Discover (fallback) falhou: ${msg}`, {}, jobId);
+          await logger.warn("sms", `[${name}] Auto-Discover (fallback) falhou: ${msg}`, {}, jobId);
         }
       }
 
@@ -799,14 +985,13 @@ class SmsService {
       }
     }
 
-    // 5. Todas as tentativas falharam
     const healthSummary = this.providerHealth.getSummary();
     await logger.error("sms",
-      `SMS não recebido após ${attempt} tentativas. Health: ${JSON.stringify(healthSummary)}`,
+      `[${name}] SMS não recebido após ${attempt} tentativas. Health: ${JSON.stringify(healthSummary)}`,
       {}, jobId
     );
 
-    throw new Error(`SMS não recebido após ${attempt} tentativas com rotação de provedores. Último erro: ${lastError?.message || "timeout"}`);
+    throw new Error(`[${name}] SMS não recebido após ${attempt} tentativas. Último erro: ${lastError?.message || "timeout"}`);
   }
 
   /**
@@ -823,6 +1008,7 @@ class SmsService {
       onNumberRented: RetryOptions["onNumberRented"];
       jobId?: number;
       attempt: number;
+      regionCode?: string;
     }
   ): Promise<{
     success: boolean;
@@ -852,6 +1038,7 @@ class SmsService {
           phoneNumber: numberData.phoneNumber,
           activationId: numberData.activationId,
           attempt: opts.attempt,
+          regionCode: opts.regionCode || "+62",
         });
       }
 

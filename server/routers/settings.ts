@@ -9,7 +9,7 @@ import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { settings, providers } from "../../drizzle/schema";
 import { getAllSettings, setSetting, clearSettingsCache } from "../utils/settings";
-import { smsService } from "../services/sms";
+import { smsService, CountryConfig, KNOWN_COUNTRIES } from "../services/sms";
 
 // Keys que contêm dados sensíveis e devem ser mascaradas na listagem
 const SENSITIVE_KEYS = new Set([
@@ -174,6 +174,68 @@ export const settingsRouter = router({
       message: "Nenhum provedor encontrado dentro do preço máximo configurado",
     };
   }),
+
+  /**
+   * Retorna a lista de países configurados para SMS
+   */
+  getSmsCountries: protectedProcedure.query(async () => {
+    const countries = await smsService.getCountries();
+    return { countries, knownCountries: KNOWN_COUNTRIES };
+  }),
+
+  /**
+   * Salva a lista de países configurados para SMS
+   */
+  saveSmsCountries: protectedProcedure
+    .input(z.object({
+      countries: z.array(z.object({
+        countryCode: z.string(),
+        regionCode: z.string(),
+        name: z.string(),
+        maxPrice: z.string(),
+        providerIds: z.array(z.number()),
+        enabled: z.boolean(),
+      }))
+    }))
+    .mutation(async ({ input }) => {
+      await smsService.saveCountries(input.countries as CountryConfig[]);
+      return { success: true, message: `${input.countries.length} país(es) salvos` };
+    }),
+
+  /**
+   * Descobre provedores para um país específico e atualiza a lista desse país
+   */
+  discoverProvidersForCountry: protectedProcedure
+    .input(z.object({
+      countryCode: z.string(),
+      maxPrice: z.string(),
+    }))
+    .mutation(async ({ input }) => {
+      const config = await smsService.getConfig();
+      const result = await smsService.discoverAndUpdateProviderList(input.countryCode, input.maxPrice);
+      if (result.updated) {
+        // Se multi-país configurado, atualiza os providerIds do país específico
+        const countries = await smsService.getCountries();
+        const updatedCountries = countries.map(c =>
+          c.countryCode === input.countryCode
+            ? { ...c, providerIds: result.providers }
+            : c
+        );
+        if (config.countries.length > 0) {
+          await smsService.saveCountries(updatedCountries);
+        }
+        return {
+          success: true,
+          providers: result.providers,
+          message: `${result.providers.length} provedores encontrados para código ${input.countryCode}: [${result.providers.join(", ")}]`,
+        };
+      }
+      return {
+        success: false,
+        providers: [],
+        message: `Nenhum provedor encontrado para código ${input.countryCode} dentro do preço $${input.maxPrice}`,
+      };
+    }),
 
   // Providers management
   listProviders: protectedProcedure.query(async () => {
