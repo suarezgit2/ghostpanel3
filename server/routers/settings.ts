@@ -24,12 +24,21 @@ const SENSITIVE_KEYS = new Set([
 ]);
 
 /**
- * Mascara um valor sensível mostrando apenas os últimos 4 caracteres
+ * Mascara um valor sensível mostrando apenas os últimos 4 caracteres.
+ * Retorna null para indicar ao frontend que o campo está mascarado.
  */
 function maskSensitiveValue(key: string, value: string): string {
   if (!SENSITIVE_KEYS.has(key)) return value;
   if (!value || value.length <= 4) return "****";
   return "****" + value.slice(-4);
+}
+
+/**
+ * Detecta se um valor é um valor mascarado (começa com "****").
+ * Valores mascarados NÃO devem ser salvos no banco — eles são apenas para exibição.
+ */
+function isMaskedValue(value: string): boolean {
+  return value.startsWith("****");
 }
 
 export const settingsRouter = router({
@@ -64,8 +73,12 @@ export const settingsRouter = router({
       description: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
+      // PROTEÇÃO: nunca salvar um valor mascarado — isso corromperia a credencial real
+      if (SENSITIVE_KEYS.has(input.key) && isMaskedValue(input.value)) {
+        return { success: true, skipped: true, reason: "Valor mascarado ignorado — credencial não alterada" };
+      }
       await setSetting(input.key, input.value, input.description);
-      return { success: true };
+      return { success: true, skipped: false };
     }),
 
   setBulk: protectedProcedure
@@ -75,10 +88,20 @@ export const settingsRouter = router({
       description: z.string().optional(),
     })))
     .mutation(async ({ input }) => {
+      let saved = 0;
+      let skipped = 0;
+
       for (const item of input) {
+        // PROTEÇÃO: pular valores mascarados para não sobrescrever credenciais reais
+        if (SENSITIVE_KEYS.has(item.key) && isMaskedValue(item.value)) {
+          skipped++;
+          continue;
+        }
         await setSetting(item.key, item.value, item.description);
+        saved++;
       }
-      return { success: true, count: input.length };
+
+      return { success: true, count: saved, skipped };
     }),
 
   delete: protectedProcedure

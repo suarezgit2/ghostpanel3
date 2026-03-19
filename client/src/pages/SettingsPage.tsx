@@ -251,11 +251,25 @@ export default function SettingsPage() {
     },
   });
 
+  // Chaves sensíveis que usam mascaramento (****xxxx)
+  const SENSITIVE_KEYS = new Set([
+    "capsolver_api_key",
+    "twocaptcha_api_key",
+    "smsbower_api_key",
+    "webshare_api_key",
+    "zoho_client_id",
+    "zoho_client_secret",
+    "zoho_refresh_token",
+    "admin_password_hash",
+  ]);
+
   const saveSettings = async () => {
     setSaving(true);
     try {
       const entries = Object.entries(settings)
         .filter(([_, v]) => v !== undefined && v !== null)
+        // PROTEÇÃO: nunca enviar valores mascarados (****xxxx) — eles não foram editados
+        .filter(([key, value]) => !(SENSITIVE_KEYS.has(key) && value.startsWith("****")))
         .map(([key, value]) => ({ key, value }));
       await setBulkMutation.mutateAsync(entries);
     } finally {
