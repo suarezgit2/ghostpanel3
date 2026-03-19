@@ -1,13 +1,7 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { migrate } from "drizzle-orm/mysql2/migrator";
-import mysql from "mysql2/promise";
 import { InsertUser, users } from "../drizzle/schema";
 import { ENV } from './_core/env';
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -25,34 +19,43 @@ export async function getDb() {
 }
 
 /**
- * Roda todas as migrations pendentes usando drizzle-orm/mysql2/migrator.
- * Deve ser chamado uma vez no startup do servidor, antes de qualquer query.
- * É idempotente: migrations já aplicadas são ignoradas.
+ * Aplica DDL pendente diretamente via SQL inline.
+ * Usa CREATE TABLE IF NOT EXISTS e ADD COLUMN IF NOT EXISTS para ser idempotente.
+ * Não depende de arquivos externos — funciona em qualquer ambiente (Railway, Docker, etc).
  */
 export async function runMigrations(): Promise<void> {
-  if (!process.env.DATABASE_URL) {
-    console.warn("[Migrations] DATABASE_URL não definida, pulando migrations");
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Migrations] Database não disponível, pulando migrations");
     return;
   }
 
-  let connection: mysql.Connection | null = null;
+  console.log("[Migrations] Aplicando DDL pendente...");
+
   try {
-    connection = await mysql.createConnection(process.env.DATABASE_URL);
-    const db = drizzle(connection);
+    // Migration 0005: job_folders table + folderId column on jobs
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS \`job_folders\` (
+        \`id\` int AUTO_INCREMENT NOT NULL,
+        \`clientName\` varchar(256) NOT NULL,
+        \`inviteCode\` varchar(128) NOT NULL,
+        \`totalJobs\` int NOT NULL DEFAULT 0,
+        \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+        \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT \`job_folders_id\` PRIMARY KEY (\`id\`)
+      )
+    `);
 
-    const migrationsFolder = path.resolve(__dirname, "../../drizzle");
+    // ADD COLUMN IF NOT EXISTS is supported in MySQL 8.0+ and TiDB
+    await db.execute(sql`
+      ALTER TABLE \`jobs\`
+        ADD COLUMN IF NOT EXISTS \`folderId\` int NULL
+    `);
 
-    console.log("[Migrations] Aplicando migrations pendentes...");
-    await migrate(db, { migrationsFolder });
-    console.log("[Migrations] Migrations aplicadas com sucesso");
+    console.log("[Migrations] DDL aplicado com sucesso");
   } catch (error) {
-    console.error("[Migrations] Erro ao aplicar migrations:", error);
-    // Não lança o erro para não impedir o boot do servidor
-    // O servidor pode funcionar mesmo se uma migration falhar (ex: já aplicada manualmente)
-  } finally {
-    if (connection) {
-      await connection.end().catch(() => {});
-    }
+    console.error("[Migrations] Erro ao aplicar DDL:", error);
+    // Não lança o erro para não impedir o boot
   }
 }
 
