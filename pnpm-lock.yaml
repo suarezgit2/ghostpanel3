@@ -157,6 +157,9 @@ importers:
       https-proxy-agent:
         specifier: ^8.0.0
         version: 8.0.0
+      impers:
+        specifier: ^0.0.1
+        version: 0.0.1
       input-otp:
         specifier: ^1.4.2
         version: 1.4.2(react-dom@19.2.1(react@19.2.1))(react@19.2.1)
@@ -3466,6 +3469,9 @@ packages:
     resolution: {integrity: sha512-im9DjEDQ55s9fL4EYzOAv0yMqmMBSZp6G0VvFyTMPKWxiSBHUj9NW/qqLmXUwXrrM7AvqSlTCfvqRb0cM8yYqw==}
     engines: {node: '>=0.10.0'}
 
+  impers@0.0.1:
+    resolution: {integrity: sha512-C3hNedEmS6D3RlGoRSpJzaiV/hrlLRJHCyXNrTDRuhl6vHpDy+EGhhspn3+yyCQMIs3z64ICyL9Uwb+dd4g43g==}
+
   inflight@1.0.6:
     resolution: {integrity: sha512-k92I/b08q4wvFscXCLvqfsHCrjrF7yiXsQuIVvVE7N82W3+aqpzuUdBbfhWcy/FZR3/4IgflMgKLOsvPDrGCJA==}
     deprecated: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.
@@ -3586,6 +3592,9 @@ packages:
   kind-of@3.2.2:
     resolution: {integrity: sha512-NOW9QQXMoZGg/oqnVNoNTTIFEIid1627WCffUBJEdMxYApq7mNE7CpzucIPc+ZQg25Phej7IJSmX3hO+oblOtQ==}
     engines: {node: '>=0.10.0'}
+
+  koffi@2.15.2:
+    resolution: {integrity: sha512-r9tjJLVRSOhCRWdVyQlF3/Ugzeg13jlzS4czS82MAgLff4W+BcYOW7g8Y62t9O5JYjYOLAjAovAZDNlDfZNu+g==}
 
   kolorist@1.8.0:
     resolution: {integrity: sha512-Y+60/zizpJ3HRH8DCss+q95yr6145JXZo46OTpFvDZWLfRCE4qChOyk1b26nMaNpfHHgxagk9dXT5OP0Tfe+dQ==}
@@ -8419,6 +8428,10 @@ snapshots:
     dependencies:
       safer-buffer: 2.1.2
 
+  impers@0.0.1:
+    dependencies:
+      koffi: 2.15.2
+
   inflight@1.0.6:
     dependencies:
       once: 1.4.0
@@ -8523,6 +8536,8 @@ snapshots:
   kind-of@3.2.2:
     dependencies:
       is-buffer: 1.1.6
+
+  koffi@2.15.2: {}
 
   kolorist@1.8.0: {}
 

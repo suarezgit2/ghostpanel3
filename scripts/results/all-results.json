@@ -1,0 +1,117 @@
+[
+  {
+    "platform": "BrowserScan Bot Detection",
+    "url": "https://www.browserscan.net/bot-detection",
+    "data": {
+      "checks": {},
+      "verdicts": [
+        "BrowserScan - Robot Detection/WebDriver | BrowserScan",
+        "Webdriver\nUser-Agent\nCDP\nNavigator",
+        "Webdriver",
+        "No bots detected - the visitor could be a human using a regular browser.",
+        "WebDriver\nNormal",
+        "WebDriver",
+        "WebDriver Advance\nNormal",
+        "WebDriver Advance",
+        "Webdriverio\nNormal",
+        "Webdriverio",
+        "Headless Chrome\nNormal",
+        "Headless Chrome",
+        "webdriver\nfalse",
+        "webdriver",
+        "What is webdriver"
+      ],
+      "bodySnippet": "blog\nAntidetect Browser\nUtilities\nEN\nSign In\nHome\n>\nBot Detection\nTest Results:\nRobot\nWebdriver\nUser-Agent\nCDP\nNavigator\nBrowser bot detection guide\n\nBrowserScan detects automated activities on scripts or browsers. It analyzes various browser properties to determine whether the browser environment is controlled by a robot. Various human-machine verification products such as Cloudflare Turnstile and Google reCAPTCHA include this aspect of detection, which is usually divided into three categories:Bot detection tool\n\nNormal bots - usually bots belonging to well-known search engines (Google, Bing, Baidu). It crawls websites to create a searchable index of content. A good bot can also be a monitoring or uptime checking tool.\nMalicious bots - Usually automated tools like Selenium, Puppeteer, Playwright or anything that pretends to be a good search bot. It can take over accounts, submit spam, steal passwords, scrape data, waste resources, and more.Discord bots.\nNo bots detected - the visitor could be a human using a regular browser.\nAd\nIdentification and bot detection\n\nThe combination of fingerprinting and bot detection gives you a powerful tool to protect against online fraud and produces the best results when used together.\n\nWebDriver\nNormal\nWebDriver Advance\nNormal\nSelenium\nNormal\nNightmareJS\nNormal\nPhantomJS\nNormal\nAwesomium\nNormal\nCef\nNormal\nCefSharp\nNormal\nCoaches\nNormal\nFMiner\nNormal\nBorn\nNormal\nPhantomas\nNormal\nRhino\nNormal\nWebdriverio\nNormal\nHeadless Chrome\nNormal\nChrome DevTools Protocol Detection\n\nDetectable use of developer tools to simulate browsers or control them via related developer protocols.Web Browsers\n\nCDP\nRobot\nDev Tool\nNormal\nNative Navigator\n\nDetect whether the Navigator is deceptive. Some browser plug-ins or robots will modify key attributes to achieve deception.\n\nvendorSub\nproductSub\n20030107\nvendor\nGoogle Inc.\nmaxTouchPoints\n0\nscheduling\n\"[object Scheduling]\"\nuserActivation\n\"[object UserActivation]\"\ndoNotTrack\ngeolocation\n\"[object Geolocation]\"\nc",
+      "hasWebdriver": true,
+      "hasHeadless": true,
+      "hasAutomation": true,
+      "hasBotDetected": false,
+      "hasNotBot": true
+    },
+    "status": "ok"
+  },
+  {
+    "platform": "BrowserScan Fingerprint",
+    "url": "https://www.browserscan.net",
+    "data": {
+      "checks": {},
+      "bodySnippet": "blog\nAntidetect Browser\nUtilities\nEN\nSign In\nBest BrowserScan Fingerprint Detection Tool - Improve your online privacy security|Enhance your online privacy security with the best BrowserScan fingerprint checking tool. Protect your privacy from leaking with our advanced technology.support dns leak test,2fa live,check ip,browser checker,port scanner,speed test,user agent parse,proxy server detection,webrtc leak test, etc.\n54.209.231.240\nvirginia / USA\nBrowser:\nChrome 136.0.0.0 Detection\nPlatform:\n\nWindows 10\n\nIP Time Zone:\n\nAmerica/New_York\n\nLocation:\n39° 2′ 22.200″ N, 77° 29′ 30.480″ W\nDetection\nlanguage:\n\nEnglish (United States)(en-US)\n\nPostal Code:\n\n20147\n\nISP:\nAmazon.com, Inc.\nProxy:\n\nNo\n\nAnonymous:\nSign in firstSign In\nBlacklist:\nSign in firstSign In\nDNS Leak:\nNo\n172.253.8.14810 more\nDetection\nBot Detection:\nYesDetection\nBrowser fingerprint authenticity: 90%\nUnexpand\nAd\nBot Control\n-5%\nWhat is a robot?\n\nYour browser environment appears to be controlled by a robot.\n\nDifferent browser version\n-5%\nHow browser spoofing?\n\nThe browser version set by your browser does not match your actual browser version. It looks like you changed the UserAgent\n\nWhat websites see about you\nInternet Speed Test\nKernel detection\nBot Detection\nWebRTC leak Test\nIP address\nIP\n54.209.231.240(USA)\nWebRTC\n54.209.231.240(USA)\nWebRTC STUN\n54.209.231.240(USA)\nIP Count (7 days)\n\n0\n\nISP\n\nAmazon.com, Inc.\n\nLocation\nCountry\n\nUSA\n\nRegion\n\nvirginia\n\nCity\n\nashburn\n\nPostal Code\n\n20147\n\nLatitude\n\n39°2′22.20000″N\n\nLongitude\n\n77°29′30.48000″W\n\nGeolocation\nShow my location on the Map\nDiscover more\nScanner\nScanners\nScan\nHardware\nvisitor ID\n\n 55FADDF5\n\nCanvas\n52CDA852\nWebGL\n\n FE13E753\n\nWebGL Report\n\n C33A598A\n\nUnmasked Vendor\n\nIntel Inc.\n\nUnmasked Renderer\n\nIntel Iris OpenGL Engine\n\nAudio\n\n 0B09CAEB\n\nClient Rects\n\n 1CEED2E8\n\nWebGPU Report\n\nnot support\n\nScreen Resolution\n\n800×600\n\nAvailable Screen Size\n\n800×600\n\nColor Depth\n\n24\n\nTouch Support\n\nnot support\n\nDevice Memory\n\n4\n\nHardware Concurrency\n\n4\n\nMedia devices\nGet media device permissions\nBrowser\nIncognito mode\n\nNo\n\nOS\n\nWindows 10Fingerprint Detection Tool\n\nBrowser\n\nChrome\n\nBrowser Version\n136.0.0.0\nHeader\nMozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36\nJavaScript\nMozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36\nPDF Viewer\n\ninternal-pdf-viewer\n\nChrome PDF Viewer\n\ninternal-pdf-viewer\n\nChromium PDF Viewer\n\ninternal-pdf-viewer\n\nMicrosoft Edge PDF Viewer\n\ninternal-pdf-viewer\n\nWebKit built-in PDF\n\ninternal-pdf-viewer\n\nSoftware\nTime Zone Based on IP\nAmerica/New_York\nTime Zone\nAmerica/New_York\nTime From IP\nThu Mar 19 2026 12:02:43 GMT-0400\nTime From Javascript\nThu Mar 19 2026 12:02:43 GMT-0400 (Eastern Daylight Time)\nLanguages\n\nen-US,enSecure Browsing Solutions\n\nAccept-Language header\nen-US,en;q=0.9\nInternationalization API\n\nen-US\n\nBot Detection\nYes\nDo Not Track\n\nnull\n\nJavascript\n\nEnabled\n\nFlash\n\nDisabled\n\nActiveX\n\nDisable",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+      "platform": "Linux x86_64",
+      "languages": [
+        "en-US",
+        "en"
+      ],
+      "timezone": "America/New_York",
+      "timezoneOffset": 240,
+      "screenWidth": 800,
+      "screenHeight": 600,
+      "colorDepth": 24,
+      "hardwareConcurrency": 4,
+      "deviceMemory": 4,
+      "webdriver": false,
+      "plugins": 5
+    },
+    "status": "ok"
+  },
+  {
+    "platform": "Fingerprint.com Demo",
+    "url": "https://fingerprint.com/demo",
+    "data": {
+      "checks": {
+        "visitorId": "Data"
+      },
+      "bodySnippet": "We use cookies to improve your experience and analyze traffic. Read our Privacy Policy for details. You can manage your preferences below.\n\nCookies settings\nAccept\nDecline\nProduct\nUse Cases\nDevelopers\nResources\nDemo\nPricing\nLogin\nContact Sales\nGet Started\nSee Fingerprint in Action\nSee Fingerprint in Action\nAnalyze your device data, explore our Smart Signals.\nGet the data you need to differentiate suspicious and trusted devices.\nGet Started\nContact Sales\n01\nIDENTIFICATION SIGNALS\n02\nBROWSER SMART SIGNALS\n03\nMOBILE SMART SIGNALS\nAnalyze my browser again\nYour Unique Visitor ID Data\n_\n\nYOUR REAL BROWSER’S VISITOR ID\n\n9tnoS5mmvjl07xqaR9zC\n\nTry revisiting on VPN or incognito mode, your visitor ID will be the same.\n\nLAST SEEN\n\nLess than a minute ago\n\nVISIT HISTORY\n\nCurrent Visit\n\nCONFIDENCE SCORE\n\n0.99\n\nBROWSER\n\nChrome 136.0.0 on Windows (10)\n\nIP ADDRESS\n\n54.209.231.240\n\nOPERATING SYSTEM\n\nWindows\n\nTHIS IS A REAL DEMO. PRODUCTION ACCURACY WILL BE MUCH HIGHER.CREATE AN ACCOUNT TO SEE COMPLETE CAPABILITIES.\n\n[VISITOR ID: 9TNOS5MMVJL07XQAR9ZC]\nCHROME 136.0.0 ON WINDOWS (10)\n\nLAYER 01 IDENTIFICATION SIGNALS\n\nFingerprint collects 100+ identification signals from browsers and mobile devices. We use this data to assign a unique visitor ID, which can be easily accessed via our SDKs. \n\nExplore Identification\n\nLAYER 02 BROWSER SMART SIGNALS\n\nFingerprint provides actionable device intelligence insights, Smart Signals. Browser signals provide details on suspicious browser settings, which can indicate malicious intent. \n\nExplore Smart Signals\n\nLAYER 03 MOBILE SMART SIGNALS\n\nFingerprint’s mobile app signals provide detailed insights on compromised devices and manipulated environments, exposing potential fraud before it impacts users.\n\nExplore Use Cases\nWhat we solve_\nLess Fraud, More Growth\n\nBuild safe and seamless products with Fingerprint device intelligence. Differentiate trusted users from suspicious traffic to solve your toughest challenges.\n\nTOP USE CASES_\n\nSee all Use Cases\nPayment Fraud\nAccount Sharing\nAccount Takeover\nSMS Fraud\nReturning User Experience\nSurvey Fraud\nBot Detection\nPromo Abuse\nTrial Abuse\nPaywall\nChargeback Fraud\nNew Account Fraud\n\nTOP INDUSTRIES_\n\nFintech\nBuy Now, Pay Later\niGaming\nE-Commerce\nCryptocurrency\nHow we do it_\nVisualize Popular Use Cases\n\nThe device intelligence platform for visitor intent.\nReduce friction for the good guys. Stop the bad guys.\n\nNew Account Fraud\n\nDetect fake accounts and stop automated account creation by combining visitor ID with Smart Signals like Bot Detection and High-Activity Detection. Connect fake account creation to the same devices and reduce manual fraud reviews.\n\nStart your 15-day free trial now!\n\nNo credit card required. Instant access.\n\nSign up for free!\n\nSUSPECT SCORE\n\n29\n\nUser Denied\n\nYou've already created a free trial account.\n\nPayment Fraud\n\nReduce fraudulent orders and suspicious chargebacks by combining visitor ID with Smart Signals like High-Activity Device Detection and IP Geolocation. Quickly ",
+      "hasBotSignal": true,
+      "hasIncognito": true,
+      "hasVPN": true,
+      "hasVisitorId": true,
+      "webdriver": false
+    },
+    "status": "ok"
+  },
+  {
+    "platform": "CreepJS",
+    "url": "https://abrahamjuliot.github.io/creepjs/",
+    "data": {
+      "trustScore": "não encontrado",
+      "fingerprintHash": "não encontrado",
+      "liesCount": "não encontrado",
+      "botDetected": "não encontrado",
+      "lies": [
+        "111a203ca6a41f5397096b974d80abc1ef960d06cf5c7df8c7e5000000000000",
+        "type & base ip: 3516199863\nip: 54.209.231.240",
+        "blocked",
+        "a729208c",
+        "57c09598",
+        "cda280c3",
+        "rtt: 100, downlink: 1.45\neffectiveType: 4g\nsaveData: false",
+        "level: 100%\ncharging: true\ncharge time: fully charged\ndischarge time: charging"
+      ],
+      "scores": {
+        "scale-up grade-C": "moderate",
+        "scale-up grade-A": "high"
+      },
+      "bodySnippet": "FP ID: bd199b033a2f0bddb01f25d066c37d1fffc6e6646357dfb8d1a190ee7a813b66\nFuzzy: 111a203ca6a41f5397096b974d80abc1ef960d06cf5c7df8c7e5000000000000\n659.20 ms\nWebRTCf43c760d\nhost connection:\ncandidate:3516199863 1 udp 2113937151 f63a063d-2848-4800-bf64-abccdc95789b.local 44620 typ host generation 0 ufrag JNL3 network-cost 999\nfoundation/ip:\ntype & base ip: 3516199863\nip: 54.209.231.240\nsdp capabilities: 979f41d7\nstun connection:\ncandidate:4111248318 1 udp 1677729535 54.209.231.240 46810 typ srflx raddr 0.0.0.0 rport 0 generation 0 ufrag JNL3 network-cost 999\ndevices (0):\nblocked\n18.90ms\nTimezone2d612b4e\nEastern Daylight Time\nAmerica, New York\n-27028667038000\n240\n6.60ms\nIntl23d22f8d\nen-US\nJuly at Eastern Daylight Time\nAmerican English\n21 million\nnext year\n0 or 1\none\n11.50ms\nHeadless826b8eca\nchromium: true\n50% like headless: 9928d79b\n33% headless: 6ed45504\n80% stealth: 1b90e96f\nplatform hints:\nArial\n0:73:100:91:91\n\n1.10ms\nResistance2fbda56e\nprivacy: unknown\nsecurity: unknown\nmode: unknown\nextension: puppeteer-extra\n406.10ms\nServiceWorkerGlobalScope\nWorker920ea643\nlang/timezone:\nen-US (1 US dollar)\nAmerica/New_York (240)\nconfidence: moderate\ngpu:\nGoogle Inc. (Google)\nANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)\nuserAgent:\nMozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/128.0.0.0 Safari/537.36\ndevice:\nLinux (Linux x86_64)\nLinux x86_64\ncores: 6, ram: 4\nuserAgentData:\nChromium 128 (128.0.6613.137)\nLinux 6.1.102 x86_64\n104.80ms\nWebGLa729208c\nimages:bcfc944b\npixels:50875bab\nparams (78): 4938e478\nexts (65): e243c0e5\ngpu:\nconfidence: high\nIntel Inc.\nIntel Iris OpenGL Engine\n0.10ms\nScreenb0313e03\n...screen: 800 x 600\n....avail: 800 x 600\ntouch: false\ndepth: 24|24\nviewport:\n1920\n1920\n1920\n1080\n989\n989\nbrowser\nlandscape\nportrait-primary\n1\n65.20ms\nCanvas 2ddf7eb7c4\ndata: c64f8d9a\nrendering:\ntextMetrics:\n0.006155703125\n😀☺☹...❄☑✴\n167.90ms\nFonts57c09598\nload (7/51): Like undefined\napps: unsupported\nLiberation Mono, Noto Color Emoji, Noto Sans Canadian Aboriginal Regular, Noto Sans Gunjala Gondi Regular, Noto Sans Masaram Gondi Regular, Noto Serif Yezidi Regular, OpenSymbol\n\n0.053373750000000005\n😀☺☹...❄☑✴\n4.90ms\nDOMRect67ee4c7d\nelems A: 0.26037227672485364\nelems B: 0.26037227672485364\nrange A: 0.26037227672485364\nrange B: 0.26037227672485364\n0.05342704177856446\n😀☺☹...❄☑✴\n16.00ms\nSVGRectd195f474\nbBox: 0.0682000015258789\nchar: 0.03736906280517578\nsubs: 0.024975050354003905\ntext: 0.024975050354003905\n0.02141064262390137\n😀☺☹...❄☑✴\n45.00ms\nAudio9d6aa470\nsum: 124.04347527516074\ngain: -20.538288116455078\nfreq: 164537.64805984497\ntime: 502.5999283068122\ntrap: 0.2946971277121875\nunique: 4736\ndata:3d5e3923\ncopy:3d5e3923\nvalues: dfc44fc6\nSpeech\nlocal (0): blocked\nremote (0): blocked\nlang (0): blocked\ndefault:\nblocked\n0.90ms\nMediacbbc5686\nmimes (9/12): c6f564ad\n7.90ms\nFeatures: 113-115+\nJS/DOM: f55b2d2c (v114-115)\nCSS: 379baeb6 (v114-115)\nWindow: 3e4205d3 (v113-115)\n8.10ms\nCSS Media Queriescb",
+      "hasLies": false,
+      "hasBot": false,
+      "webdriver": false
+    },
+    "status": "ok"
+  },
+  {
+    "platform": "PixelScan",
+    "url": "https://pixelscan.net",
+    "data": {
+      "checks": {},
+      "consistent": "não encontrado",
+      "suspicious": "não encontrado",
+      "bodySnippet": "Products\nResources\nSpecial Offers\nCompany\nFingerprint Check\n\nVerify your browser fingerprint\n\nCHECKERS\nIP Address Check\n\nSee your IP details\n\nIP Blacklist Check\n\nReviewing blacklist agent\n\nBot Verification\n\nVerify that a user is a human\n\nVPN Check\n\nTest and see the expected security\n\nTOOLS\nDNS Leak Test\n\nSecuring your DNS tunnel\n\nWebRTC Leak Test\n\nSecuring your WebRTC tunnel\n\nLocation Info\n\nProvide accurate location\n\nCookie Converter\n\nConvert Cookies into JSON\n\nRESOURCES\nPixelscan Blog\n\n330+ useful articles\n\nGUIDES\nUltimate Antidetect Guide\nProxy Best Practices\nBEST PROXIES\nBest Proxy Providers\nBest Residential Proxies\nBest Mobile Proxies\nBest Telegram Proxies\nBest Chinese Proxies\nRECOMMENDED TOOLS\nBest Anti-Detect Browsers\nBest Cloud Phones Providers\nBest Tools To Avoid IP Ban\nBest Captcha Solvers\nPhone Farming\nPixelscan Partners\n\nGet exclusive discounts from top services\n\nBEST DEALS\n-50% OFF Multilogin\n\nReliable antidetect browser\n\nExtra 3 GB For NodeMaven\n\nStable and undetectable proxies\n\n2000 Credits For Nextbrowser\n\nAI browser automation with proxy & anti-detect\n\nCOMPANY INFO\nAbout Pixelscan\nContact Us\nJoin Pixelscan Community\nSee\nWhat\nYour\nReveals\nAbout\nYou\n\nRun a free, instant scan to uncover your digital footprint. Check for VPN leaks, trackers, and fingerprinting to protect your privacy online.\n\nScan My Browser Now\nNo registration\n100% secure\nTakes 5 seconds\nClick \"Scan My Browser\"\n\nStart the free, no-installation scan\n\nReview Your Analysis\n\nGet a detailed report in seconds\n\nFix the Issues\n\nFollow our guided recommendations to enhance your privacy\n\nAll-In-One Privacy Diagnostics\nFingerprint Check\n\nVerify your browser fingerprint\n\nIP Blacklist Check\n\nReviewing blacklist agent\n\nDNS Leak Test\n\nSecuring your DNS tunnel\n\nIP Address Check\n\nSee your IP details\n\nVPN Check\n\nTest and see the expected security\n\nBot Verification\n\nVerify that user is a human\n\nLocation Info\n\nProvide accurate location\n\nWebRTC Leak Test\n\nSecuring your WebRTC tunnel\n\nNew\nCookie Converter\n\nC",
+      "hasConsistent": false,
+      "hasSuspicious": false,
+      "hasBot": true,
+      "webdriver": false
+    },
+    "status": "ok"
+  }
+]

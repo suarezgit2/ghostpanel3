@@ -21,6 +21,11 @@ export const ENV = {
   zohoAccountId: process.env.ZOHO_ACCOUNT_ID ?? "",
   twocaptchaApiKey: process.env.TWOCAPTCHA_API_KEY ?? "",
   captchaProvider: process.env.CAPTCHA_PROVIDER ?? "capsolver",
+  // TLS Impersonation (curl-impersonate)
+  // Path to libcurl-impersonate-chrome.so for Chrome TLS/HTTP2 fingerprint impersonation
+  // If not set, impers will try to auto-download or fall back to native fetch
+  libcurlImpersonatePath: process.env.LIBCURL_IMPERSONATE_PATH ?? "",
+
   // Admin password hash (bcrypt) para autenticação local
   adminPasswordHash: process.env.ADMIN_PASSWORD_HASH ?? "",
 };

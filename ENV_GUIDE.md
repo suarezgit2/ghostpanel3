@@ -51,6 +51,25 @@ O Zoho Mail é usado para ler os emails de verificação enviados pelo manus.im.
 
 Para configurar o OAuth2 do Zoho, acesse https://api-console.zoho.com/ e crie um "Self Client" com os escopos `ZohoMail.messages.READ` e `ZohoMail.accounts.READ`. Gere um refresh token com esses escopos.
 
+## TLS Impersonation (opcional, recomendado)
+
+O sistema usa `impers` (curl-impersonate) para fazer requisições HTTP com fingerprint TLS/HTTP2 idêntico ao Google Chrome real. Isso impede que o Cloudflare ou o servidor do manus.im detecte que as requisições vêm de Node.js.
+
+| Variável | Descrição |
+|----------|----------|
+| `LIBCURL_IMPERSONATE_PATH` | Caminho para `libcurl-impersonate-chrome.so`. Se não definida, o impers tenta baixar automaticamente. Se falhar, o sistema usa `fetch` nativo (sem impersonation). |
+
+Para instalar manualmente:
+```bash
+# Baixar curl-impersonate para Linux x64
+wget https://github.com/lexiforest/curl-impersonate/releases/download/v0.8.0/libcurl-impersonate-v0.8.0.x86_64-linux-gnu.tar.gz
+mkdir -p /opt/curl-impersonate
+tar xzf libcurl-impersonate-v0.8.0.x86_64-linux-gnu.tar.gz -C /opt/curl-impersonate/
+
+# Adicionar ao .env
+echo 'LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so' >> .env
+```
+
 ## Manus OAuth (opcional)
 
 Estas variáveis só são necessárias se `LOCAL_AUTH=false` (modo produção com autenticação Manus).
@@ -87,6 +106,9 @@ ZOHO_CLIENT_ID=1000.XXXX
 ZOHO_CLIENT_SECRET=xxxx
 ZOHO_REFRESH_TOKEN=1000.xxxx.xxxx
 ZOHO_ACCOUNT_ID=1410307000000008002
+
+# === TLS Impersonation (opcional, recomendado) ===
+LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so
 
 # === Manus OAuth (opcional, só se LOCAL_AUTH=false) ===
 # VITE_APP_ID=
