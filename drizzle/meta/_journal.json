@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1773384391372,
+      "tag": "0000_needy_deadpool",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1773384520135,
+      "tag": "0001_calm_bruce_banner",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1773384948722,
+      "tag": "0002_brainy_ben_parker",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1773388866446,
+      "tag": "0003_sticky_husk",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+# ============================================================
+# Ghost Panel - Docker Compose
+# Roda MySQL + Ghost Panel com um único comando
+# ============================================================
+# Uso:
+#   docker compose up -d          # Iniciar
+#   docker compose logs -f app    # Ver logs
+#   docker compose down           # Parar
+# ============================================================
+
+services:
+  # ---------- MySQL ----------
+  db:
+    image: mysql:8.0
+    container_name: ghost-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ghost_root_123
+      MYSQL_DATABASE: ghost_panel
+      MYSQL_USER: ghost
+      MYSQL_PASSWORD: ghost123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "ghost", "-pghost123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+
+  # ---------- Ghost Panel ----------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ghost-panel
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: mysql://ghost:ghost123@db:3306/ghost_panel
+      JWT_SECRET: ${JWT_SECRET:-troque-por-um-segredo-aleatorio-longo}
+      LOCAL_AUTH: "true"
+      PORT: "3000"
+      NODE_ENV: production
+
+      # API Keys - preencha com seus valores
+      CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-}
+      SMSBOWER_API_KEY: ${SMSBOWER_API_KEY:-}
+      WEBSHARE_API_KEY: ${WEBSHARE_API_KEY:-}
+      ZOHO_CLIENT_ID: ${ZOHO_CLIENT_ID:-}
+      ZOHO_CLIENT_SECRET: ${ZOHO_CLIENT_SECRET:-}
+      ZOHO_REFRESH_TOKEN: ${ZOHO_REFRESH_TOKEN:-}
+      ZOHO_ACCOUNT_ID: ${ZOHO_ACCOUNT_ID:-}
+
+volumes:
+  mysql_data:
+    driver: local
