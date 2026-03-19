@@ -5,7 +5,7 @@
 # ============================================================
 
 # ---------- Stage 1: Build ----------
-FROM node:22-alpine AS builder
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
@@ -26,9 +26,9 @@ COPY . .
 RUN pnpm build
 
 # ---------- Stage 2: Download curl-impersonate ----------
-FROM alpine:3.20 AS curl-dl
+FROM debian:bookworm-slim AS curl-dl
 
-RUN apk add --no-cache wget tar gzip
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Download curl-impersonate for Linux x64 (Chrome variant)
 RUN mkdir -p /opt/curl-impersonate && \
@@ -38,13 +38,15 @@ RUN mkdir -p /opt/curl-impersonate && \
     rm /tmp/curl-impersonate.tar.gz
 
 # ---------- Stage 3: Production ----------
-FROM node:22-alpine AS runner
+FROM node:22-slim AS runner
 
 WORKDIR /app
 
-# Install glibc compatibility layer (curl-impersonate is built against glibc)
-# Alpine uses musl, so we need gcompat for the .so to load
-RUN apk add --no-cache gcompat libstdc++
+# Instalar dependências de sistema necessárias para curl-impersonate
+# node:22-slim é Debian (glibc), compatível nativamente com libcurl-impersonate
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget ca-certificates libstdc++6 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Instalar pnpm
 RUN corepack enable && corepack prepare pnpm@10.4.1 --activate
@@ -71,6 +73,7 @@ COPY drizzle/ ./drizzle/
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so
+ENV LD_LIBRARY_PATH=/opt/curl-impersonate
 
 EXPOSE 3000
 
