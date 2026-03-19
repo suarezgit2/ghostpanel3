@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users } from "../drizzle/schema";
 import { ENV } from './_core/env';
@@ -16,6 +16,54 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+/**
+ * Aplica DDL pendente diretamente via SQL inline.
+ * Usa CREATE TABLE IF NOT EXISTS e ADD COLUMN IF NOT EXISTS para ser idempotente.
+ * Não depende de arquivos externos — funciona em qualquer ambiente (Railway, Docker, etc).
+ */
+export async function runMigrations(): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Migrations] Database não disponível, pulando migrations");
+    return;
+  }
+
+  console.log("[Migrations] Aplicando DDL pendente...");
+
+  try {
+    // Migration 0005: job_folders table + folderId column on jobs
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS \`job_folders\` (
+        \`id\` int AUTO_INCREMENT NOT NULL,
+        \`clientName\` varchar(256) NOT NULL,
+        \`inviteCode\` varchar(128) NOT NULL,
+        \`totalJobs\` int NOT NULL DEFAULT 0,
+        \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+        \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT \`job_folders_id\` PRIMARY KEY (\`id\`)
+      )
+    `);
+
+    // ADD COLUMN IF NOT EXISTS is supported in MySQL 8.0+ and TiDB
+    await db.execute(sql`
+      ALTER TABLE \`jobs\`
+        ADD COLUMN IF NOT EXISTS \`folderId\` int NULL
+    `);
+
+    // Migration 0006: add 'partial' to jobs status enum
+    // MODIFY COLUMN is idempotent in MySQL/TiDB — safe to run multiple times
+    await db.execute(sql`
+      ALTER TABLE \`jobs\`
+        MODIFY COLUMN \`status\` ENUM('pending','running','paused','completed','partial','failed','cancelled') NOT NULL DEFAULT 'pending'
+    `);
+
+    console.log("[Migrations] DDL aplicado com sucesso");
+  } catch (error) {
+    console.error("[Migrations] Erro ao aplicar DDL:", error);
+    // Não lança o erro para não impedir o boot
+  }
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {

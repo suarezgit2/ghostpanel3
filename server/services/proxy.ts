@@ -294,14 +294,27 @@ class ProxyService {
 
     const proxy = result[0];
 
-    // Mark as USED and DISABLED immediately (single-use)
-    await db
+    // Mark as USED and DISABLED immediately (single-use).
+    // Use conditional UPDATE to prevent race condition: if two concurrent jobs
+    // SELECT the same proxy, only the first UPDATE will match (enabled=true).
+    const updateResult = await db
       .update(proxies)
       .set({
         lastUsedAt: new Date(),
         enabled: false,
       })
-      .where(eq(proxies.id, proxy.id));
+      .where(
+        and(
+          eq(proxies.id, proxy.id),
+          eq(proxies.enabled, true) // Only update if still available (atomic guard)
+        )
+      );
+
+    // If another job already claimed this proxy, retry recursively
+    if (updateResult[0]?.affectedRows === 0) {
+      await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} já foi alocado por outro job, tentando próximo...`, {}, jobId);
+      return this.getProxy(jobId);
+    }
 
     await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} alocado (uso único) — será substituído automaticamente`, {}, jobId);
 

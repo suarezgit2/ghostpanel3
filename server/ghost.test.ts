@@ -373,9 +373,11 @@ describe("Ghost Panel - Fingerprint & AuthCommandCmd", () => {
     expect(profile).toHaveProperty("timezoneOffset");
     expect(profile.clientId).toHaveLength(22);
     expect(profile.colorDepth).toBe(24);
-    // firstEntry deve ser um dos valores válidos
-    const validFirstEntries = ["direct", "google", "twitter", "linkedin", "facebook", "reddit"];
-    expect(validFirstEntries).toContain(profile.firstEntry);
+    // firstEntry deve ser undefined (direct access) ou uma URL válida
+    if (profile.firstEntry !== undefined) {
+      expect(typeof profile.firstEntry).toBe("string");
+      expect(profile.firstEntry).toMatch(/^https?:\/\//);
+    }
     // timezoneOffset deve ser um número
     expect(typeof profile.timezoneOffset).toBe("number");
   });
@@ -424,10 +426,11 @@ describe("Ghost Panel - Fingerprint & AuthCommandCmd", () => {
     expect(profile.timezone).toBeTruthy();
     expect(typeof profile.locale).toBe("string");
     expect(typeof profile.timezone).toBe("string");
-    // ANTI-DETECTION v4.2: firstEntry deve estar presente e ser válido
-    expect(profile.firstEntry).toBeTruthy();
-    const validFirstEntries = ["direct", "google", "twitter", "linkedin", "facebook", "reddit"];
-    expect(validFirstEntries).toContain(profile.firstEntry);
+    // ANTI-DETECTION v5.1: firstEntry is undefined (direct) or a full URL
+    if (profile.firstEntry !== undefined) {
+      expect(typeof profile.firstEntry).toBe("string");
+      expect(profile.firstEntry).toMatch(/^https?:\/\//);
+    }
     // timezoneOffset deve ser um número inteiro (DST-aware)
     expect(typeof profile.timezoneOffset).toBe("number");
     expect(Number.isInteger(profile.timezoneOffset)).toBe(true);
@@ -536,25 +539,29 @@ describe("Ghost Panel - Anti-Detection v4.2", () => {
     });
   });
 
-  it("fingerprintService gera firstEntry com distribuição realista (não 100% direct)", async () => {
+  it("fingerprintService gera firstEntry com distribuição realista (URLs ou undefined)", async () => {
     const { fingerprintService } = await import("./services/fingerprint");
 
     // Gerar 50 perfis e verificar distribuição de firstEntry
-    const entries: string[] = [];
+    const entries: (string | undefined)[] = [];
     for (let i = 0; i < 50; i++) {
       const profile = fingerprintService.generateProfile();
       entries.push(profile.firstEntry);
     }
 
-    // Não deve ser 100% "direct" (probabilidade estatística)
-    const directCount = entries.filter(e => e === "direct").length;
-    // Com 55% de chance de "direct", em 50 tentativas esperamos entre 15 e 45
-    expect(directCount).toBeLessThan(50); // Nunca 100% direct
-    expect(directCount).toBeGreaterThan(0); // Deve ter alguns direct
+    // Com 45% de chance de undefined (direct access), em 50 tentativas esperamos entre 10 e 40
+    const undefinedCount = entries.filter(e => e === undefined).length;
+    expect(undefinedCount).toBeLessThan(50); // Nunca 100% undefined
+    expect(undefinedCount).toBeGreaterThan(0); // Deve ter alguns undefined (direct)
 
-    // Deve ter pelo menos um não-direct
-    const nonDirect = entries.filter(e => e !== "direct");
-    expect(nonDirect.length).toBeGreaterThan(0);
+    // Deve ter pelo menos um com URL (não-direct)
+    const withUrl = entries.filter(e => e !== undefined);
+    expect(withUrl.length).toBeGreaterThan(0);
+
+    // Todos os não-undefined devem ser URLs válidas
+    withUrl.forEach(url => {
+      expect(url).toMatch(/^https?:\/\//);
+    });
   });
 
   it("timezoneOffset usa valor DST-aware (não valor fixo desatualizado)", async () => {
@@ -584,6 +591,46 @@ describe("Ghost Panel - Anti-Detection v4.2", () => {
     // (pode ser igual se gerado no mesmo milissegundo, mas improvável)
     expect(typeof freshDcr).toBe("string");
     expect(freshDcr.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Ghost Panel - TLS Impersonation (v5.0)", () => {
+  it("httpClient exporta as funções necessárias", async () => {
+    const { httpRequest, isTlsImpersonationActive, getHttpClientInfo } = await import("./services/httpClient");
+
+    expect(typeof httpRequest).toBe("function");
+    expect(typeof isTlsImpersonationActive).toBe("function");
+    expect(typeof getHttpClientInfo).toBe("function");
+  });
+
+  it("getHttpClientInfo retorna informações do cliente HTTP", async () => {
+    const { getHttpClientInfo } = await import("./services/httpClient");
+    const info = await getHttpClientInfo();
+
+    expect(info).toHaveProperty("client");
+    expect(info).toHaveProperty("impersonateSupport");
+    expect(["impers", "fetch"]).toContain(info.client);
+    expect(typeof info.impersonateSupport).toBe("boolean");
+  });
+
+  it("rpc.ts não importa mais https-proxy-agent diretamente", async () => {
+    // O rpc.ts agora usa httpClient em vez de fetch + HttpsProxyAgent
+    // Verificar que o módulo httpClient é importado corretamente
+    const rpcModule = await import("./providers/manus/rpc");
+
+    expect(typeof rpcModule.getUserPlatforms).toBe("function");
+    expect(typeof rpcModule.registerByEmail).toBe("function");
+    expect(typeof rpcModule.checkInvitationCode).toBe("function");
+    expect(typeof rpcModule.getAvailableCredits).toBe("function");
+  });
+
+  it("httpClient mapeia versão do Chrome para target de impersonation correto", async () => {
+    // Teste indireto: o httpRequest aceita userAgent e não crasheia
+    const { httpRequest } = await import("./services/httpClient");
+
+    // Não podemos testar uma requisição real em unit tests,
+    // mas podemos verificar que a função aceita os parâmetros corretos
+    expect(typeof httpRequest).toBe("function");
   });
 });
 

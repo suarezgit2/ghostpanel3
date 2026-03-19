@@ -12,6 +12,15 @@ import { motion, AnimatePresence } from "framer-motion";
 
 type Step = "input" | "confirm" | "success" | "error";
 
+function extractInviteCode(input: string): string {
+  const trimmed = input.trim();
+  const pathMatch = trimmed.match(/\/invitation\/([A-Za-z0-9]+)/);
+  if (pathMatch) return pathMatch[1];
+  const queryMatch = trimmed.match(/[?&]code=([A-Za-z0-9]+)/);
+  if (queryMatch) return queryMatch[1];
+  return trimmed;
+}
+
 export default function RedeemKey() {
   const [step, setStep] = useState<Step>("input");
   const [code, setCode] = useState("");
@@ -55,7 +64,7 @@ export default function RedeemKey() {
     e.preventDefault();
     redeemMutation.mutate({
       code: code.toUpperCase(),
-      inviteCode: inviteCode.trim(),
+      inviteCode: extractInviteCode(inviteCode),
       name: name.trim() || undefined,
     });
   }
@@ -157,7 +166,7 @@ export default function RedeemKey() {
                     id="inviteCode"
                     value={inviteCode}
                     onChange={(e) => setInviteCode(e.target.value)}
-                    placeholder="Ex: ABCDEFGHIJ"
+                    placeholder="Ex: ABCDEFGHIJ ou cole o link de convite"
                     className="font-mono"
                     required
                   />

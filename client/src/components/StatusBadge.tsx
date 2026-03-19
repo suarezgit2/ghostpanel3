@@ -7,6 +7,7 @@ const STATUS_CONFIG: Record<string, { color: string; bg: string; dot: string; la
   failed: { color: "text-ghost-error", bg: "bg-ghost-error/10", dot: "bg-ghost-error", label: "Falhou" },
   pending: { color: "text-ghost-warning", bg: "bg-ghost-warning/10", dot: "bg-ghost-warning", label: "Pendente" },
   cancelled: { color: "text-muted-foreground", bg: "bg-muted/50", dot: "bg-muted-foreground", label: "Cancelado" },
+  partial: { color: "text-orange-400", bg: "bg-orange-400/10", dot: "bg-orange-400", label: "Parcial" },
   bad: { color: "text-ghost-error", bg: "bg-ghost-error/10", dot: "bg-ghost-error", label: "Ruim" },
 };
 

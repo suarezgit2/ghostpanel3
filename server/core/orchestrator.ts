@@ -8,15 +8,16 @@
  *      maxAttempts = quantity * 5 (ou seja, até 5x tentativas por conta solicitada).
  *   3. Backoff inteligente: após falhas consecutivas, aumenta o delay progressivamente.
  *   4. Se atingir o maxAttempts sem completar, finaliza com status parcial.
+ *   5. Job Rápido suporta múltiplos jobs por destinatário, agrupados em pasta.
  */
 
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db";
-import { jobs, accounts, providers } from "../../drizzle/schema";
+import { jobs, accounts, providers, jobFolders } from "../../drizzle/schema";
 import { proxyService } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
-import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep } from "../utils/helpers";
-import { getSetting, setSetting } from "../utils/settings";
+import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
+import { getSetting } from "../utils/settings";
 import { manusProvider, type ManusProvider } from "../providers/manus";
 
 type ProviderInstance = ManusProvider;
@@ -48,6 +49,8 @@ export interface CreateJobOptions {
   inviteCode?: string;
   /** Label para identificar o job (ex: "Usuário A - 5000 créditos") */
   label?: string;
+  /** ID da pasta de agrupamento (para múltiplos jobs do mesmo cliente) */
+  folderId?: number;
 }
 
 export interface QuickJobRecipient {
@@ -55,8 +58,10 @@ export interface QuickJobRecipient {
   inviteCode: string;
   /** Quantidade de créditos a enviar */
   credits: number;
-  /** Label opcional */
+  /** Label opcional (nome do cliente) */
   label?: string;
+  /** Quantidade de jobs a criar para este destinatário (padrão: 1) */
+  jobCount?: number;
 }
 
 class Orchestrator {
@@ -86,6 +91,7 @@ class Orchestrator {
       completedAccounts: 0,
       failedAccounts: 0,
       concurrency: options.concurrency || 1,
+      folderId: options.folderId || null,
       config: {
         password: options.password || "auto",
         delayMin: options.delayMin || 3000,
@@ -116,31 +122,71 @@ class Orchestrator {
 
   /**
    * Cria múltiplos jobs em paralelo para o Job Rápido (envio de créditos).
-   * Cada destinatário recebe um job independente com seu próprio invite code.
-   * Créditos / 500 = número de contas a criar.
+   * Cada destinatário recebe um ou mais jobs com seu próprio invite code.
+   * Créditos / 500 = número de contas por job.
+   * Se jobCount > 1, cria uma pasta com o nome do cliente e os jobs dentro dela.
    */
-  async createQuickJobs(recipients: QuickJobRecipient[]): Promise<{ jobIds: number[]; summary: string }> {
+  async createQuickJobs(recipients: QuickJobRecipient[]): Promise<{ jobIds: number[]; folderIds: number[]; summary: string }> {
     const CREDITS_PER_ACCOUNT = 500;
-    const jobIds: number[] = [];
+    const allJobIds: number[] = [];
+    const allFolderIds: number[] = [];
     const summaryLines: string[] = [];
 
     for (const recipient of recipients) {
       const quantity = Math.max(1, Math.floor(recipient.credits / CREDITS_PER_ACCOUNT));
-      const label = recipient.label || `${recipient.credits} créditos → ${recipient.inviteCode.substring(0, 10)}...`;
+      const jobCount = Math.max(1, recipient.jobCount || 1);
+      const clientName = recipient.label || `${recipient.inviteCode.substring(0, 10)}...`;
 
-      const jobId = await this.createJob({
-        provider: "manus",
-        quantity,
-        inviteCode: recipient.inviteCode,
-        label,
-      });
+      if (jobCount > 1) {
+        // Criar pasta para agrupar os jobs deste cliente
+        const db = await getDb();
+        if (!db) throw new Error("Database não disponível");
 
-      jobIds.push(jobId);
-      summaryLines.push(`Job #${jobId}: ${quantity} contas para "${label}" (${recipient.credits} créditos)`);
+        const folderResult = await db.insert(jobFolders).values({
+          clientName,
+          inviteCode: recipient.inviteCode,
+          totalJobs: jobCount,
+        });
+
+        const folderId = folderResult[0].insertId;
+        allFolderIds.push(folderId);
+
+        const instanceJobIds: number[] = [];
+        for (let i = 0; i < jobCount; i++) {
+          const label = `${clientName} — Instância ${i + 1}/${jobCount}`;
+          const jobId = await this.createJob({
+            provider: "manus",
+            quantity,
+            inviteCode: recipient.inviteCode,
+            label,
+            folderId,
+          });
+          instanceJobIds.push(jobId);
+          allJobIds.push(jobId);
+        }
+
+        summaryLines.push(
+          `📁 Pasta "${clientName}" (ID: ${folderId}): ${jobCount} jobs × ${quantity} contas = ${jobCount * quantity} contas totais\n` +
+          `   Jobs: ${instanceJobIds.map(id => `#${id}`).join(", ")}`
+        );
+      } else {
+        // Job único — comportamento anterior
+        const label = recipient.label || `${recipient.credits} créditos → ${recipient.inviteCode.substring(0, 10)}...`;
+        const jobId = await this.createJob({
+          provider: "manus",
+          quantity,
+          inviteCode: recipient.inviteCode,
+          label,
+        });
+
+        allJobIds.push(jobId);
+        summaryLines.push(`Job #${jobId}: ${quantity} contas para "${label}" (${recipient.credits} créditos)`);
+      }
     }
 
     return {
-      jobIds,
+      jobIds: allJobIds,
+      folderIds: allFolderIds,
       summary: summaryLines.join("\n"),
     };
   }
@@ -162,14 +208,16 @@ class Orchestrator {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
 
-    const originalInviteCode = await getSetting("invite_code");
-    const jobInviteCode = options.inviteCode || originalInviteCode;
-    const useCustomInvite = !!(options.inviteCode && options.inviteCode !== originalInviteCode);
+    // Resolve invite code for this job ONCE at start (no global setting mutation)
+    const globalInviteRaw = await getSetting("invite_code");
+    const globalInviteCode = globalInviteRaw ? extractInviteCode(globalInviteRaw) : "";
+    const jobInviteCode = options.inviteCode ? extractInviteCode(options.inviteCode) : globalInviteCode;
 
     let consecutiveFailures = 0;
     let currentBackoffMs = BACKOFF_CONFIG.initialBackoffMs;
 
     let successCount = 0;
+    let inviteConfirmedCount = 0; // contas criadas com convite confirmado
     let totalAttempts = 0;
     const maxAttempts = options.quantity * MAX_ATTEMPTS_MULTIPLIER;
 
@@ -237,17 +285,8 @@ class Orchestrator {
           }, jobId
         );
 
-        // Override invite code temporariamente se o job tem um próprio
-        if (useCustomInvite && jobInviteCode) {
-          await setSetting("invite_code", jobInviteCode);
-        }
-
-        const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId });
-
-        // Restaurar invite code original após uso
-        if (useCustomInvite && originalInviteCode) {
-          await setSetting("invite_code", originalInviteCode);
-        }
+        // Pass invite code directly to createAccount (no global setting mutation = no race condition)
+        const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId, inviteCode: jobInviteCode });
 
         await db.update(accounts).set({
           status: result.status,
@@ -258,11 +297,15 @@ class Orchestrator {
 
         if (result.status === "active") {
           successCount++;
+          if (result.inviteAccepted) {
+            inviteConfirmedCount++;
+          }
           await db.update(jobs).set({
             completedAccounts: sql`${jobs.completedAccounts} + 1`,
           }).where(eq(jobs.id, jobId));
           await logger.info("orchestrator",
-            `SUCESSO! Conta ${successCount}/${options.quantity} criada (tentativa ${totalAttempts})`,
+            `SUCESSO! Conta ${successCount}/${options.quantity} criada (tentativa ${totalAttempts})` +
+            (result.inviteAccepted === false ? " [convite NÃO confirmado]" : ""),
             { email }, jobId
           );
 
@@ -287,14 +330,9 @@ class Orchestrator {
         }
 
       } catch (err) {
-        // Restaurar invite code em caso de erro
-        if (useCustomInvite && originalInviteCode) {
-          await setSetting("invite_code", originalInviteCode).catch(() => {});
-        }
-
         const msg = err instanceof Error ? err.message : String(err);
         await db.update(accounts).set({
-          status: "failed" as const,
+          status: "failed",
           metadata: { error: msg },
         }).where(eq(accounts.id, accountId));
 
@@ -324,12 +362,22 @@ class Orchestrator {
 
     const fj = finalJob[0];
 
-    let finalStatus: "completed" | "failed";
+    let finalStatus: "completed" | "partial" | "failed";
     if (fj && fj.completed >= fj.total) {
-      finalStatus = "completed";
+      // Todas as contas foram criadas — mas verifica se o convite foi confirmado em todas
+      if (jobInviteCode && inviteConfirmedCount < successCount) {
+        finalStatus = "partial";
+        await logger.warn("orchestrator",
+          `Job ${jobId}: contas criadas mas convite não confirmado em todas ` +
+          `(${inviteConfirmedCount}/${successCount} com convite confirmado). Status: partial`,
+          {}, jobId
+        );
+      } else {
+        finalStatus = "completed";
+      }
     } else if (totalAttempts >= maxAttempts && successCount < options.quantity) {
       // Atingiu o limite de tentativas sem completar a meta
-      finalStatus = successCount > 0 ? "completed" : "failed";
+      finalStatus = successCount > 0 ? "partial" : "failed";
       await logger.warn("orchestrator",
         `Job ${jobId} atingiu o limite de ${maxAttempts} tentativas. ` +
         `Conseguiu ${successCount}/${options.quantity} contas.`,

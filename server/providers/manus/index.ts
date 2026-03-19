@@ -27,8 +27,7 @@ import { EmailVerifyCodeAction } from "./rpc";
 import { captchaService } from "../../services/captcha";
 import { emailService } from "../../services/email";
 import { smsService } from "../../services/sms";
-import { logger, STEP_DELAYS, sleep, randomDelay } from "../../utils/helpers";
-import { getSetting } from "../../utils/settings";
+import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
 import type { BrowserProfile } from "../../services/fingerprint";
 import type { ProxyInfo } from "../../services/proxy";
 
@@ -49,6 +48,8 @@ interface CreateAccountOptions {
   fingerprint: BrowserProfile;
   proxy: ProxyInfo | null;
   jobId?: number;
+  /** Invite code específico deste job — evita race condition com setting global */
+  inviteCode?: string;
 }
 
 interface CreateAccountResult {
@@ -57,6 +58,8 @@ interface CreateAccountResult {
   token?: string;
   status: "active" | "failed";
   error?: string;
+  /** true se o convite foi confirmado com sucesso (freeCredits >= 1500) */
+  inviteAccepted?: boolean;
   metadata: Record<string, unknown>;
 }
 
@@ -64,20 +67,66 @@ interface CreateAccountResult {
  * Build authCommandCmd from fingerprint profile.
  * This object is sent with registerByEmail and contains browser context data.
  *
- * Fields match what the real manus.im frontend sends:
- * locale, timezone, tzOffset (as string), firstEntry, fbp
+ * Reverse-engineered from manus.im frontend (chunk 40513-27240ebdd145eda3.js):
+ *   authCommandCmd: {
+ *     ...e,                          // e = f.$() from module 66888
+ *     locale: translationManager.locale,
+ *     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+ *     tzOffset: String(new Date().getTimezoneOffset()),
+ *     firstEntry: getFirstEntry(),   // URL or undefined
+ *     fbp: cookies.get("_fbp")       // Facebook Pixel cookie
+ *   }
  *
- * ANTI-DETECTION: firstEntry is randomized from the fingerprint profile.
- * tzOffset uses the DST-aware real offset from the fingerprint.
+ * The spread object e (module 66888, function u, exported as $) returns:
+ *   {
+ *     firstFromPlatform: "web",      // always "web" for desktop browser
+ *     utmSource: undefined,          // from localStorage
+ *     utmCampaign: undefined,
+ *     utmContent: undefined,
+ *     utmMedium: undefined,
+ *     refer: undefined,              // first_referral from localStorage
+ *   }
+ *
+ * FIXES (v5.1):
+ * - Field name is "tz" NOT "timezone" (confirmed from source code)
+ * - firstEntry is a full URL or undefined (NOT "direct"/"google")
+ * - fbp is generated when firstEntry is a Facebook URL
+ * - When firstEntry is undefined, the field is NOT sent (matches real behavior)
+ *
+ * FIX (v5.2):
+ * - Added firstFromPlatform: "web" (from module 66888 spread — was MISSING)
  */
 function buildAuthCommandCmd(fingerprint: BrowserProfile): Record<string, unknown> {
-  return {
+  // Fields from the spread object f.$() (module 66888, function u)
+  // These come FIRST because the explicit fields below override them via JS spread semantics
+  const cmd: Record<string, unknown> = {
+    firstFromPlatform: "web",                          // FIXED v5.2: was MISSING — always "web" for desktop
+    // utmSource, utmCampaign, utmContent, utmMedium, refer:
+    // These are undefined for most users (no UTM params, no referral).
+    // undefined fields are omitted from JSON.stringify, matching real behavior.
+
+    // Explicit fields (override spread):
     locale: fingerprint.locale,
-    timezone: fingerprint.timezone,
-    tzOffset: String(fingerprint.timezoneOffset),  // DST-aware real offset
-    firstEntry: fingerprint.firstEntry,             // Randomized: direct/google/twitter/etc
-    fbp: "",
+    tz: fingerprint.timezone,                          // FIXED v5.1: was "timezone", real uses "tz"
+    tzOffset: String(fingerprint.timezoneOffset),       // DST-aware real offset
   };
+
+  // firstEntry: only include if defined (real frontend omits it for direct access)
+  if (fingerprint.firstEntry !== undefined) {
+    cmd.firstEntry = fingerprint.firstEntry;
+  }
+
+  // fbp: Facebook Pixel cookie — generate realistic value when firstEntry is Facebook
+  if (fingerprint.firstEntry?.includes("facebook.com")) {
+    // Format: fb.1.<creation_timestamp_ms>.<random_10_digits>
+    const fbTimestamp = Date.now() - Math.floor(Math.random() * 86400000 * 30); // 0-30 days ago
+    const fbRandom = Math.floor(Math.random() * 9000000000) + 1000000000;
+    cmd.fbp = `fb.1.${fbTimestamp}.${fbRandom}`;
+  } else {
+    cmd.fbp = "";
+  }
+
+  return cmd;
 }
 
 /**
@@ -255,7 +304,9 @@ export class ManusProvider {
       // Simulates visiting: https://manus.im/invitation?code=XXX&type=signUp
       let inviteAccepted = false;
       let inviteFreeCredits = 0;
-      const inviteCode = await getSetting("invite_code");
+      let lastInviteError: string | undefined;
+      // Use invite code passed directly from job (avoids race condition with global setting)
+      const inviteCode = options.inviteCode || "";
       const MAX_INVITE_RETRIES = 3;
 
       if (inviteCode && inviteCode.trim().length > 0) {
@@ -308,6 +359,7 @@ export class ManusProvider {
 
           } catch (inviteErr) {
             const inviteErrMsg = inviteErr instanceof Error ? inviteErr.message : String(inviteErr);
+            lastInviteError = inviteErrMsg;
             await logger.warn("step_8_invite", `[Tentativa ${attempt}] Falha: ${inviteErrMsg}`, {
               email, inviteCode: inviteCode.trim(), attempt,
             }, jobId);
@@ -321,18 +373,30 @@ export class ManusProvider {
         }
 
         if (!inviteAccepted) {
-          await logger.warn("step_8_invite", `Convite não confirmado após ${MAX_INVITE_RETRIES} tentativas. freeCredits=${inviteFreeCredits}`, {
-            email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
-          }, jobId);
+          // Distinguish between invalid code (permanent) and temporary failures
+          const isInvalidCode = lastInviteError?.includes("invalid_argument") ||
+            lastInviteError?.includes("invalid invitation code");
+
+          if (isInvalidCode) {
+            await logger.error("step_8_invite", `Código de convite INVÁLIDO: "${inviteCode.trim()}" — verifique se o código está correto e não expirou`, {
+              email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
+            }, jobId);
+          } else {
+            await logger.warn("step_8_invite", `Convite não confirmado após ${MAX_INVITE_RETRIES} tentativas. freeCredits=${inviteFreeCredits}`, {
+              email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
+            }, jobId);
+          }
         }
       }
 
-      // SUCCESS
+      // SUCCESS — account was created and phone verified.
+      // inviteAccepted=false means invite failed but account is still usable.
       return {
         email,
         password,
         token: jwtToken,
         status: "active",
+        inviteAccepted,
         metadata: {
           userId: registerResult.userId,
           phoneNumber: smsResult.phoneNumber,

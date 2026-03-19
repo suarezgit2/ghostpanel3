@@ -165,6 +165,39 @@ export function generateEmailPrefix(_length = 10): string {
 }
 
 // ============================================================
+// INVITE CODE EXTRACTOR
+// ============================================================
+
+/**
+ * Extract the invite code from a full invitation link or return as-is if already a code.
+ *
+ * Supported formats:
+ *   - "ZKMDZU02X169UPF" → "ZKMDZU02X169UPF" (already a code)
+ *   - "https://manus.im/invitation/ZKMDZU02X169UPF" → "ZKMDZU02X169UPF"
+ *   - "https://manus.im/invitation/ZKMDZU02X169UPF?utm_source=invitation&utm_medium=social" → "ZKMDZU02X169UPF"
+ *   - "https://manus.im/invitation?code=ZKMDZU02X169UPF&type=signUp" → "ZKMDZU02X169UPF"
+ *   - "manus.im/invitation/ZKMDZU02X169UPF" → "ZKMDZU02X169UPF" (without protocol)
+ */
+export function extractInviteCode(input: string): string {
+  if (!input) return "";
+  const trimmed = input.trim();
+
+  // Pattern 1: URL path format — /invitation/CODE or /invitation/CODE?params
+  const pathMatch = trimmed.match(/\/invitation\/([A-Za-z0-9]+)/);
+  if (pathMatch) return pathMatch[1];
+
+  // Pattern 2: URL query format — ?code=CODE
+  const queryMatch = trimmed.match(/[?&]code=([A-Za-z0-9]+)/);
+  if (queryMatch) return queryMatch[1];
+
+  // Pattern 3: Already a plain code (alphanumeric, no slashes or dots)
+  if (/^[A-Za-z0-9]+$/.test(trimmed)) return trimmed;
+
+  // Fallback: return trimmed input as-is
+  return trimmed;
+}
+
+// ============================================================
 // DCR ENCODER
 // ============================================================
 

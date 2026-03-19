@@ -1,0 +1,501 @@
+{
+  "timestamp": "2026-03-19T16:33:11.077Z",
+  "passes": [
+    "HTTP/2 ativo (não HTTP/1.1)",
+    "Akamai FP idêntico ao Chrome",
+    "INITIAL_WINDOW_SIZE = 6291456 (Chrome)",
+    "HEADER_TABLE_SIZE = 65536 (Chrome)",
+    "WINDOW_UPDATE increment = 15663105 (Chrome)",
+    "Pseudo-header order = :method,:authority,:scheme,:path (Chrome)",
+    "Header Origin: https://manus.im presente",
+    "Header Referer: https://manus.im/ presente",
+    "Header sec-ch-ua presente",
+    "Header x-client-type: web presente",
+    "JA3 diferente do Node.js (impers=ad489dd14e43... vs fetch=1a28e6901676...)",
+    "User-Agent recebido corretamente pelo servidor",
+    "JA3 Hash obtido: ad489dd14e433002f8ffe4d00d3353a2",
+    "User-Agent: \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36...\"",
+    "Origin: \"https://manus.im\"",
+    "Referer: \"https://manus.im/\"",
+    "Sec-Ch-Ua: \"\"Google Chrome\";v=\"136\", \"Chromium\";v=\"136\", \"Not A(Brand\";v...\"",
+    "Sec-Ch-Ua-Platform: \"\"Windows\"\"",
+    "X-Client-Type: \"web\"",
+    "X-Client-Version: \"2.3.1\"",
+    "X-Client-Locale: \"en\"",
+    "X-Client-Timezone: \"America/New_York\"",
+    "Connect-Protocol-Version: \"1\"",
+    "JA3 consistente em 5 requisições: ad489dd14e433002f8ffe4d00d3353a2",
+    "Akamai FP consistente em 5 requisições"
+  ],
+  "issues": [
+    "Headers Node.js detectados: Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site",
+    "[WARN] Status inesperado: undefined",
+    "[WARN] Status inesperado: undefined"
+  ],
+  "score": "25/28",
+  "raw": {
+    "peetws": {
+      "donate": "Please consider donating to keep this API running. Visit https://tls.peet.ws",
+      "ip": "181.129.24.21:35226",
+      "http_version": "h2",
+      "method": "GET",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+      "tls": {
+        "ciphers": [
+          "TLS_GREASE (0xBABA)",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+          "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+          "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+          "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+          "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+          "TLS_RSA_WITH_AES_128_CBC_SHA256",
+          "TLS_RSA_WITH_AES_256_CBC_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+          "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+          "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384",
+          "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+          "TLS_RSA_WITH_AES_128_GCM_SHA256",
+          "TLS_RSA_WITH_AES_256_GCM_SHA384",
+          "TLS_RSA_WITH_AES_128_CBC_SHA",
+          "TLS_RSA_WITH_AES_256_CBC_SHA",
+          "TLS_AES_128_GCM_SHA256",
+          "TLS_AES_256_GCM_SHA384",
+          "TLS_CHACHA20_POLY1305_SHA256"
+        ],
+        "extensions": [
+          {
+            "name": "TLS_GREASE (0x6a6a)"
+          },
+          {
+            "name": "server_name (0)",
+            "server_name": "tls.peet.ws"
+          },
+          {
+            "name": "extended_master_secret (23)",
+            "master_secret_data": "",
+            "extended_master_secret_data": ""
+          },
+          {
+            "name": "extensionRenegotiationInfo (boringssl) (65281)",
+            "data": "00"
+          },
+          {
+            "name": "supported_groups (10)",
+            "supported_groups": [
+              "TLS_GREASE (0xaaaa)",
+              "X25519 (29)",
+              "P-256 (23)",
+              "P-384 (24)"
+            ]
+          },
+          {
+            "name": "ec_point_formats (11)",
+            "elliptic_curves_point_formats": [
+              "0x00"
+            ]
+          },
+          {
+            "name": "session_ticket (35)",
+            "data": ""
+          },
+          {
+            "name": "application_layer_protocol_negotiation (16)",
+            "protocols": [
+              "h2",
+              "http/1.1"
+            ]
+          },
+          {
+            "name": "signature_algorithms (13)",
+            "signature_algorithms": [
+              "ecdsa_secp256r1_sha256",
+              "rsa_pss_rsae_sha256",
+              "rsa_pkcs1_sha256",
+              "ecdsa_secp384r1_sha384",
+              "rsa_pss_rsae_sha384",
+              "rsa_pkcs1_sha384",
+              "rsa_pss_rsae_sha512",
+              "rsa_pkcs1_sha512"
+            ]
+          },
+          {
+            "name": "key_share (51)",
+            "shared_keys": [
+              {
+                "TLS_GREASE (0xaaaa)": "00"
+              },
+              {
+                "X25519 (29)": "2d69e505abf673a7167052bfdc0062735e0a93ad2808e91972ed1a6aa8b2cb1f"
+              }
+            ]
+          },
+          {
+            "name": "psk_key_exchange_modes (45)",
+            "PSK_Key_Exchange_Mode": "PSK with (EC)DHE key establishment (psk_dhe_ke) (1)"
+          },
+          {
+            "name": "supported_versions (43)",
+            "versions": [
+              "TLS_GREASE (0x9a9a)",
+              "TLS 1.3",
+              "TLS 1.2",
+              "TLS 1.1",
+              "TLS 1.0"
+            ]
+          },
+          {
+            "name": "TLS_GREASE (0xbaba)"
+          },
+          {
+            "name": "padding (21)",
+            "padding_data_length": 430
+          }
+        ],
+        "tls_version_record": "771",
+        "tls_version_negotiated": "772",
+        "ja3": "771,49195-49199-49196-49200-52393-52392-60-61-49161-49171-49162-49172-49187-49188-49192-156-157-47-53-4865-4866-4867,0-23-65281-10-11-35-16-13-51-45-43-21,29-23-24,0",
+        "ja3_hash": "ad489dd14e433002f8ffe4d00d3353a2",
+        "ja4": "t13d2212h2_0ba30522257d_9ced094328c9",
+        "ja4_r": "t13d2212h2_002f,0035,003c,003d,009c,009d,1301,1302,1303,c009,c00a,c013,c014,c023,c024,c028,c02b,c02c,c02f,c030,cca8,cca9_000a,000b,000d,0017,0023,002b,002d,0033,ff01_0403,0804,0401,0503,0805,0501,0806,0601",
+        "peetprint": "GREASE-772-771-770-769|2-1.1|GREASE-29-23-24|1027-2052-1025-1283-2053-1281-2054-1537|1||GREASE-49195-49199-49196-49200-52393-52392-60-61-49161-49171-49162-49172-49187-49188-49192-156-157-47-53-4865-4866-4867|0-10-11-13-16-21-23-35-43-45-51-65281-GREASE-GREASE",
+        "peetprint_hash": "85cbf8e009e83c3b7d40f8e5c262dd0f",
+        "client_random": "9121bb55ccf01e6aa747a8a69be67af14884e3e19d6938fce5ec8b90f24d95f9",
+        "session_id": "3868708f4b8f760036a4d3dea88fd9eb2113795def4cecdca70592ad6e80b7ef"
+      },
+      "http2": {
+        "akamai_fingerprint": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+        "akamai_fingerprint_hash": "52d84b11737d980aef856699f885ca86",
+        "sent_frames": [
+          {
+            "frame_type": "SETTINGS",
+            "length": 24,
+            "settings": [
+              "HEADER_TABLE_SIZE = 65536",
+              "ENABLE_PUSH = 0",
+              "INITIAL_WINDOW_SIZE = 6291456",
+              "MAX_HEADER_LIST_SIZE = 262144"
+            ]
+          },
+          {
+            "frame_type": "WINDOW_UPDATE",
+            "length": 4,
+            "increment": 15663105
+          },
+          {
+            "frame_type": "HEADERS",
+            "stream_id": 1,
+            "length": 533,
+            "headers": [
+              ":method: GET",
+              ":authority: tls.peet.ws",
+              ":scheme: https",
+              ":path: /api/all",
+              "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+              "content-type: application/json",
+              "accept: */*",
+              "origin: https://manus.im",
+              "referer: https://manus.im/",
+              "accept-encoding: gzip, deflate, br, zstd",
+              "accept-language: en-US,en;q=0.9",
+              "sec-ch-ua: \\\"Google Chrome\\\";v=\\\"136\\\", \\\"Chromium\\\";v=\\\"136\\\", \\\"Not A(Brand\\\";v=\\\"24\\",
+              "sec-ch-ua-mobile: ?0",
+              "sec-ch-ua-platform: \\\"Windows\\",
+              "sec-fetch-site: same-site",
+              "sec-fetch-mode: cors",
+              "sec-fetch-dest: empty",
+              "connect-protocol-version: 1",
+              "x-client-type: web",
+              "x-client-version: 2.3.1",
+              "x-client-locale: en",
+              "x-client-timezone: America/New_York",
+              "x-client-timezone-offset: 240",
+              "x-client-id: aBcDeFgHiJkLmNoPqRsT12",
+              "x-client-dcr: eyJ1YSI6InRlc3QifQ=="
+            ],
+            "flags": [
+              "EndStream (0x1)",
+              "EndHeaders (0x4)",
+              "Priority (0x20)"
+            ],
+            "priority": {
+              "weight": 256,
+              "depends_on": 0,
+              "exclusive": 0
+            }
+          }
+        ]
+      },
+      "tcpip": {
+        "cap_length": 222,
+        "dst_port": 443,
+        "src_port": 35226,
+        "ip": {
+          "id": 11951,
+          "tos": 40,
+          "ttl": 47,
+          "ip_version": 4,
+          "dst_ip": "205.185.123.167",
+          "src_ip": "181.129.24.21"
+        },
+        "tcp": {
+          "ack": 2838029669,
+          "checksum": 25786,
+          "seq": 3146562856,
+          "window": 32044
+        }
+      }
+    },
+    "peetws_fetch": {
+      "donate": "Please consider donating to keep this API running. Visit https://tls.peet.ws",
+      "ip": "181.129.24.21:35243",
+      "http_version": "HTTP/1.1",
+      "method": "GET",
+      "user_agent": "node",
+      "tls": {
+        "ciphers": [
+          "TLS_AES_256_GCM_SHA384",
+          "TLS_CHACHA20_POLY1305_SHA256",
+          "TLS_AES_128_GCM_SHA256",
+          "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+          "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+          "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+          "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+          "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
+          "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+          "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
+          "TLS_DHE_DSS_WITH_AES_256_GCM_SHA384",
+          "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+          "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+          "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+          "TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_CCM",
+          "TLS_DHE_RSA_WITH_AES_256_CCM_8",
+          "TLS_DHE_RSA_WITH_AES_256_CCM",
+          "TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384",
+          "TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384",
+          "TLS_DHE_DSS_WITH_ARIA_256_GCM_SHA384",
+          "TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384",
+          "TLS_DHE_DSS_WITH_AES_128_GCM_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_CCM",
+          "TLS_DHE_RSA_WITH_AES_128_CCM_8",
+          "TLS_DHE_RSA_WITH_AES_128_CCM",
+          "TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256",
+          "TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256",
+          "TLS_DHE_DSS_WITH_ARIA_128_GCM_SHA256",
+          "TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384",
+          "TLS_DHE_DSS_WITH_AES_256_CBC_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256",
+          "TLS_DHE_DSS_WITH_AES_128_CBC_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+          "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+          "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
+          "TLS_DHE_DSS_WITH_AES_256_CBC_SHA",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+          "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+          "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
+          "TLS_DHE_DSS_WITH_AES_128_CBC_SHA",
+          "TLS_RSA_WITH_AES_256_GCM_SHA384",
+          "TLS_RSA_WITH_AES_256_CCM_8",
+          "TLS_RSA_WITH_AES_256_CCM",
+          "TLS_RSA_WITH_ARIA_256_GCM_SHA384",
+          "TLS_RSA_WITH_AES_128_GCM_SHA256",
+          "TLS_RSA_WITH_AES_128_CCM_8",
+          "TLS_RSA_WITH_AES_128_CCM",
+          "TLS_RSA_WITH_ARIA_128_GCM_SHA256",
+          "TLS_RSA_WITH_AES_256_CBC_SHA256",
+          "TLS_RSA_WITH_AES_128_CBC_SHA256",
+          "TLS_RSA_WITH_AES_256_CBC_SHA",
+          "TLS_RSA_WITH_AES_128_CBC_SHA",
+          "TLS_EMPTY_RENEGOTIATION_INFO"
+        ],
+        "extensions": [
+          {
+            "name": "server_name (0)",
+            "server_name": "tls.peet.ws"
+          },
+          {
+            "name": "ec_point_formats (11)",
+            "elliptic_curves_point_formats": [
+              "0x00",
+              "0x01",
+              "0x02"
+            ]
+          },
+          {
+            "name": "supported_groups (10)",
+            "supported_groups": [
+              "X25519 (29)",
+              "P-256 (23)",
+              "X448 (30)",
+              "P-521 (25)",
+              "P-384 (24)",
+              "ffdhe2048 (256)",
+              "ffdhe3072 (257)",
+              "ffdhe4096 (258)",
+              "ffdhe6144 (259)",
+              "ffdhe8192 (260)"
+            ]
+          },
+          {
+            "name": "session_ticket (35)",
+            "data": ""
+          },
+          {
+            "name": "application_layer_protocol_negotiation (16)",
+            "protocols": [
+              "http/1.1"
+            ]
+          },
+          {
+            "name": "encrypt_then_mac (22)",
+            "data": ""
+          },
+          {
+            "name": "extended_master_secret (23)",
+            "master_secret_data": "",
+            "extended_master_secret_data": ""
+          },
+          {
+            "name": "signature_algorithms (13)",
+            "signature_algorithms": [
+              "ecdsa_secp256r1_sha256",
+              "ecdsa_secp384r1_sha384",
+              "ecdsa_secp521r1_sha512",
+              "ed25519",
+              "ed25519",
+              "rsa_pss_pss_sha256",
+              "rsa_pss_pss_sha384",
+              "rsa_pss_pss_sha512",
+              "rsa_pss_rsae_sha256",
+              "rsa_pss_rsae_sha384",
+              "rsa_pss_rsae_sha512",
+              "rsa_pkcs1_sha256",
+              "rsa_pkcs1_sha384",
+              "rsa_pkcs1_sha512",
+              "0x303",
+              "0x301",
+              "0x302",
+              "0x402",
+              "0x502",
+              "0x602"
+            ]
+          },
+          {
+            "name": "supported_versions (43)",
+            "versions": [
+              "TLS 1.3",
+              "TLS 1.2"
+            ]
+          },
+          {
+            "name": "psk_key_exchange_modes (45)",
+            "PSK_Key_Exchange_Mode": "PSK with (EC)DHE key establishment (psk_dhe_ke) (1)"
+          },
+          {
+            "name": "key_share (51)",
+            "shared_keys": [
+              {
+                "X25519 (29)": "42d73af04462fc3fdbd3153d8b83fa572505892231da282a6f5941f8c253055b"
+              }
+            ]
+          }
+        ],
+        "tls_version_record": "771",
+        "tls_version_negotiated": "772",
+        "ja3": "771,4866-4867-4865-49199-49195-49200-49196-158-49191-103-49192-107-163-159-52393-52392-52394-49327-49325-49315-49311-49245-49249-49239-49235-162-49326-49324-49314-49310-49244-49248-49238-49234-49188-106-49187-64-49162-49172-57-56-49161-49171-51-50-157-49313-49309-49233-156-49312-49308-49232-61-60-53-47-255,0-11-10-35-16-22-23-13-43-45-51,29-23-30-25-24-256-257-258-259-260,0-1-2",
+        "ja3_hash": "1a28e69016765d92e3b381168d68922c",
+        "ja4": "t13d5911h1_a33745022dd6_1f22a2ca17c4",
+        "ja4_r": "t13d5911h1_002f,0032,0033,0035,0038,0039,003c,003d,0040,0067,006a,006b,009c,009d,009e,009f,00a2,00a3,00ff,1301,1302,1303,c009,c00a,c013,c014,c023,c024,c027,c028,c02b,c02c,c02f,c030,c050,c051,c052,c053,c056,c057,c05c,c05d,c060,c061,c09c,c09d,c09e,c09f,c0a0,c0a1,c0a2,c0a3,c0ac,c0ad,c0ae,c0af,cca8,cca9,ccaa_000a,000b,000d,0016,0017,0023,002b,002d,0033_0403,0503,0603,0807,0808,0809,080a,080b,0804,0805,0806,0401,0501,0601,0303,0301,0302,0402,0502,0602",
+        "peetprint": "772-771|1.1|29-23-30-25-24-256-257-258-259-260|1027-1283-1539-2055-2056-2057-2058-2059-2052-2053-2054-1025-1281-1537-771-769-770-1026-1282-1538|1||4866-4867-4865-49199-49195-49200-49196-158-49191-103-49192-107-163-159-52393-52392-52394-49327-49325-49315-49311-49245-49249-49239-49235-162-49326-49324-49314-49310-49244-49248-49238-49234-49188-106-49187-64-49162-49172-57-56-49161-49171-51-50-157-49313-49309-49233-156-49312-49308-49232-61-60-53-47-255|0-10-11-13-16-22-23-35-43-45-51",
+        "peetprint_hash": "f112f2935ed8c9a1ecf219c253a58081",
+        "client_random": "95dbfd31ef65d2fc2f052540672059d9672c0c22122084390356820368daeac7",
+        "session_id": "5d576d0c54dc6eea3ae73ff97b48dad608e4bc218b4a236f6865ae8ae7e769dd"
+      },
+      "http1": {
+        "headers": [
+          "host: tls.peet.ws",
+          "connection: keep-alive",
+          "accept: */*",
+          "accept-language: *",
+          "sec-fetch-mode: cors",
+          "user-agent: node",
+          "accept-encoding: br, gzip, deflate"
+        ]
+      },
+      "tcpip": {
+        "cap_length": 66,
+        "dst_port": 443,
+        "src_port": 35243,
+        "ip": {
+          "id": 50995,
+          "tos": 40,
+          "ttl": 47,
+          "ip_version": 4,
+          "dst_ip": "205.185.123.167",
+          "src_ip": "181.129.24.21"
+        },
+        "tcp": {
+          "ack": 1982200419,
+          "checksum": 41494,
+          "seq": 3703984956,
+          "window": 32044
+        }
+      }
+    },
+    "browserleaks": {
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+      "ja4": "t13d2212h2_0ba30522257d_cbb9361b6bf9",
+      "ja4_r": "t13d2212h2_002f,0035,003c,003d,009c,009d,1301,1302,1303,c009,c00a,c013,c014,c023,c024,c028,c02b,c02c,c02f,c030,cca8,cca9_000a,000b,000d,0015,0017,0023,002b,002d,0033,ff01_0403,0804,0401,0503,0805,0501,0806,0601",
+      "ja4_o": "t13d2212h2_63060d4b0cc2_8cae22093da9",
+      "ja4_ro": "t13d2212h2_c02b,c02f,c02c,c030,cca9,cca8,003c,003d,c009,c013,c00a,c014,c023,c024,c028,009c,009d,002f,0035,1301,1302,1303_0000,0017,ff01,000a,000b,0023,0010,000d,0033,002d,002b,0015_0403,0804,0401,0503,0805,0501,0806,0601",
+      "ja3_hash": "ad489dd14e433002f8ffe4d00d3353a2",
+      "ja3_text": "771,49195-49199-49196-49200-52393-52392-60-61-49161-49171-49162-49172-49187-49188-49192-156-157-47-53-4865-4866-4867,0-23-65281-10-11-35-16-13-51-45-43-21,29-23-24,0",
+      "ja3n_hash": "68e6d383240060d3f24e243753ee0573",
+      "ja3n_text": "771,49195-49199-49196-49200-52393-52392-60-61-49161-49171-49162-49172-49187-49188-49192-156-157-47-53-4865-4866-4867,0-10-11-13-16-21-23-35-43-45-51-65281,29-23-24,0",
+      "akamai_hash": "52d84b11737d980aef856699f885ca86",
+      "akamai_text": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+    },
+    "httpbin": {
+      "headers": {
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connect-Protocol-Version": "1",
+        "Content-Type": "application/json",
+        "Host": "httpbin.org",
+        "Origin": "https://manus.im",
+        "Referer": "https://manus.im/",
+        "Sec-Ch-Ua": "\"Google Chrome\";v=\"136\", \"Chromium\";v=\"136\", \"Not A(Brand\";v=\"24\"",
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": "\"Windows\"",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "X-Amzn-Trace-Id": "Root=1-69bc253f-70847b266929df5a634038a7",
+        "X-Client-Dcr": "eyJ1YSI6InRlc3QifQ==",
+        "X-Client-Id": "aBcDeFgHiJkLmNoPqRsT12",
+        "X-Client-Locale": "en",
+        "X-Client-Timezone": "America/New_York",
+        "X-Client-Timezone-Offset": "240",
+        "X-Client-Type": "web",
+        "X-Client-Version": "2.3.1"
+      }
+    },
+    "manus_cf": {
+      "textLength": 160121
+    },
+    "manus_api": {
+      "text": "{\"code\":\"code_1015\",\"message\":\"Error\\u003c1015\\u003e\",\"details\":[{\"type\":\"common.v1.ErrorDetail\",\"value\":\"CPcHEhtDQVBUQ0hBIHZlcmlmaWNhdGlvbiBmYWlsZWQ\",\"debug\":{\"code\":\"1015\",\"message\":\"CAPTCHA verification failed\"}}]}"
+    }
+  }
+}

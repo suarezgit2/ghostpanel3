@@ -1,16 +1,19 @@
 /**
  * Manus.im RPC Client
- * ConnectRPC (connect-es) with HTTP proxy support
+ * ConnectRPC (connect-es) with TLS/HTTP2 Impersonation
  *
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
  *
- * ANTI-DETECTION (v4.2):
+ * ANTI-DETECTION (v5.0 — TLS Impersonation):
+ * - Uses impers (curl-impersonate) for Chrome-identical TLS/HTTP2 fingerprints
+ * - JA3/JA4 TLS fingerprint matches real Chrome (not Node.js)
+ * - HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order match real Chrome
  * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fgRequestId)
- * - This matches real browser behavior where getDCR() is called per request
+ * - Falls back to native fetch if curl-impersonate is not available
  */
 
-import { HttpsProxyAgent } from "https-proxy-agent";
+import { httpRequest } from "../../services/httpClient";
 import { fingerprintService, type BrowserProfile } from "../../services/fingerprint";
 import type { ProxyInfo } from "../../services/proxy";
 
@@ -74,26 +77,29 @@ async function rpcCall(
     Object.assign(headers, extraHeaders);
   }
 
-  const fetchOptions: RequestInit & { agent?: unknown } = {
+  // Use httpClient with TLS impersonation (impers) instead of native fetch
+  // The httpClient automatically:
+  // - Impersonates Chrome's TLS fingerprint (JA3/JA4)
+  // - Impersonates Chrome's HTTP/2 fingerprint (Akamai)
+  // - Routes through proxy if provided
+  // - Falls back to native fetch if curl-impersonate is not available
+  const response = await httpRequest({
     method: "POST",
+    url,
     headers,
     body: JSON.stringify(payload),
-  };
+    proxy: options.proxy,
+    userAgent: options.fingerprint.userAgent,
+    timeout: 30,
+  });
 
-  // Proxy support
-  if (options.proxy) {
-    const proxyUrl = `http://${options.proxy.username}:${options.proxy.password}@${options.proxy.host}:${options.proxy.port}`;
-    fetchOptions.agent = new HttpsProxyAgent(proxyUrl);
-  }
-
-  const resp = await fetch(url, fetchOptions as RequestInit);
-  const text = await resp.text();
+  const text = response.text;
 
   let data: Record<string, unknown>;
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error(`RPC ${servicePath} (${resp.status}): resposta não-JSON: ${text.substring(0, 200)}`);
+    throw new Error(`RPC ${servicePath} (${response.status}): resposta não-JSON: ${text.substring(0, 200)}`);
   }
 
   // ConnectRPC returns errors with "code" field
@@ -103,8 +109,8 @@ async function rpcCall(
     throw new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
   }
 
-  if (!resp.ok && !data.code) {
-    throw new Error(`RPC ${servicePath} (${resp.status}): ${text.substring(0, 200)}`);
+  if (response.status >= 400 && !data.code) {
+    throw new Error(`RPC ${servicePath} (${response.status}): ${text.substring(0, 200)}`);
   }
 
   return data;
@@ -148,9 +154,11 @@ export async function registerByEmail(email: string, password: string, verifyCod
     extraHeaders["x-client-id"] = options.clientId;
   }
 
+  // IMPORTANT: The real frontend always sends name: "" in the payload.
+  // Reverse-engineered from chunk 40513: registerByEmail({verifyCode:D, name:"", email:V||"", password:P||"", authCommandCmd:{...}})
   const result = await rpcCall(
     "user.v1.UserAuthPublicService/RegisterByEmail",
-    { email, password, verifyCode, authCommandCmd: options.authCommandCmd || {} },
+    { verifyCode, name: "", email, password, authCommandCmd: options.authCommandCmd || {} },
     options,
     extraHeaders
   );

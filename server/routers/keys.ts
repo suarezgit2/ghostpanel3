@@ -8,6 +8,7 @@ import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { keys } from "../../drizzle/schema";
 import crypto from "crypto";
+import { extractInviteCode } from "../utils/helpers";
 
 function generateKeyCode(): string {
   // Format: GHOST-XXXX-XXXX-XXXX (uppercase alphanumeric, no ambiguous chars)
@@ -185,11 +186,13 @@ export const keysRouter = router({
       const CREDITS_PER_ACCOUNT = 500;
       const quantity = Math.max(1, Math.floor(key.credits / CREDITS_PER_ACCOUNT));
 
+      const cleanInviteCode = extractInviteCode(input.inviteCode);
+
       const jobId = await orchestrator.createJob({
         provider: "manus",
         quantity,
-        inviteCode: input.inviteCode,
-        label: `Key ${key.code} → ${input.inviteCode}`,
+        inviteCode: cleanInviteCode,
+        label: `Key ${key.code} → ${cleanInviteCode}`,
       });
 
       return {

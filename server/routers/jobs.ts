@@ -6,7 +6,7 @@ import { z } from "zod";
 import { eq, desc, sql, inArray } from "drizzle-orm";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
-import { jobs, accounts } from "../../drizzle/schema";
+import { jobs, accounts, jobFolders } from "../../drizzle/schema";
 import { orchestrator } from "../core/orchestrator";
 
 export const jobsRouter = router({
@@ -29,7 +29,14 @@ export const jobsRouter = router({
       // Get accounts for this job
       const jobAccounts = await db.select().from(accounts).where(eq(accounts.jobId, input.id)).orderBy(desc(accounts.createdAt));
 
-      return { ...result[0], accounts: jobAccounts };
+      // Get folder info if job belongs to a folder
+      let folder = null;
+      if (result[0].folderId) {
+        const folderRows = await db.select().from(jobFolders).where(eq(jobFolders.id, result[0].folderId)).limit(1);
+        if (folderRows.length > 0) folder = folderRows[0];
+      }
+
+      return { ...result[0], accounts: jobAccounts, folder };
     }),
 
   create: protectedProcedure
@@ -58,6 +65,7 @@ export const jobsRouter = router({
 
   /**
    * Job Rápido - Envio de créditos para múltiplos destinatários
+   * Suporta jobCount > 1 para criar múltiplos jobs agrupados em pasta por cliente
    */
   quickJob: protectedProcedure
     .input(z.object({
@@ -65,11 +73,66 @@ export const jobsRouter = router({
         inviteCode: z.string().min(1, "Código de convite obrigatório"),
         credits: z.number().min(500, "Mínimo 500 créditos").max(500000),
         label: z.string().optional(),
+        jobCount: z.number().min(1).max(20).optional().default(1),
       })).min(1).max(50),
     }))
     .mutation(async ({ input }) => {
       const result = await orchestrator.createQuickJobs(input.recipients);
       return result;
+    }),
+
+  /**
+   * Folders - Lista todas as pastas de jobs agrupados
+   */
+  listFolders: protectedProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) return [];
+
+    const folders = await db.select().from(jobFolders).orderBy(desc(jobFolders.createdAt));
+
+    // For each folder, get the jobs inside it
+    const foldersWithJobs = await Promise.all(
+      folders.map(async (folder) => {
+        const folderJobs = await db
+          .select()
+          .from(jobs)
+          .where(eq(jobs.folderId, folder.id))
+          .orderBy(desc(jobs.createdAt));
+        return { ...folder, jobs: folderJobs };
+      })
+    );
+
+    return foldersWithJobs;
+  }),
+
+  /**
+   * deleteFolder - Remove uma pasta e todos os jobs dentro dela
+   */
+  deleteFolder: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database não disponível");
+
+      // Get all jobs in this folder
+      const folderJobs = await db.select({ id: jobs.id, status: jobs.status }).from(jobs).where(eq(jobs.folderId, input.id));
+
+      // Check if any job is running or paused
+      const activeJob = folderJobs.find(j => j.status === "running" || j.status === "paused");
+      if (activeJob) {
+        throw new Error(`Não é possível deletar a pasta: Job #${activeJob.id} está ${activeJob.status}. Cancele-o primeiro.`);
+      }
+
+      const jobIds = folderJobs.map(j => j.id);
+
+      if (jobIds.length > 0) {
+        await db.delete(accounts).where(inArray(accounts.jobId, jobIds));
+        await db.delete(jobs).where(inArray(jobs.id, jobIds));
+      }
+
+      await db.delete(jobFolders).where(eq(jobFolders.id, input.id));
+
+      return { success: true, deletedJobs: jobIds.length };
     }),
 
   cancel: protectedProcedure
@@ -112,10 +175,6 @@ export const jobsRouter = router({
   }),
 
   /**
-   * Detecta e corrige jobs travados (status "running" sem progresso por mais de 30 min)
-   * Pode ser chamado manualmente pelo admin ou pelo cron interno
-   */
-  /**
    * Delete - Remove um job específico (apenas concluído, falhou ou cancelado)
    */
   delete: protectedProcedure
@@ -124,10 +183,10 @@ export const jobsRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Database não disponível");
 
-      const result = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, input.id)).limit(1);
+      const result = await db.select({ status: jobs.status, folderId: jobs.folderId }).from(jobs).where(eq(jobs.id, input.id)).limit(1);
       if (result.length === 0) throw new Error(`Job ${input.id} não encontrado`);
 
-      const { status } = result[0];
+      const { status, folderId } = result[0];
       if (status === "running" || status === "paused") {
         throw new Error(`Não é possível deletar um job com status "${status}". Cancele-o primeiro.`);
       }
@@ -135,6 +194,14 @@ export const jobsRouter = router({
       // Deleta contas associadas e depois o job
       await db.delete(accounts).where(eq(accounts.jobId, input.id));
       await db.delete(jobs).where(eq(jobs.id, input.id));
+
+      // If job belonged to a folder, check if folder is now empty and clean up
+      if (folderId) {
+        const remainingJobs = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.folderId, folderId));
+        if (remainingJobs.length === 0) {
+          await db.delete(jobFolders).where(eq(jobFolders.id, folderId));
+        }
+      }
 
       return { success: true };
     }),
@@ -152,17 +219,27 @@ export const jobsRouter = router({
 
       // Busca IDs dos jobs a deletar
       const toDelete = await db
-        .select({ id: jobs.id })
+        .select({ id: jobs.id, folderId: jobs.folderId })
         .from(jobs)
         .where(inArray(jobs.status, input.statuses));
 
       if (toDelete.length === 0) return { deleted: 0 };
 
       const ids = toDelete.map((j) => j.id);
+      const folderIdSet = new Set(toDelete.map(j => j.folderId).filter(Boolean));
+      const folderIds = Array.from(folderIdSet) as number[];
 
       // Deleta contas associadas e depois os jobs
       await db.delete(accounts).where(inArray(accounts.jobId, ids));
       await db.delete(jobs).where(inArray(jobs.id, ids));
+
+      // Clean up empty folders
+      for (const folderId of folderIds) {
+        const remainingJobs = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.folderId, folderId));
+        if (remainingJobs.length === 0) {
+          await db.delete(jobFolders).where(eq(jobFolders.id, folderId));
+        }
+      }
 
       return { deleted: ids.length };
     }),

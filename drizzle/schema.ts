@@ -35,16 +35,32 @@ export type Provider = typeof providers.$inferSelect;
 export type InsertProvider = typeof providers.$inferInsert;
 
 /**
+ * Job Folders - agrupa múltiplos jobs de um mesmo cliente
+ */
+export const jobFolders = mysqlTable("job_folders", {
+  id: int("id").autoincrement().primaryKey(),
+  clientName: varchar("clientName", { length: 256 }).notNull(),
+  inviteCode: varchar("inviteCode", { length: 128 }).notNull(),
+  totalJobs: int("totalJobs").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type JobFolder = typeof jobFolders.$inferSelect;
+export type InsertJobFolder = typeof jobFolders.$inferInsert;
+
+/**
  * Jobs - tarefas de criação de contas em lote
  */
 export const jobs = mysqlTable("jobs", {
   id: int("id").autoincrement().primaryKey(),
   providerId: int("providerId").notNull(),
-  status: mysqlEnum("status", ["pending", "running", "paused", "completed", "failed", "cancelled"]).default("pending").notNull(),
+  status: mysqlEnum("status", ["pending", "running", "paused", "completed", "partial", "failed", "cancelled"]).default("pending").notNull(),
   totalAccounts: int("totalAccounts").notNull(),
   completedAccounts: int("completedAccounts").default(0).notNull(),
   failedAccounts: int("failedAccounts").default(0).notNull(),
   concurrency: int("concurrency").default(1).notNull(),
+  folderId: int("folderId"),
   config: json("config"),
   error: text("error"),
   startedAt: timestamp("startedAt"),

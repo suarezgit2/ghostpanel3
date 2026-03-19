@@ -645,8 +645,15 @@ export default function SettingsPage() {
                 <Input
                   type="text"
                   value={settings["invite_code"] || ""}
-                  onChange={(e) => updateSetting("invite_code", e.target.value.toUpperCase())}
-                  placeholder="Ex: ONEOBGLAEXNB"
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    // Auto-extract code from invitation links
+                    const pathMatch = raw.match(/\/invitation\/([A-Za-z0-9]+)/);
+                    const queryMatch = raw.match(/[?&]code=([A-Za-z0-9]+)/);
+                    const code = pathMatch ? pathMatch[1] : queryMatch ? queryMatch[1] : raw;
+                    updateSetting("invite_code", code.toUpperCase());
+                  }}
+                  placeholder="Ex: ONEOBGLAEXNB ou cole o link de convite"
                   className="bg-ghost-surface-2 border-border font-mono text-xs uppercase tracking-wider"
                 />
                 <p className="text-[10px] text-muted-foreground/60 mt-1">
