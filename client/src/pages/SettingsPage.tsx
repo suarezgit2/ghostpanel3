@@ -10,7 +10,7 @@ import { motion } from "framer-motion";
 import {
   Save, Eye, EyeOff, Key, Mail, MessageSquare, Globe, Shield,
   RefreshCw, Zap, Clock, Hash, DollarSign, RotateCcw, Search, Info,
-  Gift, Shuffle, Settings2,
+  Gift, Shuffle, Settings2, Activity, Ban, Trash2, CheckCircle, AlertTriangle, XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -233,6 +233,38 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<"keys" | "sms" | "general">("keys");
 
   const { data: allSettings, isLoading: loading, refetch: loadSettings } = trpc.settings.getAll.useQuery();
+  const { data: healthData, refetch: refetchHealth } = trpc.settings.getSmsHealth.useQuery();
+  const { data: blacklistData, refetch: refetchBlacklist } = trpc.settings.getSmsBlacklist.useQuery();
+
+  const discoverMutation = trpc.settings.discoverAndUpdateSmsProviders.useMutation({
+    onSuccess: (data) => {
+      if (data.success) {
+        toast.success("Provedores atualizados!", { description: data.message });
+        loadSettings();
+        refetchHealth();
+      } else {
+        toast.warning("Sem provedores", { description: data.message });
+      }
+    },
+    onError: (err) => toast.error("Erro ao descobrir provedores", { description: err.message }),
+  });
+
+  const clearBlacklistMutation = trpc.settings.clearSmsBlacklist.useMutation({
+    onSuccess: () => {
+      toast.success("Blacklist limpa!", { description: "Health e blacklist dos provedores resetados" });
+      refetchBlacklist();
+      refetchHealth();
+    },
+    onError: (err) => toast.error("Erro ao limpar blacklist", { description: err.message }),
+  });
+
+  const resetHealthMutation = trpc.settings.resetSmsHealth.useMutation({
+    onSuccess: () => {
+      toast.success("Health resetado!");
+      refetchHealth();
+    },
+    onError: (err) => toast.error("Erro ao resetar health", { description: err.message }),
+  });
 
   // Sync settings when data loads
   useEffect(() => {
@@ -560,11 +592,183 @@ export default function SettingsPage() {
             </div>
           </motion.div>
 
-          {/* Quick Reference */}
+          {/* Provider Discovery */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.24 }}
+            className="rounded-xl border border-border bg-card"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-ghost-surface-2">
+                  <Search className="w-4 h-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">Descoberta de Provedores</h2>
+                  <p className="text-xs text-muted-foreground">Busca provedores disponíveis via API e atualiza a lista manual</p>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => discoverMutation.mutate()}
+                disabled={discoverMutation.isPending}
+                className="gap-1.5 text-xs"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${discoverMutation.isPending ? "animate-spin" : ""}`} />
+                {discoverMutation.isPending ? "Buscando..." : "Descobrir Provedores Agora"}
+              </Button>
+            </div>
+            <div className="p-4">
+              <p className="text-xs text-muted-foreground">
+                Clique para buscar os melhores provedores disponíveis dentro do preço máximo configurado.
+                A lista de Provider IDs será atualizada automaticamente. Provedores na blacklist são excluídos.
+              </p>
+            </div>
+          </motion.div>
+
+          {/* Provider Health Panel */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.30 }}
+            className="rounded-xl border border-border bg-card"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-ghost-surface-2">
+                  <Activity className="w-4 h-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">Saúde dos Provedores</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Score, taxa de sucesso, cooldowns e rejeições. Persiste entre restarts.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { refetchHealth(); refetchBlacklist(); }}
+                  className="gap-1.5 text-xs"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Atualizar
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => resetHealthMutation.mutate()}
+                  disabled={resetHealthMutation.isPending}
+                  className="gap-1.5 text-xs text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Resetar Health
+                </Button>
+                {(blacklistData?.blacklist?.length ?? 0) > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => clearBlacklistMutation.mutate()}
+                    disabled={clearBlacklistMutation.isPending}
+                    className="gap-1.5 text-xs text-red-400 border-red-500/30 hover:bg-red-500/10"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Limpar Blacklist ({blacklistData?.blacklist?.length})
+                  </Button>
+                )}
+              </div>
+            </div>
+            <div className="p-4">
+              {/* Blacklist Banner */}
+              {(blacklistData?.blacklist?.length ?? 0) > 0 && (
+                <div className="mb-4 flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3">
+                  <Ban className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+                  <div className="text-xs text-red-300/80">
+                    <span className="font-medium text-red-300">Blacklist ativa: </span>
+                    {blacklistData?.blacklist?.length} provedor(es) banido(s) permanentemente por performance ruim: [{blacklistData?.blacklist?.join(", ")}]
+                  </div>
+                </div>
+              )}
+
+              {/* Health Table */}
+              {healthData && healthData.length > 0 ? (
+                <div className="overflow-hidden rounded-lg border border-border/50">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-ghost-surface-2">
+                        <th className="text-left px-3 py-2 font-semibold text-muted-foreground">Provedor</th>
+                        <th className="text-left px-3 py-2 font-semibold text-muted-foreground">Score</th>
+                        <th className="text-left px-3 py-2 font-semibold text-muted-foreground">Sucesso</th>
+                        <th className="text-left px-3 py-2 font-semibold text-muted-foreground">Falhas</th>
+                        <th className="text-left px-3 py-2 font-semibold text-muted-foreground">Rejeitados (alvo)</th>
+                        <th className="text-left px-3 py-2 font-semibold text-muted-foreground">Tempo Médio</th>
+                        <th className="text-left px-3 py-2 font-semibold text-muted-foreground">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/30">
+                      {healthData.map((h: any) => {
+                        const isBlacklisted = blacklistData?.blacklist?.includes(h.providerId);
+                        const inCooldown = h.inCooldown && !isBlacklisted;
+                        return (
+                          <tr key={h.providerId} className={isBlacklisted ? "opacity-50" : ""}>
+                            <td className="px-3 py-2 font-mono font-medium">#{h.providerId}</td>
+                            <td className="px-3 py-2">
+                              <span className={`font-mono font-semibold ${
+                                h.score >= 70 ? "text-green-400" :
+                                h.score >= 40 ? "text-yellow-400" : "text-red-400"
+                              }`}>{h.score}</span>
+                            </td>
+                            <td className="px-3 py-2 text-green-400 font-mono">{h.successRate}</td>
+                            <td className="px-3 py-2">
+                              <span className={h.consecutiveFailures >= 5 ? "text-red-400 font-semibold" : "text-muted-foreground"}>
+                                {h.failures} ({h.consecutiveFailures} consec.)
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={h.consecutiveTargetRejections >= 3 ? "text-amber-400 font-semibold" : "text-muted-foreground"}>
+                                {h.targetRejections} ({h.consecutiveTargetRejections} consec.)
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-muted-foreground">
+                              {h.avgResponseMs ? `${Math.round(h.avgResponseMs / 1000)}s` : "—"}
+                            </td>
+                            <td className="px-3 py-2">
+                              {isBlacklisted ? (
+                                <span className="flex items-center gap-1 text-red-400">
+                                  <Ban className="w-3 h-3" /> Banido
+                                </span>
+                              ) : inCooldown ? (
+                                <span className="flex items-center gap-1 text-amber-400">
+                                  <AlertTriangle className="w-3 h-3" /> Cooldown {h.cooldownRemainingS}s
+                                </span>
+                              ) : (
+                                <span className="flex items-center gap-1 text-green-400">
+                                  <CheckCircle className="w-3 h-3" /> Ativo
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground/60 text-center py-6">
+                  Nenhum dado de saúde ainda. Os provedores aparecerão aqui após as primeiras tentativas de SMS.
+                </p>
+              )}
+            </div>
+          </motion.div>
+
+          {/* Quick Reference */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.36 }}
             className="rounded-xl border border-border/50 bg-card/50 p-5"
           >
             <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">

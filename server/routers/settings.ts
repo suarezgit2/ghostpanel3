@@ -140,6 +140,41 @@ export const settingsRouter = router({
     return { success: true, message: "Health tracker dos provedores SMS resetado" };
   }),
 
+  /**
+   * Retorna a blacklist de provedores SMS banidos permanentemente
+   */
+  getSmsBlacklist: protectedProcedure.query(async () => {
+    const blacklist = await smsService.getBlacklist();
+    return { blacklist };
+  }),
+
+  /**
+   * Limpa a blacklist de provedores SMS e reseta o health tracker
+   */
+  clearSmsBlacklist: protectedProcedure.mutation(async () => {
+    await smsService.clearBlacklist();
+    return { success: true, message: "Blacklist e health dos provedores SMS limpos" };
+  }),
+
+  /**
+   * Descobre provedores disponíveis via getPricesV3 e atualiza a lista manual no banco
+   */
+  discoverAndUpdateSmsProviders: protectedProcedure.mutation(async () => {
+    const result = await smsService.discoverAndUpdateProviderList();
+    if (result.updated) {
+      return {
+        success: true,
+        providers: result.providers,
+        message: `Lista atualizada com ${result.providers.length} provedores: [${result.providers.join(", ")}]`,
+      };
+    }
+    return {
+      success: false,
+      providers: [],
+      message: "Nenhum provedor encontrado dentro do preço máximo configurado",
+    };
+  }),
+
   // Providers management
   listProviders: protectedProcedure.query(async () => {
     const db = await getDb();
