@@ -11,6 +11,16 @@ import { Link } from "wouter";
 
 const CREDITS_PER_ACCOUNT = 500;
 
+/** Extract invite code from a full invitation link or return as-is if already a code */
+function extractInviteCode(input: string): string {
+  const trimmed = input.trim();
+  const pathMatch = trimmed.match(/\/invitation\/([A-Za-z0-9]+)/);
+  if (pathMatch) return pathMatch[1];
+  const queryMatch = trimmed.match(/[?&]code=([A-Za-z0-9]+)/);
+  if (queryMatch) return queryMatch[1];
+  return trimmed;
+}
+
 interface Recipient {
   id: string;
   inviteCode: string;
@@ -65,7 +75,7 @@ export default function QuickJob() {
     setResult(null);
     quickJobMutation.mutate({
       recipients: validRecipients.map(r => ({
-        inviteCode: r.inviteCode.trim(),
+        inviteCode: extractInviteCode(r.inviteCode),
         credits: parseInt(r.credits),
         label: r.label.trim() || undefined,
       })),

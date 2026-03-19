@@ -15,7 +15,7 @@ import { getDb } from "../db";
 import { jobs, accounts, providers } from "../../drizzle/schema";
 import { proxyService } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
-import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep } from "../utils/helpers";
+import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
 import { getSetting, setSetting } from "../utils/settings";
 import { manusProvider, type ManusProvider } from "../providers/manus";
 
@@ -162,8 +162,10 @@ class Orchestrator {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
 
-    const originalInviteCode = await getSetting("invite_code");
-    const jobInviteCode = options.inviteCode || originalInviteCode;
+    const rawOriginalInviteCode = await getSetting("invite_code");
+    const originalInviteCode = rawOriginalInviteCode ? extractInviteCode(rawOriginalInviteCode) : "";
+    const rawJobInviteCode = options.inviteCode ? extractInviteCode(options.inviteCode) : "";
+    const jobInviteCode = rawJobInviteCode || originalInviteCode;
     const useCustomInvite = !!(options.inviteCode && options.inviteCode !== originalInviteCode);
 
     let consecutiveFailures = 0;

@@ -27,7 +27,7 @@ import { EmailVerifyCodeAction } from "./rpc";
 import { captchaService } from "../../services/captcha";
 import { emailService } from "../../services/email";
 import { smsService } from "../../services/sms";
-import { logger, STEP_DELAYS, sleep, randomDelay } from "../../utils/helpers";
+import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
 import { getSetting } from "../../utils/settings";
 import type { BrowserProfile } from "../../services/fingerprint";
 import type { ProxyInfo } from "../../services/proxy";
@@ -301,7 +301,8 @@ export class ManusProvider {
       // Simulates visiting: https://manus.im/invitation?code=XXX&type=signUp
       let inviteAccepted = false;
       let inviteFreeCredits = 0;
-      const inviteCode = await getSetting("invite_code");
+      const rawInviteCode = await getSetting("invite_code");
+      const inviteCode = rawInviteCode ? extractInviteCode(rawInviteCode) : "";
       const MAX_INVITE_RETRIES = 3;
 
       if (inviteCode && inviteCode.trim().length > 0) {
