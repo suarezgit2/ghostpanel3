@@ -36,6 +36,13 @@
       "when": 1774045200000,
       "tag": "0004_api_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1742425200000,
+      "tag": "0005_job_folders",
+      "breakpoints": true
     }
   ]
 }

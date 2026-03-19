@@ -8,11 +8,12 @@
  *      maxAttempts = quantity * 5 (ou seja, até 5x tentativas por conta solicitada).
  *   3. Backoff inteligente: após falhas consecutivas, aumenta o delay progressivamente.
  *   4. Se atingir o maxAttempts sem completar, finaliza com status parcial.
+ *   5. Job Rápido suporta múltiplos jobs por destinatário, agrupados em pasta.
  */
 
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db";
-import { jobs, accounts, providers } from "../../drizzle/schema";
+import { jobs, accounts, providers, jobFolders } from "../../drizzle/schema";
 import { proxyService } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
 import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
@@ -48,6 +49,8 @@ export interface CreateJobOptions {
   inviteCode?: string;
   /** Label para identificar o job (ex: "Usuário A - 5000 créditos") */
   label?: string;
+  /** ID da pasta de agrupamento (para múltiplos jobs do mesmo cliente) */
+  folderId?: number;
 }
 
 export interface QuickJobRecipient {
@@ -55,8 +58,10 @@ export interface QuickJobRecipient {
   inviteCode: string;
   /** Quantidade de créditos a enviar */
   credits: number;
-  /** Label opcional */
+  /** Label opcional (nome do cliente) */
   label?: string;
+  /** Quantidade de jobs a criar para este destinatário (padrão: 1) */
+  jobCount?: number;
 }
 
 class Orchestrator {
@@ -86,6 +91,7 @@ class Orchestrator {
       completedAccounts: 0,
       failedAccounts: 0,
       concurrency: options.concurrency || 1,
+      folderId: options.folderId || null,
       config: {
         password: options.password || "auto",
         delayMin: options.delayMin || 3000,
@@ -116,31 +122,71 @@ class Orchestrator {
 
   /**
    * Cria múltiplos jobs em paralelo para o Job Rápido (envio de créditos).
-   * Cada destinatário recebe um job independente com seu próprio invite code.
-   * Créditos / 500 = número de contas a criar.
+   * Cada destinatário recebe um ou mais jobs com seu próprio invite code.
+   * Créditos / 500 = número de contas por job.
+   * Se jobCount > 1, cria uma pasta com o nome do cliente e os jobs dentro dela.
    */
-  async createQuickJobs(recipients: QuickJobRecipient[]): Promise<{ jobIds: number[]; summary: string }> {
+  async createQuickJobs(recipients: QuickJobRecipient[]): Promise<{ jobIds: number[]; folderIds: number[]; summary: string }> {
     const CREDITS_PER_ACCOUNT = 500;
-    const jobIds: number[] = [];
+    const allJobIds: number[] = [];
+    const allFolderIds: number[] = [];
     const summaryLines: string[] = [];
 
     for (const recipient of recipients) {
       const quantity = Math.max(1, Math.floor(recipient.credits / CREDITS_PER_ACCOUNT));
-      const label = recipient.label || `${recipient.credits} créditos → ${recipient.inviteCode.substring(0, 10)}...`;
+      const jobCount = Math.max(1, recipient.jobCount || 1);
+      const clientName = recipient.label || `${recipient.inviteCode.substring(0, 10)}...`;
 
-      const jobId = await this.createJob({
-        provider: "manus",
-        quantity,
-        inviteCode: recipient.inviteCode,
-        label,
-      });
+      if (jobCount > 1) {
+        // Criar pasta para agrupar os jobs deste cliente
+        const db = await getDb();
+        if (!db) throw new Error("Database não disponível");
 
-      jobIds.push(jobId);
-      summaryLines.push(`Job #${jobId}: ${quantity} contas para "${label}" (${recipient.credits} créditos)`);
+        const folderResult = await db.insert(jobFolders).values({
+          clientName,
+          inviteCode: recipient.inviteCode,
+          totalJobs: jobCount,
+        });
+
+        const folderId = folderResult[0].insertId;
+        allFolderIds.push(folderId);
+
+        const instanceJobIds: number[] = [];
+        for (let i = 0; i < jobCount; i++) {
+          const label = `${clientName} — Instância ${i + 1}/${jobCount}`;
+          const jobId = await this.createJob({
+            provider: "manus",
+            quantity,
+            inviteCode: recipient.inviteCode,
+            label,
+            folderId,
+          });
+          instanceJobIds.push(jobId);
+          allJobIds.push(jobId);
+        }
+
+        summaryLines.push(
+          `📁 Pasta "${clientName}" (ID: ${folderId}): ${jobCount} jobs × ${quantity} contas = ${jobCount * quantity} contas totais\n` +
+          `   Jobs: ${instanceJobIds.map(id => `#${id}`).join(", ")}`
+        );
+      } else {
+        // Job único — comportamento anterior
+        const label = recipient.label || `${recipient.credits} créditos → ${recipient.inviteCode.substring(0, 10)}...`;
+        const jobId = await this.createJob({
+          provider: "manus",
+          quantity,
+          inviteCode: recipient.inviteCode,
+          label,
+        });
+
+        allJobIds.push(jobId);
+        summaryLines.push(`Job #${jobId}: ${quantity} contas para "${label}" (${recipient.credits} créditos)`);
+      }
     }
 
     return {
-      jobIds,
+      jobIds: allJobIds,
+      folderIds: allFolderIds,
       summary: summaryLines.join("\n"),
     };
   }
@@ -281,7 +327,7 @@ class Orchestrator {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await db.update(accounts).set({
-          status: "failed" as const,
+          status: "failed",
           metadata: { error: msg },
         }).where(eq(accounts.id, accountId));
 
