@@ -16,7 +16,7 @@ import { jobs, accounts, providers } from "../../drizzle/schema";
 import { proxyService } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
 import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
-import { getSetting, setSetting } from "../utils/settings";
+import { getSetting } from "../utils/settings";
 import { manusProvider, type ManusProvider } from "../providers/manus";
 
 type ProviderInstance = ManusProvider;
@@ -162,11 +162,10 @@ class Orchestrator {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
 
-    const rawOriginalInviteCode = await getSetting("invite_code");
-    const originalInviteCode = rawOriginalInviteCode ? extractInviteCode(rawOriginalInviteCode) : "";
-    const rawJobInviteCode = options.inviteCode ? extractInviteCode(options.inviteCode) : "";
-    const jobInviteCode = rawJobInviteCode || originalInviteCode;
-    const useCustomInvite = !!(options.inviteCode && options.inviteCode !== originalInviteCode);
+    // Resolve invite code for this job ONCE at start (no global setting mutation)
+    const globalInviteRaw = await getSetting("invite_code");
+    const globalInviteCode = globalInviteRaw ? extractInviteCode(globalInviteRaw) : "";
+    const jobInviteCode = options.inviteCode ? extractInviteCode(options.inviteCode) : globalInviteCode;
 
     let consecutiveFailures = 0;
     let currentBackoffMs = BACKOFF_CONFIG.initialBackoffMs;
@@ -239,17 +238,8 @@ class Orchestrator {
           }, jobId
         );
 
-        // Override invite code temporariamente se o job tem um próprio
-        if (useCustomInvite && jobInviteCode) {
-          await setSetting("invite_code", jobInviteCode);
-        }
-
-        const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId });
-
-        // Restaurar invite code original após uso
-        if (useCustomInvite && originalInviteCode) {
-          await setSetting("invite_code", originalInviteCode);
-        }
+        // Pass invite code directly to createAccount (no global setting mutation = no race condition)
+        const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId, inviteCode: jobInviteCode });
 
         await db.update(accounts).set({
           status: result.status,
@@ -289,11 +279,6 @@ class Orchestrator {
         }
 
       } catch (err) {
-        // Restaurar invite code em caso de erro
-        if (useCustomInvite && originalInviteCode) {
-          await setSetting("invite_code", originalInviteCode).catch(() => {});
-        }
-
         const msg = err instanceof Error ? err.message : String(err);
         await db.update(accounts).set({
           status: "failed" as const,

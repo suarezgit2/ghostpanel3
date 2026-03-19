@@ -28,7 +28,6 @@ import { captchaService } from "../../services/captcha";
 import { emailService } from "../../services/email";
 import { smsService } from "../../services/sms";
 import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
-import { getSetting } from "../../utils/settings";
 import type { BrowserProfile } from "../../services/fingerprint";
 import type { ProxyInfo } from "../../services/proxy";
 
@@ -49,6 +48,8 @@ interface CreateAccountOptions {
   fingerprint: BrowserProfile;
   proxy: ProxyInfo | null;
   jobId?: number;
+  /** Invite code específico deste job — evita race condition com setting global */
+  inviteCode?: string;
 }
 
 interface CreateAccountResult {
@@ -302,8 +303,8 @@ export class ManusProvider {
       let inviteAccepted = false;
       let inviteFreeCredits = 0;
       let lastInviteError: string | undefined;
-      const rawInviteCode = await getSetting("invite_code");
-      const inviteCode = rawInviteCode ? extractInviteCode(rawInviteCode) : "";
+      // Use invite code passed directly from job (avoids race condition with global setting)
+      const inviteCode = options.inviteCode || "";
       const MAX_INVITE_RETRIES = 3;
 
       if (inviteCode && inviteCode.trim().length > 0) {
