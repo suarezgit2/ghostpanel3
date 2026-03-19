@@ -201,19 +201,27 @@ async function impersRequest(options: HttpRequestOptions): Promise<HttpResponse>
   }
 
   // Convert impers response headers to plain object
+  // impers stores headers in response.headers (which may have a nested .data property)
   const responseHeaders: Record<string, string> = {};
   if (response.headers) {
-    if (typeof response.headers === "object") {
-      for (const [key, value] of Object.entries(response.headers)) {
-        responseHeaders[key.toLowerCase()] = String(value);
+    const rawHeaders = (response.headers as Record<string, unknown>).data || response.headers;
+    if (typeof rawHeaders === "object" && rawHeaders !== null) {
+      for (const [key, value] of Object.entries(rawHeaders as Record<string, unknown>)) {
+        if (key !== "data") {
+          responseHeaders[key.toLowerCase()] = String(value);
+        }
       }
     }
   }
 
+  // impers uses `statusCode` (not `status`) and `text` can be string or getter
+  const statusCode = response.statusCode ?? response.status ?? 0;
+  const textContent = typeof response.text === "function" ? response.text() : (response.text || "");
+
   return {
-    status: response.status,
+    status: statusCode,
     statusText: response.statusText || "",
-    text: response.text || "",
+    text: textContent,
     headers: responseHeaders,
     client: "impers",
   };
