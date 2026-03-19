@@ -17,17 +17,29 @@ export default function JobDetail() {
   const { id } = useParams<{ id: string }>();
   const jobId = parseInt(id || "0");
 
-  const { data: job, isLoading, refetch: refetchJob } = trpc.jobs.getById.useQuery({ id: jobId }, { enabled: jobId > 0, refetchInterval: job?.status === "running" ? 5000 : false });
+  const { data: job, isLoading, refetch: refetchJob } = trpc.jobs.getById.useQuery({ id: jobId }, { enabled: jobId > 0 });
+  const isRunning = job?.status === "running";
   const { data: jobAccounts, refetch: refetchAccounts } = trpc.accounts.list.useQuery({ page: 1, limit: 100, jobId }, { enabled: jobId > 0 });
-  const { data: jobLogs, refetch: refetchLogs } = trpc.logs.list.useQuery({ page: 1, limit: 100, jobId }, { enabled: jobId > 0, refetchInterval: job?.status === "running" ? 5000 : false });
+  const { data: jobLogs, refetch: refetchLogs } = trpc.logs.list.useQuery({ page: 1, limit: 100, jobId }, { enabled: jobId > 0 });
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-refresh a cada 5s quando job está running
+  useEffect(() => {
+    if (!isRunning) return;
+    const interval = setInterval(() => {
+      refetchJob();
+      refetchLogs();
+      refetchAccounts();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [isRunning]);
 
   // Auto-scroll para o último log quando novos logs chegam
   useEffect(() => {
-    if (job?.status === "running") {
+    if (isRunning) {
       logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [jobLogs?.logs?.length, job?.status]);
+  }, [jobLogs?.logs?.length, isRunning]);
 
   const refetchAll = async () => {
     await Promise.all([refetchJob(), refetchAccounts(), refetchLogs()]);
@@ -227,7 +239,7 @@ export default function JobDetail() {
         >
           <div className="px-5 py-4 border-b border-border flex items-center justify-between">
             <h2 className="text-sm font-semibold text-foreground">Logs ({logs.length})</h2>
-            {job?.status === "running" && (
+            {isRunning && (
               <span className="flex items-center gap-1.5 text-[10px] text-ghost-info">
                 <span className="w-1.5 h-1.5 rounded-full bg-ghost-info animate-pulse" />
                 Atualizando automaticamente
@@ -255,7 +267,7 @@ export default function JobDetail() {
                     <div
                       key={log.id}
                       className={`px-4 py-2 hover:bg-ghost-surface-1/50 transition-colors ${
-                        isWaiting && job?.status === "running" ? "bg-ghost-surface-1/30" : ""
+                        isWaiting && isRunning ? "bg-ghost-surface-1/30" : ""
                       }`}
                     >
                       <div className="flex items-center gap-2 mb-0.5">
@@ -281,9 +293,9 @@ export default function JobDetail() {
                         )}
                       </div>
                       <p className={`text-muted-foreground leading-relaxed ${
-                        isWaiting && job?.status === "running" ? "text-foreground/70" : ""
+                        isWaiting && isRunning ? "text-foreground/70" : ""
                       }`}>
-                        {isWaiting && job?.status === "running" && (
+                        {isWaiting && isRunning && (
                           <span className="inline-block w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse mr-1.5 mb-0.5" />
                         )}
                         {log.message}
