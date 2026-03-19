@@ -1,10 +1,11 @@
 /**
- * SmsService - SMSBower Integration (v2 — Intelligent Provider Rotation)
+ * SmsService - SMSBower Integration (v2.1 — Auto-Discover Fix)
  *
  * Sistema inteligente de SMS com:
  *   1. Rotação sequencial de provedores: cada tentativa usa o próximo provedor da lista
  *   2. Health tracking em memória: provedores que falham são penalizados com cooldown
- *   3. Fallback para Auto-Discover: se todos os provedores da lista falharem, busca novos
+ *   3. Auto-Discover: quando ativo, descobre provedores via getPricesV3 ANTES de tentar
+ *      (substitui a lista manual). Quando inativo, usa a lista manual como fallback.
  *   4. Score dinâmico: provedores que entregam SMS rápido ganham prioridade
  *
  * Settings utilizados (todos com fallback padrão):
@@ -278,7 +279,8 @@ class SmsService {
       "sms",
       `Configuração carregada: país=${this.config.country}, serviço=${this.config.service}, ` +
       `maxPrice=$${this.config.maxPrice}, providers=${this.config.providerIds.length}, ` +
-      `retries=${this.config.maxRetries}, wait=${this.config.waitTimeMs / 1000}s`
+      `retries=${this.config.maxRetries}, wait=${this.config.waitTimeMs / 1000}s, ` +
+      `autoDiscover=${this.config.autoDiscover}`
     );
   }
 
@@ -299,7 +301,7 @@ class SmsService {
     const data = await this.getProviders(country, service);
 
     // getPricesV3 response structure: { [country]: { [service]: { [providerId]: { price, count, provider_id } } } }
-    // NOTE: The field is "price" (number), NOT "cost" (string) — this was the bug.
+    // NOTE: The field is "price" (number), NOT "cost" (string) — this was the original bug.
     const providers: Array<{ id: number; cost: number; count: number }> = [];
     const countryData = data?.[country] as Record<string, Record<string, { price: number; cost?: string; count: number; provider_id?: number }>> | undefined;
     if (!countryData) {
@@ -493,20 +495,17 @@ class SmsService {
   }
 
   /**
-   * getCodeWithRetry v2 — Rotação inteligente de provedores
+   * getCodeWithRetry v2.1 — Auto-Discover corrigido
    *
    * Estratégia:
-   *   1. Monta a fila de provedores: lista configurada, ordenada por health score
-   *   2. Cada tentativa usa UM provedor específico (rotação sequencial)
-   *   3. Se o provedor falha (timeout ou erro), registra falha no health tracker
-   *      e avança para o próximo provedor
-   *   4. Se todos os provedores da lista falharam, ativa Auto-Discover
-   *      para buscar provedores novos que não estavam na lista original
-   *   5. Se Auto-Discover também falha, lança erro
-   *
-   * O maxRetries agora é o número TOTAL de tentativas (não limitado à lista).
-   * Se a lista tem 7 provedores e maxRetries=3, tenta 3 provedores.
-   * Se maxRetries=10, tenta 7 da lista + até 3 do Auto-Discover.
+   *   1. Se autoDiscover=true: descobre provedores via getPricesV3 ANTES de tentar.
+   *      A lista descoberta SUBSTITUI a lista manual (mais baratos primeiro).
+   *   2. Se autoDiscover=false: usa a lista manual de provider IDs.
+   *   3. Cada tentativa usa UM provedor específico (rotação sequencial).
+   *   4. Se o provedor falha, registra no health tracker e avança.
+   *   5. Se todos falharam e autoDiscover estava OFF, tenta descobrir como fallback.
+   *   6. maxRetries limita tentativas, mas é expandido quando Auto-Discover
+   *      encontra novos provedores (para dar chance aos descobertos).
    */
   async getCodeWithRetry(options: RetryOptions = {}): Promise<RetryResult> {
     // Always reload config from DB to reflect any changes made in Settings
@@ -521,20 +520,44 @@ class SmsService {
     const service = options.service || this.config!.service;
     const maxPrice = options.maxPrice || this.config!.maxPrice;
 
-    // 1. Montar fila de provedores, ordenada por health score
+    // 1. Montar fila de provedores
     let configuredProviders = options.providerIds || this.config!.providerIds;
 
+    // If Auto-Discover is ON, discover providers UPFRONT (replaces manual list)
+    if (this.config!.autoDiscover && !options.providerIds) {
+      await logger.info("sms", `Auto-Discover ATIVO — buscando provedores via getPricesV3 (país=${country}, serviço=${service}, maxPrice=$${maxPrice})...`, {}, jobId);
+      try {
+        const discovered = await this.discoverProviders(country, service, maxPrice);
+        if (discovered.length > 0) {
+          await logger.info("sms",
+            `Auto-Discover encontrou ${discovered.length} provedores dentro de $${maxPrice}: [${discovered.join(", ")}]`,
+            {}, jobId
+          );
+          configuredProviders = discovered;
+        } else {
+          await logger.warn("sms",
+            `Auto-Discover não encontrou provedores dentro de $${maxPrice}. Usando lista manual como fallback: [${configuredProviders.join(", ")}]`,
+            {}, jobId
+          );
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await logger.warn("sms", `Auto-Discover falhou: ${msg}. Usando lista manual como fallback.`, {}, jobId);
+      }
+    }
+
     // Auto-remove provedores com performance muito ruim (5+ falhas consecutivas, <20% sucesso)
-    // Eles são removidos da lista salva no banco para poder ser redescobertos pelo Auto-Discover
-    if (!options.providerIds) { // Só auto-remove da lista global, não de listas passadas manualmente
+    if (!options.providerIds) {
       const toRemove = this.providerHealth.getProvidersToRemove(configuredProviders);
       if (toRemove.length > 0) {
         configuredProviders = configuredProviders.filter(id => !toRemove.includes(id));
-        const newList = configuredProviders.join(",");
-        await setSetting("sms_provider_ids", newList);
+        // Only update saved list if NOT using auto-discover (otherwise the list is ephemeral)
+        if (!this.config!.autoDiscover) {
+          const newList = configuredProviders.join(",");
+          await setSetting("sms_provider_ids", newList);
+        }
         await logger.warn("sms",
-          `Auto-removendo ${toRemove.length} provedor(es) com performance ruim: [${toRemove.join(", ")}]. ` +
-          `Lista atualizada: [${newList}]. Podem ser redescobertos pelo Auto-Discover.`,
+          `Removendo ${toRemove.length} provedor(es) com performance ruim: [${toRemove.join(", ")}].`,
           { removed: toRemove }, jobId
         );
       }
@@ -546,20 +569,27 @@ class SmsService {
     const cooldownProviders = configuredProviders.filter(id => !rankedProviders.includes(id));
     const providerQueue = [...rankedProviders, ...cooldownProviders];
 
-    await logger.info("sms", `Fila de provedores: [${providerQueue.join(", ")}] (${rankedProviders.length} disponíveis, ${cooldownProviders.length} em cooldown)`, {}, jobId);
+    // Effective max retries: at least the queue size, capped at maxRetries * 2 for discovered providers
+    const effectiveMaxRetries = Math.max(maxRetries, Math.min(providerQueue.length, maxRetries * 2));
+
+    await logger.info("sms",
+      `Fila de provedores: [${providerQueue.join(", ")}] (${rankedProviders.length} disponíveis, ${cooldownProviders.length} em cooldown). ` +
+      `Max tentativas: ${effectiveMaxRetries}`,
+      {}, jobId
+    );
 
     let totalCost = 0;
     let lastError: Error | null = null;
     let attempt = 0;
-    let usedAutoDiscover = false;
+    let usedFallbackDiscover = false;
 
     // 2. Tentar cada provedor da fila sequencialmente
-    for (let queueIndex = 0; queueIndex < providerQueue.length && attempt < maxRetries; queueIndex++) {
+    for (let queueIndex = 0; queueIndex < providerQueue.length && attempt < effectiveMaxRetries; queueIndex++) {
       attempt++;
       const currentProviderId = providerQueue[queueIndex];
       const isInCooldown = !this.providerHealth.isAvailable(currentProviderId);
 
-      await logger.info("sms", `=== Tentativa ${attempt}/${maxRetries} — Provedor #${currentProviderId}${isInCooldown ? " (saindo do cooldown)" : ""} ===`, {}, jobId);
+      await logger.info("sms", `=== Tentativa ${attempt}/${effectiveMaxRetries} — Provedor #${currentProviderId}${isInCooldown ? " (saindo do cooldown)" : ""} ===`, {}, jobId);
 
       const result = await this._tryProvider(currentProviderId, {
         country, service, maxPrice, waitTimeMs, onNumberRented, jobId, attempt,
@@ -568,15 +598,14 @@ class SmsService {
       if (result.success) {
         totalCost += result.cost;
 
-        // Se o provedor veio do Auto-Discover (não estava na lista original), auto-adicioná-lo
-        const wasFromAutoDiscover = !options.providerIds && !this.config!.providerIds.includes(currentProviderId);
-        if (wasFromAutoDiscover) {
+        // Se o provedor veio do Auto-Discover e não está na lista salva, auto-adicioná-lo
+        if (!options.providerIds && !this.config!.providerIds.includes(currentProviderId)) {
           const updatedList = [...this.config!.providerIds, currentProviderId];
           const newListStr = updatedList.join(",");
           await setSetting("sms_provider_ids", newListStr);
           this.config!.providerIds = updatedList;
           await logger.info("sms",
-            `Auto-Discover: provedor #${currentProviderId} teve SUCESSO — adicionado permanentemente à lista. ` +
+            `Provedor #${currentProviderId} teve SUCESSO — adicionado permanentemente à lista. ` +
             `Lista atualizada: [${newListStr}]`,
             { providerId: currentProviderId, newList: updatedList }, jobId
           );
@@ -594,58 +623,35 @@ class SmsService {
       // Falhou — custo já foi devolvido pelo cancel
       lastError = result.error || null;
 
-      // Se é o último provedor da fila E ainda temos tentativas, ativar Auto-Discover
-      if (queueIndex === providerQueue.length - 1 && attempt < maxRetries && !usedAutoDiscover) {
-        usedAutoDiscover = true;
+      // Fallback: se Auto-Discover estava OFF, todos da lista falharam, e ainda temos tentativas
+      if (queueIndex === providerQueue.length - 1 && attempt < effectiveMaxRetries && !usedFallbackDiscover && !this.config!.autoDiscover) {
+        usedFallbackDiscover = true;
+        await logger.info("sms", `Todos os ${providerQueue.length} provedores da lista falharam. Tentando Auto-Discover como fallback...`, {}, jobId);
 
-        if (!this.config!.autoDiscover) {
-          await logger.warn("sms",
-            `Todos os ${providerQueue.length} provedores da lista falharam e Auto-Discover está DESATIVADO. ` +
-            `Ative "sms_auto_discover" nas configurações para buscar provedores automaticamente.`,
-            {}, jobId
-          );
-        } else {
-          await logger.info("sms", `Todos os ${providerQueue.length} provedores da lista falharam. Ativando Auto-Discover...`, {}, jobId);
+        try {
+          const discovered = await this.discoverProviders(country, service, maxPrice);
+          const newProviders = discovered.filter(id => !providerQueue.includes(id));
 
-          try {
-            const discovered = await this.discoverProviders(country, service, maxPrice);
-            // Filtrar provedores que já tentamos
-            const newProviders = discovered.filter(id => !providerQueue.includes(id));
-
-            if (newProviders.length > 0) {
-              await logger.info("sms",
-                `Auto-Discover encontrou ${newProviders.length} novos provedores dentro do limite de $${maxPrice}: [${newProviders.join(", ")}]`,
-                {}, jobId
-              );
-              // Adicionar ao final da fila
-              providerQueue.push(...newProviders);
-            } else {
-              // Log all discovered providers (even expensive ones) to help diagnose
-              const allDiscovered = await this.discoverProviders(country, service, "999").catch(() => []);
-              const expensive = allDiscovered.filter(id => !providerQueue.includes(id));
-              if (expensive.length > 0) {
-                await logger.warn("sms",
-                  `Auto-Discover: nenhum provedor novo dentro do limite de $${maxPrice}. ` +
-                  `Há ${expensive.length} provedor(es) disponíveis acima do limite: [${expensive.join(", ")}]. ` +
-                  `Considere aumentar o sms_max_price.`,
-                  {}, jobId
-                );
-              } else {
-                await logger.warn("sms",
-                  `Auto-Discover não encontrou provedores novos além dos ${providerQueue.length} já tentados`,
-                  {}, jobId
-                );
-              }
-            }
-          } catch (discoverErr) {
-            const msg = discoverErr instanceof Error ? discoverErr.message : String(discoverErr);
-            await logger.warn("sms", `Auto-Discover falhou: ${msg}`, {}, jobId);
+          if (newProviders.length > 0) {
+            await logger.info("sms",
+              `Auto-Discover (fallback) encontrou ${newProviders.length} novos provedores: [${newProviders.join(", ")}]`,
+              {}, jobId
+            );
+            providerQueue.push(...newProviders);
+          } else {
+            await logger.warn("sms",
+              `Auto-Discover (fallback) não encontrou provedores novos além dos ${providerQueue.length} já tentados`,
+              {}, jobId
+            );
           }
+        } catch (discoverErr) {
+          const msg = discoverErr instanceof Error ? discoverErr.message : String(discoverErr);
+          await logger.warn("sms", `Auto-Discover (fallback) falhou: ${msg}`, {}, jobId);
         }
       }
 
       // Delay entre tentativas
-      if (attempt < maxRetries && queueIndex < providerQueue.length - 1) {
+      if (attempt < effectiveMaxRetries && queueIndex < providerQueue.length - 1) {
         const delay = this.config!.retryDelayMin + Math.random() * (this.config!.retryDelayMax - this.config!.retryDelayMin);
         await sleep(delay);
       }
