@@ -558,6 +558,21 @@ class SmsService {
 
       if (result.success) {
         totalCost += result.cost;
+
+        // Se o provedor veio do Auto-Discover (não estava na lista original), auto-adicioná-lo
+        const wasFromAutoDiscover = !options.providerIds && !this.config!.providerIds.includes(currentProviderId);
+        if (wasFromAutoDiscover) {
+          const updatedList = [...this.config!.providerIds, currentProviderId];
+          const newListStr = updatedList.join(",");
+          await setSetting("sms_provider_ids", newListStr);
+          this.config!.providerIds = updatedList;
+          await logger.info("sms",
+            `Auto-Discover: provedor #${currentProviderId} teve SUCESSO — adicionado permanentemente à lista. ` +
+            `Lista atualizada: [${newListStr}]`,
+            { providerId: currentProviderId, newList: updatedList }, jobId
+          );
+        }
+
         return {
           code: result.code!,
           phoneNumber: result.phoneNumber!,
