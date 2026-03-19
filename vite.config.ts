@@ -196,6 +196,10 @@ export default defineConfig({
           // Gráficos e animações (carregados sob demanda)
           "vendor-charts": ["recharts"],
           "vendor-motion": ["framer-motion"],
+          // date-fns (usada em várias páginas)
+          "vendor-date": ["date-fns"],
+          // tRPC + React Query
+          "vendor-trpc": ["@trpc/client", "@trpc/react-query", "@tanstack/react-query", "superjson"],
         },
       },
     },
