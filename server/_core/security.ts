@@ -147,14 +147,9 @@ export function registerSecurityMiddleware(app: Express, productionUrl?: string)
   // Security headers em todas as respostas
   app.use(securityHeaders());
 
-  // CORS restritivo — só permite o próprio domínio
-  const allowedOrigins: string[] = [];
-  if (productionUrl) {
-    allowedOrigins.push(productionUrl);
-    // Também permite sem trailing slash
-    allowedOrigins.push(productionUrl.replace(/\/$/, ""));
-  }
-  app.use(restrictiveCors(allowedOrigins));
+  // NOTA: CORS não é aplicado aqui pois o frontend e backend rodam na mesma origem.
+  // O Express serve o frontend estático e a API no mesmo processo/porta,
+  // então não há cross-origin requests em produção.
 
   // Rate limiting nos endpoints públicos
   // Login: 10 tentativas por 15 minutos (brute force já trata, mas isso é uma camada extra)
