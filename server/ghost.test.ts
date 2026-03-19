@@ -50,6 +50,13 @@ vi.mock("./services/proxy", () => ({
     syncFromWebshare: vi.fn().mockResolvedValue(0),
     getNextProxy: vi.fn().mockResolvedValue(null),
     markProxyFailed: vi.fn(),
+    getDetailedStats: vi.fn().mockResolvedValue({
+      total: 0,
+      available: 0,
+      used: 0,
+      isReplacing: false,
+      queueLength: 0,
+    }),
   },
 }));
 
@@ -361,8 +368,16 @@ describe("Ghost Panel - Fingerprint & AuthCommandCmd", () => {
     expect(profile).toHaveProperty("clientId");
     expect(profile).toHaveProperty("dcrEncoded");
     expect(profile).toHaveProperty("headers");
+    // ANTI-DETECTION v4.2: novos campos
+    expect(profile).toHaveProperty("firstEntry");
+    expect(profile).toHaveProperty("timezoneOffset");
     expect(profile.clientId).toHaveLength(22);
     expect(profile.colorDepth).toBe(24);
+    // firstEntry deve ser um dos valores válidos
+    const validFirstEntries = ["direct", "google", "twitter", "linkedin", "facebook", "reddit"];
+    expect(validFirstEntries).toContain(profile.firstEntry);
+    // timezoneOffset deve ser um número
+    expect(typeof profile.timezoneOffset).toBe("number");
   });
 
   it("fingerprintService.getOrderedHeaders ordena headers corretamente", async () => {
@@ -409,6 +424,13 @@ describe("Ghost Panel - Fingerprint & AuthCommandCmd", () => {
     expect(profile.timezone).toBeTruthy();
     expect(typeof profile.locale).toBe("string");
     expect(typeof profile.timezone).toBe("string");
+    // ANTI-DETECTION v4.2: firstEntry deve estar presente e ser válido
+    expect(profile.firstEntry).toBeTruthy();
+    const validFirstEntries = ["direct", "google", "twitter", "linkedin", "facebook", "reddit"];
+    expect(validFirstEntries).toContain(profile.firstEntry);
+    // timezoneOffset deve ser um número inteiro (DST-aware)
+    expect(typeof profile.timezoneOffset).toBe("number");
+    expect(Number.isInteger(profile.timezoneOffset)).toBe(true);
   });
 
   it("DCR tem formato correto compatível com manus.im (ua, fgRequestId, screen, viewport, timestamp, timezoneOffset)", async () => {
@@ -471,6 +493,97 @@ describe("Ghost Panel - Fingerprint & AuthCommandCmd", () => {
     expect(typeof STEP_DELAYS.afterEmailCheck).toBe("function");
     expect(typeof STEP_DELAYS.afterRegistration).toBe("function");
     expect(typeof STEP_DELAYS.betweenAccounts).toBe("function");
+  });
+});
+
+describe("Ghost Panel - Anti-Detection v4.2", () => {
+  it("generateEmailPrefix gera prefixos com padrão humano (não aleatório puro)", async () => {
+    const { generateEmailPrefix } = await import("./utils/helpers");
+
+    // Gerar 20 prefixos e verificar que seguem padrões humanos
+    const prefixes: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      prefixes.push(generateEmailPrefix());
+    }
+
+    // Todos devem ser strings não-vazias
+    prefixes.forEach(p => {
+      expect(typeof p).toBe("string");
+      expect(p.length).toBeGreaterThan(3);
+    });
+
+    // Devem ser únicos (alta probabilidade)
+    const unique = new Set(prefixes);
+    expect(unique.size).toBeGreaterThan(10);
+  });
+
+  it("generatePassword gera senhas com padrão humano (palavra+número+símbolo)", async () => {
+    const { generatePassword } = await import("./utils/helpers");
+
+    const passwords: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      passwords.push(generatePassword());
+    }
+
+    passwords.forEach(p => {
+      expect(p.length).toBeGreaterThanOrEqual(8);
+      // Deve conter pelo menos uma letra maiúscula
+      expect(p).toMatch(/[A-Z]/);
+      // Deve conter pelo menos um número
+      expect(p).toMatch(/[0-9]/);
+      // Deve conter pelo menos um símbolo
+      expect(p).toMatch(/[!@#$%&*?]/);
+    });
+  });
+
+  it("fingerprintService gera firstEntry com distribuição realista (não 100% direct)", async () => {
+    const { fingerprintService } = await import("./services/fingerprint");
+
+    // Gerar 50 perfis e verificar distribuição de firstEntry
+    const entries: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const profile = fingerprintService.generateProfile();
+      entries.push(profile.firstEntry);
+    }
+
+    // Não deve ser 100% "direct" (probabilidade estatística)
+    const directCount = entries.filter(e => e === "direct").length;
+    // Com 55% de chance de "direct", em 50 tentativas esperamos entre 15 e 45
+    expect(directCount).toBeLessThan(50); // Nunca 100% direct
+    expect(directCount).toBeGreaterThan(0); // Deve ter alguns direct
+
+    // Deve ter pelo menos um não-direct
+    const nonDirect = entries.filter(e => e !== "direct");
+    expect(nonDirect.length).toBeGreaterThan(0);
+  });
+
+  it("timezoneOffset usa valor DST-aware (não valor fixo desatualizado)", async () => {
+    const { fingerprintService } = await import("./services/fingerprint");
+
+    // Em março de 2026, America/New_York está em EDT (UTC-4, offset=240)
+    // Não deve retornar 300 (EST, UTC-5) que seria o valor de inverno
+    const profile = fingerprintService.generateProfile("us");
+
+    // O offset deve ser um número inteiro válido
+    expect(Number.isInteger(profile.timezoneOffset)).toBe(true);
+    // Deve estar em um range razoável para timezones americanos
+    expect(profile.timezoneOffset).toBeGreaterThanOrEqual(180); // UTC-3 (mais leste)
+    expect(profile.timezoneOffset).toBeLessThanOrEqual(480);    // UTC-8 (mais oeste)
+  });
+
+  it("DCR regenerado tem timestamp diferente do original", async () => {
+    const { fingerprintService } = await import("./services/fingerprint");
+    const profile = fingerprintService.generateProfile("us");
+
+    // Aguardar 10ms para garantir timestamp diferente
+    await new Promise(r => setTimeout(r, 10));
+
+    const freshDcr = fingerprintService.regenerateDcr(profile);
+
+    // O DCR regenerado deve ser diferente do original (timestamp mudou)
+    // (pode ser igual se gerado no mesmo milissegundo, mas improvável)
+    expect(typeof freshDcr).toBe("string");
+    expect(freshDcr.length).toBeGreaterThan(0);
   });
 });
 

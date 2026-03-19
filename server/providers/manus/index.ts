@@ -3,7 +3,7 @@
  * Complete account creation flow for manus.im
  *
  * Steps:
- * 1. Solve Cloudflare Turnstile
+ * 1. Solve Cloudflare Turnstile (WITH proxy — same IP as API calls)
  * 2. Check if email is new (getUserPlatforms) → returns tempToken
  * 3. Send email verification code
  * 4. Read code from email (Zoho Mail polling)
@@ -14,6 +14,12 @@
  *    - Simulates visiting https://manus.im/invitation?code=XXX&type=signUp
  *    - Verifies freeCredits >= 1500 to confirm invite was applied
  * 6-7. SMS verification with robust retry
+ *
+ * ANTI-DETECTION IMPROVEMENTS (v4.2):
+ * - Turnstile CAPTCHA is solved WITH proxy (same IP as API calls)
+ * - authCommandCmd.firstEntry is randomized from fingerprint profile
+ * - authCommandCmd.tzOffset uses DST-aware real offset from fingerprint
+ * - DCR is regenerated fresh on every RPC call (handled in rpc.ts)
  */
 
 import * as rpc from "./rpc";
@@ -60,36 +66,16 @@ interface CreateAccountResult {
  *
  * Fields match what the real manus.im frontend sends:
  * locale, timezone, tzOffset (as string), firstEntry, fbp
+ *
+ * ANTI-DETECTION: firstEntry is randomized from the fingerprint profile.
+ * tzOffset uses the DST-aware real offset from the fingerprint.
  */
 function buildAuthCommandCmd(fingerprint: BrowserProfile): Record<string, unknown> {
-  // tzOffset: JS getTimezoneOffset() returns minutes west of UTC (positive = west)
-  // We derive it from the timezone name
-  const TZ_OFFSETS: Record<string, number> = {
-    "America/New_York": 300,
-    "America/Chicago": 360,
-    "America/Denver": 420,
-    "America/Los_Angeles": 480,
-    "America/Sao_Paulo": 180,
-    "America/Fortaleza": 180,
-    "America/Manaus": 240,
-    "Europe/London": 0,
-    "Europe/Berlin": -60,
-    "Europe/Paris": -60,
-    "Europe/Madrid": -60,
-    "Asia/Tokyo": -540,
-    "Asia/Shanghai": -480,
-    "Asia/Singapore": -480,
-    "Asia/Kolkata": -330,
-    "Asia/Jakarta": -420,
-    "Australia/Sydney": -660,
-    "Pacific/Auckland": -780,
-  };
-
   return {
     locale: fingerprint.locale,
     timezone: fingerprint.timezone,
-    tzOffset: String(TZ_OFFSETS[fingerprint.timezone] ?? 300),
-    firstEntry: "direct",
+    tzOffset: String(fingerprint.timezoneOffset),  // DST-aware real offset
+    firstEntry: fingerprint.firstEntry,             // Randomized: direct/google/twitter/etc
     fbp: "",
   };
 }
@@ -110,15 +96,19 @@ function formatPhoneForManus(phoneNumber: string, countryPrefix: string): string
 
 /**
  * Solve Turnstile with retry logic.
+ *
+ * ANTI-DETECTION: Proxy is passed to the CAPTCHA solver so that the token
+ * is resolved from the SAME IP that will make the API calls.
+ * This prevents IP mismatch detection (Turnstile token bound to solver IP ≠ request IP).
  */
-async function solveTurnstileWithRetry(jobId?: number): Promise<string> {
+async function solveTurnstileWithRetry(proxy: ProxyInfo | null, jobId?: number): Promise<string> {
   let retries = 0;
   while (true) {
     try {
       const token = await captchaService.solveTurnstile(
         MANUS_CONFIG.loginUrl,
         MANUS_CONFIG.turnstileSiteKey,
-        null,
+        proxy,    // Pass proxy so CAPTCHA is solved from the same IP
         jobId
       );
       return token;
@@ -140,12 +130,17 @@ export class ManusProvider {
     const { email, password, fingerprint, proxy, jobId } = options;
 
     try {
-      // Build authCommandCmd from fingerprint (locale, timezone, tzOffset, firstEntry, fbp)
+      // Build authCommandCmd from fingerprint (locale, timezone, tzOffset DST-aware, firstEntry randomized, fbp)
       const authCommandCmd = buildAuthCommandCmd(fingerprint);
 
-      // STEP 1: Solve Cloudflare Turnstile (single token for getUserPlatforms)
-      await logger.info("step_1_turnstile", "Resolvendo Turnstile...", { email }, jobId);
-      const turnstileToken = await solveTurnstileWithRetry(jobId);
+      // STEP 1: Solve Cloudflare Turnstile (WITH proxy — same IP as API calls)
+      await logger.info("step_1_turnstile", "Resolvendo Turnstile...", {
+        email,
+        proxy: proxy ? `${proxy.host}:${proxy.port}` : "sem proxy",
+        firstEntry: fingerprint.firstEntry,
+        tzOffset: fingerprint.timezoneOffset,
+      }, jobId);
+      const turnstileToken = await solveTurnstileWithRetry(proxy, jobId);
       await STEP_DELAYS.afterTurnstile();
 
       // STEP 2: Check if email is new → returns tempToken
@@ -188,7 +183,7 @@ export class ManusProvider {
             throw new Error(`Email não recebido após ${retries} tentativas: ${err}`);
           }
           await logger.warn("step_4_read_email", `Tentativa ${retries} falhou, reenviando...`, {}, jobId);
-          const newTurnstileToken = await solveTurnstileWithRetry(jobId);
+          const newTurnstileToken = await solveTurnstileWithRetry(proxy, jobId);
           const { tempToken: newTempToken } = await rpc.getUserPlatforms(email, newTurnstileToken, rpcOptions);
           await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, newTempToken, rpcOptions);
           await STEP_DELAYS.afterEmailCodeSent();
@@ -344,6 +339,8 @@ export class ManusProvider {
           smsAttempts: smsResult.attempt,
           proxy: proxy?.host || "none",
           fingerprint: fingerprint.userAgent.substring(0, 50),
+          firstEntry: fingerprint.firstEntry,
+          tzOffset: fingerprint.timezoneOffset,
           inviteAccepted,
           inviteCode: inviteCode || null,
           inviteFreeCredits: inviteFreeCredits || null,

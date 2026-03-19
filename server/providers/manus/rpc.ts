@@ -4,6 +4,10 @@
  *
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
+ *
+ * ANTI-DETECTION (v4.2):
+ * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fgRequestId)
+ * - This matches real browser behavior where getDCR() is called per request
  */
 
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -42,7 +46,21 @@ async function rpcCall(
   extraHeaders?: Record<string, string>
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}/${servicePath}`;
-  const headers = fingerprintService.getOrderedHeaders(options.fingerprint);
+
+  // ANTI-DETECTION: Regenerate DCR fresh on EVERY call (fresh timestamp + fgRequestId)
+  // This matches real browser behavior — getDCR(true) is called before each API request
+  const freshDcr = fingerprintService.regenerateDcr(options.fingerprint);
+
+  // Update the profile's DCR header with the fresh value
+  const profileWithFreshDcr = {
+    ...options.fingerprint,
+    headers: {
+      ...options.fingerprint.headers,
+      "x-client-dcr": freshDcr,
+    },
+  };
+
+  const headers = fingerprintService.getOrderedHeaders(profileWithFreshDcr);
 
   // ConnectRPC required headers
   headers["Connect-Protocol-Version"] = "1";
@@ -51,7 +69,7 @@ async function rpcCall(
     headers["Authorization"] = `Bearer ${options.authToken}`;
   }
 
-  // Merge extra headers (e.g., x-client-dcr, x-client-id)
+  // Merge extra headers (e.g., explicit x-client-dcr override, x-client-id)
   if (extraHeaders) {
     Object.assign(headers, extraHeaders);
   }
@@ -168,13 +186,12 @@ export async function bindPhoneTrait(phoneNumber: string, regionCode: string, ph
  *
  * IMPORTANT: The real manus.im frontend (invitation/page.js) always generates a
  * FRESH x-client-dcr for this call via getDCR(true). The DCR includes a fresh
- * timestamp and fgRequestId. We regenerate the DCR here to match this behavior.
- *
- * The call signature in the real frontend:
- *   await UserService.checkInvitationCode({ code }, { headers: { "x-client-dcr": freshDcr } })
+ * timestamp and fgRequestId. The rpcCall() function already handles this by
+ * regenerating DCR on every call, but we keep explicit regeneration here for clarity.
  */
 export async function checkInvitationCode(code: string, options: RpcOptions) {
-  // Generate a fresh DCR with updated timestamp (matches real browser behavior)
+  // DCR is already regenerated inside rpcCall(), but we explicitly pass a fresh one
+  // to make the intent clear and ensure the header override takes effect
   const freshDcr = fingerprintService.regenerateDcr(options.fingerprint);
 
   const result = await rpcCall(

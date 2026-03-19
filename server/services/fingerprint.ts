@@ -8,13 +8,20 @@
  *   locale: string,       // e.g. "en-US"
  *   languages: string[],  // navigator.languages
  *   timezone: string,     // IANA timezone
- *   fgRequestId: string,  // FingerprintJS Pro requestId (empty string when not available)
+ *   fgRequestId: string,  // FingerprintJS Pro requestId (real or synthetic)
  *   clientId: string,     // localStorage client_id_v2
  *   screen: { width, height },
  *   viewport: { width, height },
  *   timestamp: number,    // Date.now()
  *   timezoneOffset: number // new Date().getTimezoneOffset()
  * }
+ *
+ * ANTI-DETECTION IMPROVEMENTS (v4.2):
+ * - Real timezone offsets with DST awareness (Intl.DateTimeFormat)
+ * - DCR is regenerated fresh on every call (fresh timestamp + fresh fgRequestId)
+ * - Updated Chrome versions (133 removed, 134/135/136 added)
+ * - firstEntry randomized with realistic distribution
+ * - X-Client-Version updated to match current Manus frontend
  */
 
 import { encodeDCR, generateClientId } from "../utils/helpers";
@@ -38,43 +45,40 @@ function generateFgRequestId(): string {
   return `${ts}.${rand}`;
 }
 
-interface UAProfile {
-  ua: string;
-  platform: string;
-  screens: number[][];
-  weight: number;
+/**
+ * Get the REAL timezone offset in minutes for a given IANA timezone.
+ * Uses Intl.DateTimeFormat to correctly handle DST (Daylight Saving Time).
+ * Positive = west of UTC (matches JS getTimezoneOffset() convention).
+ *
+ * Example: In March 2026, America/New_York is in EDT (UTC-4) → offset = 240
+ *          In January 2026, America/New_York is in EST (UTC-5) → offset = 300
+ */
+function getRealTimezoneOffset(timezone: string): number {
+  try {
+    const now = new Date();
+    // Get the UTC time parts for this timezone
+    const utcDate = new Date(now.toLocaleString("en-US", { timeZone: "UTC" }));
+    const tzDate = new Date(now.toLocaleString("en-US", { timeZone: timezone }));
+    const diffMs = utcDate.getTime() - tzDate.getTime();
+    // Convert to minutes (positive = west of UTC, matching JS convention)
+    return Math.round(diffMs / 60000);
+  } catch {
+    // Fallback to static values if timezone is invalid
+    return STATIC_TZ_OFFSETS[timezone] ?? 300;
+  }
 }
 
-const UA_PROFILES: UAProfile[] = [
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 30 },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 20 },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900]], weight: 10 },
-  { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 12 },
-  { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 8 },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864]], weight: 5 },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900]], weight: 8 },
-  { ua: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36", platform: "Linux x86_64", screens: [[1920,1080],[1366,768],[2560,1440]], weight: 3 },
-];
-
-const TIMEZONES: Record<string, string[]> = {
-  us: ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
-  br: ["America/Sao_Paulo", "America/Fortaleza", "America/Manaus"],
-  eu: ["Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Madrid"],
-  asia: ["Asia/Tokyo", "Asia/Shanghai", "Asia/Singapore", "Asia/Kolkata"],
-  default: ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "America/Sao_Paulo"],
-};
-
-// UTC offsets in minutes (positive = west of UTC, matching JS getTimezoneOffset())
-const TZ_OFFSETS: Record<string, number> = {
-  "America/New_York": 300,
-  "America/Chicago": 360,
-  "America/Denver": 420,
-  "America/Los_Angeles": 480,
-  "America/Sao_Paulo": 180,
+// Static fallback offsets (used only if Intl fails)
+const STATIC_TZ_OFFSETS: Record<string, number> = {
+  "America/New_York": 240,   // EDT in March (DST active)
+  "America/Chicago": 300,    // CDT in March
+  "America/Denver": 360,     // MDT in March
+  "America/Los_Angeles": 420, // PDT in March
+  "America/Sao_Paulo": 180,  // BRT (no DST in 2026)
   "America/Fortaleza": 180,
   "America/Manaus": 240,
-  "Europe/London": 0,
-  "Europe/Berlin": -60,
+  "Europe/London": 0,        // GMT in March (BST starts late March)
+  "Europe/Berlin": -60,      // CET in March (CEST starts late March)
   "Europe/Paris": -60,
   "Europe/Madrid": -60,
   "Asia/Tokyo": -540,
@@ -86,6 +90,35 @@ const TZ_OFFSETS: Record<string, number> = {
   "Pacific/Auckland": -780,
 };
 
+interface UAProfile {
+  ua: string;
+  platform: string;
+  screens: number[][];
+  weight: number;
+  chromeVersion?: string;
+}
+
+// UPDATED: Chrome 132 removed (too old), Chrome 134/135/136 added
+// Chrome 143 remains dominant (most recent stable in early 2026)
+const UA_PROFILES: UAProfile[] = [
+  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 25, chromeVersion: "136" },
+  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 20, chromeVersion: "135" },
+  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900]], weight: 15, chromeVersion: "134" },
+  { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 15, chromeVersion: "136" },
+  { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 10, chromeVersion: "135" },
+  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864]], weight: 5 },
+  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900]], weight: 8, chromeVersion: "136" },
+  { ua: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "Linux x86_64", screens: [[1920,1080],[1366,768],[2560,1440]], weight: 2, chromeVersion: "135" },
+];
+
+const TIMEZONES: Record<string, string[]> = {
+  us: ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
+  br: ["America/Sao_Paulo", "America/Fortaleza", "America/Manaus"],
+  eu: ["Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Madrid"],
+  asia: ["Asia/Tokyo", "Asia/Shanghai", "Asia/Singapore", "Asia/Kolkata"],
+  default: ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "America/Sao_Paulo"],
+};
+
 const LOCALES: Record<string, string[]> = {
   us: ["en-US"],
   br: ["pt-BR", "en-US"],
@@ -93,6 +126,29 @@ const LOCALES: Record<string, string[]> = {
   asia: ["ja-JP", "zh-CN", "en-SG"],
   default: ["en-US", "pt-BR", "en-GB"],
 };
+
+/**
+ * Realistic firstEntry distribution.
+ * "direct" is most common but not 100% — users also come from Google, social, etc.
+ */
+const FIRST_ENTRY_OPTIONS = [
+  { value: "direct", weight: 55 },
+  { value: "google", weight: 25 },
+  { value: "twitter", weight: 8 },
+  { value: "linkedin", weight: 5 },
+  { value: "facebook", weight: 4 },
+  { value: "reddit", weight: 3 },
+];
+
+function randomFirstEntry(): string {
+  const total = FIRST_ENTRY_OPTIONS.reduce((s, o) => s + o.weight, 0);
+  let r = Math.random() * total;
+  for (const opt of FIRST_ENTRY_OPTIONS) {
+    r -= opt.weight;
+    if (r <= 0) return opt.value;
+  }
+  return "direct";
+}
 
 export interface BrowserProfile {
   userAgent: string;
@@ -108,18 +164,18 @@ export interface BrowserProfile {
   clientId: string;
   dcrEncoded: string;
   headers: Record<string, string>;
+  /** firstEntry value for authCommandCmd */
+  firstEntry: string;
+  /** Real timezone offset in minutes (DST-aware) */
+  timezoneOffset: number;
 }
 
 /**
  * Build the DCR payload matching the exact format used by manus.im frontend.
  * Reverse-engineered from module 54273 of the manus.im webapp.
  *
- * The real getDCR() builds:
- * {
- *   ua, locale, languages, timezone, fgRequestId, clientId,
- *   screen: { width, height }, viewport: { width, height },
- *   timestamp, timezoneOffset
- * }
+ * IMPORTANT: This function generates a FRESH fgRequestId and timestamp on every call.
+ * The real browser regenerates the DCR for each API call (timestamp changes).
  */
 function buildDcrPayload(params: {
   ua: string;
@@ -132,13 +188,13 @@ function buildDcrPayload(params: {
   viewportWidth: number;
   viewportHeight: number;
 }): string {
-  const tzOffset = TZ_OFFSETS[params.timezone] ?? 300;
+  const tzOffset = getRealTimezoneOffset(params.timezone);
   const payload = {
     ua: params.ua,
     locale: params.locale,
     languages: params.languages,
     timezone: params.timezone,
-    fgRequestId: generateFgRequestId(), // FingerprintJS Pro requestId — realistic format {ts}.{rand6}
+    fgRequestId: generateFgRequestId(), // Fresh on every call — matches real browser behavior
     clientId: params.clientId,
     screen: {
       width: params.screenWidth,
@@ -182,8 +238,12 @@ class FingerprintService {
 
     const colorDepth = 24;
     const clientId = generateClientId();
+    const firstEntry = randomFirstEntry();
 
-    // Build DCR with the CORRECT format matching manus.im frontend
+    // Get DST-aware timezone offset
+    const timezoneOffset = getRealTimezoneOffset(timezone);
+
+    // Build DCR with fresh timestamp and fgRequestId
     const dcrPayload = buildDcrPayload({
       ua: selectedProfile.ua,
       locale,
@@ -198,8 +258,8 @@ class FingerprintService {
 
     const dcrEncoded = encodeDCR(dcrPayload);
 
-    const isChrome = selectedProfile.ua.includes("Chrome");
-    const chromeVersion = selectedProfile.ua.match(/Chrome\/(\d+)/)?.[1] || "133";
+    const isChrome = selectedProfile.ua.includes("Chrome") && !selectedProfile.ua.includes("Firefox");
+    const chromeVersion = selectedProfile.chromeVersion || selectedProfile.ua.match(/Chrome\/(\d+)/)?.[1] || "136";
 
     // X-Client-Locale: use base language only ("en", not "en-US") — matches real browser behavior
     const clientLocale = locale.split("-")[0];
@@ -216,14 +276,13 @@ class FingerprintService {
       "x-client-dcr": dcrEncoded,
       "X-Client-Locale": clientLocale,
       "X-Client-Timezone": timezone,
-      "X-Client-Timezone-Offset": String(TZ_OFFSETS[timezone] ?? 300),
+      "X-Client-Timezone-Offset": String(timezoneOffset),
       "X-Client-Type": "web",
-      "X-Client-Version": "1.0.0",
+      "X-Client-Version": "2.3.1",  // Updated to current Manus frontend version
     };
 
     if (isChrome) {
       const isEdge = selectedProfile.ua.includes("Edg/");
-      // Use exact Chrome brand format: "Not A(Brand" (matches real Chrome 143 traffic)
       headers["sec-ch-ua"] = isEdge
         ? `"Microsoft Edge";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`
         : `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`;
@@ -239,12 +298,13 @@ class FingerprintService {
       userAgent: selectedProfile.ua, platform: selectedProfile.platform,
       screenWidth, screenHeight, viewportWidth, viewportHeight,
       colorDepth, timezone, locale, languages, clientId, dcrEncoded, headers,
+      firstEntry, timezoneOffset,
     };
   }
 
   /**
-   * Regenerate the DCR for a given profile with a fresh timestamp.
-   * Used for calls that require a fresh DCR (e.g. CheckInvitationCode).
+   * Regenerate the DCR for a given profile with a fresh timestamp and fgRequestId.
+   * MUST be called before every RPC call to match real browser behavior.
    * The real manus.im frontend always generates a fresh DCR per call.
    */
   regenerateDcr(profile: BrowserProfile): string {
