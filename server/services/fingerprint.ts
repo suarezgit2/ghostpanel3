@@ -129,25 +129,41 @@ const LOCALES: Record<string, string[]> = {
 
 /**
  * Realistic firstEntry distribution.
- * "direct" is most common but not 100% — users also come from Google, social, etc.
+ * Reverse-engineered from manus.im frontend (module 10358):
+ *   getFirstEntry() reads localStorage "first_entry"
+ *   Returns the stored value or undefined if empty/"0"
+ *
+ * The value stored is the FULL URL of the referrer or landing page:
+ *   - undefined (not sent) — direct access (most common)
+ *   - "https://manus.im/login" — direct to login page
+ *   - "https://www.google.com" — came from Google
+ *   - "https://twitter.com" — came from Twitter
+ *
+ * IMPORTANT: The old values ("direct", "google") were WRONG.
+ * The real frontend stores full URLs, not short strings.
  */
-const FIRST_ENTRY_OPTIONS = [
-  { value: "direct", weight: 55 },
-  { value: "google", weight: 25 },
-  { value: "twitter", weight: 8 },
-  { value: "linkedin", weight: 5 },
-  { value: "facebook", weight: 4 },
-  { value: "reddit", weight: 3 },
+const FIRST_ENTRY_OPTIONS: Array<{ value: string | undefined; weight: number }> = [
+  { value: undefined, weight: 45 },                          // Direct access — getFirstEntry() returns undefined
+  { value: "https://manus.im/login", weight: 15 },           // Direct to login
+  { value: "https://manus.im/", weight: 10 },                // Direct to homepage
+  { value: "https://www.google.com", weight: 12 },           // Google organic
+  { value: "https://www.google.com/search", weight: 5 },     // Google search
+  { value: "https://twitter.com", weight: 4 },               // Twitter/X
+  { value: "https://x.com", weight: 3 },                     // X (new domain)
+  { value: "https://www.linkedin.com", weight: 2 },          // LinkedIn
+  { value: "https://www.reddit.com", weight: 2 },            // Reddit
+  { value: "https://www.facebook.com", weight: 1 },          // Facebook
+  { value: "https://news.ycombinator.com", weight: 1 },      // Hacker News
 ];
 
-function randomFirstEntry(): string {
+function randomFirstEntry(): string | undefined {
   const total = FIRST_ENTRY_OPTIONS.reduce((s, o) => s + o.weight, 0);
   let r = Math.random() * total;
   for (const opt of FIRST_ENTRY_OPTIONS) {
     r -= opt.weight;
     if (r <= 0) return opt.value;
   }
-  return "direct";
+  return undefined;
 }
 
 export interface BrowserProfile {
@@ -164,8 +180,8 @@ export interface BrowserProfile {
   clientId: string;
   dcrEncoded: string;
   headers: Record<string, string>;
-  /** firstEntry value for authCommandCmd */
-  firstEntry: string;
+  /** firstEntry value for authCommandCmd (URL or undefined for direct access) */
+  firstEntry: string | undefined;
   /** Real timezone offset in minutes (DST-aware) */
   timezoneOffset: number;
 }
@@ -261,9 +277,22 @@ class FingerprintService {
     const isChrome = selectedProfile.ua.includes("Chrome") && !selectedProfile.ua.includes("Firefox");
     const chromeVersion = selectedProfile.chromeVersion || selectedProfile.ua.match(/Chrome\/(\d+)/)?.[1] || "136";
 
-    // X-Client-Locale: use base language only ("en", not "en-US") — matches real browser behavior
+    // X-Client-Locale: uses translationManager.locale which is the full locale ("en", "zh-CN", etc.)
+    // Reverse-engineered from module 99238: e.set("x-client-locale", r.I.translationManager.locale)
+    // The translationManager locale is typically the base language ("en") for English users
     const clientLocale = locale.split("-")[0];
 
+    // IMPORTANT: These headers match EXACTLY what the real manus.im frontend sends.
+    // Reverse-engineered from module 99238 (chunk 99238-182ef26fd616703a.js).
+    // The frontend sets these headers on EVERY request:
+    //   e.set("x-client-type", "web")
+    //   e.set("x-client-id", clientId)
+    //   e.set("x-client-locale", translationManager.locale)
+    //   e.set("x-client-timezone", Intl.DateTimeFormat().resolvedOptions().timeZone)
+    //   e.set("x-client-timezone-offset", String(new Date().getTimezoneOffset()))
+    //
+    // NOTE: The frontend does NOT send "x-client-version"!
+    // The old "X-Client-Version: 2.3.1" was a PHANTOM header that would flag us as a bot.
     const headers: Record<string, string> = {
       "User-Agent": selectedProfile.ua,
       "Content-Type": "application/json",
@@ -274,11 +303,11 @@ class FingerprintService {
       "Accept-Language": locale + "," + locale.split("-")[0] + ";q=0.9",
       "x-client-id": clientId,
       "x-client-dcr": dcrEncoded,
-      "X-Client-Locale": clientLocale,
-      "X-Client-Timezone": timezone,
-      "X-Client-Timezone-Offset": String(timezoneOffset),
-      "X-Client-Type": "web",
-      "X-Client-Version": "2.3.1",  // Updated to current Manus frontend version
+      "x-client-locale": clientLocale,
+      "x-client-timezone": timezone,
+      "x-client-timezone-offset": String(timezoneOffset),
+      "x-client-type": "web",
+      // NO x-client-version — the real frontend does NOT send this header!
     };
 
     if (isChrome) {
@@ -337,7 +366,7 @@ class FingerprintService {
       "accept-encoding", "accept-language",
       "x-client-dcr",
       "x-client-id", "x-client-locale", "x-client-timezone", "x-client-timezone-offset",
-      "x-client-type", "x-client-version",
+      "x-client-type",
     ];
 
     const allHeaders = { ...profile.headers, ...extraHeaders };

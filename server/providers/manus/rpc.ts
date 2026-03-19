@@ -154,9 +154,11 @@ export async function registerByEmail(email: string, password: string, verifyCod
     extraHeaders["x-client-id"] = options.clientId;
   }
 
+  // IMPORTANT: The real frontend always sends name: "" in the payload.
+  // Reverse-engineered from chunk 40513: registerByEmail({verifyCode:D, name:"", email:V||"", password:P||"", authCommandCmd:{...}})
   const result = await rpcCall(
     "user.v1.UserAuthPublicService/RegisterByEmail",
-    { email, password, verifyCode, authCommandCmd: options.authCommandCmd || {} },
+    { verifyCode, name: "", email, password, authCommandCmd: options.authCommandCmd || {} },
     options,
     extraHeaders
   );

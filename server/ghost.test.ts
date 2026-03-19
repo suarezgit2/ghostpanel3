@@ -373,9 +373,11 @@ describe("Ghost Panel - Fingerprint & AuthCommandCmd", () => {
     expect(profile).toHaveProperty("timezoneOffset");
     expect(profile.clientId).toHaveLength(22);
     expect(profile.colorDepth).toBe(24);
-    // firstEntry deve ser um dos valores válidos
-    const validFirstEntries = ["direct", "google", "twitter", "linkedin", "facebook", "reddit"];
-    expect(validFirstEntries).toContain(profile.firstEntry);
+    // firstEntry deve ser undefined (direct access) ou uma URL válida
+    if (profile.firstEntry !== undefined) {
+      expect(typeof profile.firstEntry).toBe("string");
+      expect(profile.firstEntry).toMatch(/^https?:\/\//);
+    }
     // timezoneOffset deve ser um número
     expect(typeof profile.timezoneOffset).toBe("number");
   });
@@ -424,10 +426,11 @@ describe("Ghost Panel - Fingerprint & AuthCommandCmd", () => {
     expect(profile.timezone).toBeTruthy();
     expect(typeof profile.locale).toBe("string");
     expect(typeof profile.timezone).toBe("string");
-    // ANTI-DETECTION v4.2: firstEntry deve estar presente e ser válido
-    expect(profile.firstEntry).toBeTruthy();
-    const validFirstEntries = ["direct", "google", "twitter", "linkedin", "facebook", "reddit"];
-    expect(validFirstEntries).toContain(profile.firstEntry);
+    // ANTI-DETECTION v5.1: firstEntry is undefined (direct) or a full URL
+    if (profile.firstEntry !== undefined) {
+      expect(typeof profile.firstEntry).toBe("string");
+      expect(profile.firstEntry).toMatch(/^https?:\/\//);
+    }
     // timezoneOffset deve ser um número inteiro (DST-aware)
     expect(typeof profile.timezoneOffset).toBe("number");
     expect(Number.isInteger(profile.timezoneOffset)).toBe(true);
@@ -536,25 +539,29 @@ describe("Ghost Panel - Anti-Detection v4.2", () => {
     });
   });
 
-  it("fingerprintService gera firstEntry com distribuição realista (não 100% direct)", async () => {
+  it("fingerprintService gera firstEntry com distribuição realista (URLs ou undefined)", async () => {
     const { fingerprintService } = await import("./services/fingerprint");
 
     // Gerar 50 perfis e verificar distribuição de firstEntry
-    const entries: string[] = [];
+    const entries: (string | undefined)[] = [];
     for (let i = 0; i < 50; i++) {
       const profile = fingerprintService.generateProfile();
       entries.push(profile.firstEntry);
     }
 
-    // Não deve ser 100% "direct" (probabilidade estatística)
-    const directCount = entries.filter(e => e === "direct").length;
-    // Com 55% de chance de "direct", em 50 tentativas esperamos entre 15 e 45
-    expect(directCount).toBeLessThan(50); // Nunca 100% direct
-    expect(directCount).toBeGreaterThan(0); // Deve ter alguns direct
+    // Com 45% de chance de undefined (direct access), em 50 tentativas esperamos entre 10 e 40
+    const undefinedCount = entries.filter(e => e === undefined).length;
+    expect(undefinedCount).toBeLessThan(50); // Nunca 100% undefined
+    expect(undefinedCount).toBeGreaterThan(0); // Deve ter alguns undefined (direct)
 
-    // Deve ter pelo menos um não-direct
-    const nonDirect = entries.filter(e => e !== "direct");
-    expect(nonDirect.length).toBeGreaterThan(0);
+    // Deve ter pelo menos um com URL (não-direct)
+    const withUrl = entries.filter(e => e !== undefined);
+    expect(withUrl.length).toBeGreaterThan(0);
+
+    // Todos os não-undefined devem ser URLs válidas
+    withUrl.forEach(url => {
+      expect(url).toMatch(/^https?:\/\//);
+    });
   });
 
   it("timezoneOffset usa valor DST-aware (não valor fixo desatualizado)", async () => {

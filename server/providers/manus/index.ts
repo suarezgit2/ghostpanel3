@@ -64,20 +64,45 @@ interface CreateAccountResult {
  * Build authCommandCmd from fingerprint profile.
  * This object is sent with registerByEmail and contains browser context data.
  *
- * Fields match what the real manus.im frontend sends:
- * locale, timezone, tzOffset (as string), firstEntry, fbp
+ * Reverse-engineered from manus.im frontend (chunk 40513-27240ebdd145eda3.js):
+ *   authCommandCmd: {
+ *     ...e,
+ *     locale: translationManager.locale,
+ *     tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+ *     tzOffset: String(new Date().getTimezoneOffset()),
+ *     firstEntry: getFirstEntry(),  // URL or undefined
+ *     fbp: cookies.get("_fbp")      // Facebook Pixel cookie
+ *   }
  *
- * ANTI-DETECTION: firstEntry is randomized from the fingerprint profile.
- * tzOffset uses the DST-aware real offset from the fingerprint.
+ * IMPORTANT FIXES (v5.1):
+ * - Field name is "tz" NOT "timezone" (confirmed from source code)
+ * - firstEntry is a full URL or undefined (NOT "direct"/"google")
+ * - fbp is generated when firstEntry is a Facebook URL
+ * - When firstEntry is undefined, the field is NOT sent (matches real behavior)
  */
 function buildAuthCommandCmd(fingerprint: BrowserProfile): Record<string, unknown> {
-  return {
+  const cmd: Record<string, unknown> = {
     locale: fingerprint.locale,
-    timezone: fingerprint.timezone,
-    tzOffset: String(fingerprint.timezoneOffset),  // DST-aware real offset
-    firstEntry: fingerprint.firstEntry,             // Randomized: direct/google/twitter/etc
-    fbp: "",
+    tz: fingerprint.timezone,                        // FIXED: was "timezone", real frontend uses "tz"
+    tzOffset: String(fingerprint.timezoneOffset),     // DST-aware real offset
   };
+
+  // firstEntry: only include if defined (real frontend omits it for direct access)
+  if (fingerprint.firstEntry !== undefined) {
+    cmd.firstEntry = fingerprint.firstEntry;
+  }
+
+  // fbp: Facebook Pixel cookie — generate realistic value when firstEntry is Facebook
+  if (fingerprint.firstEntry?.includes("facebook.com")) {
+    // Format: fb.1.<creation_timestamp_ms>.<random_10_digits>
+    const fbTimestamp = Date.now() - Math.floor(Math.random() * 86400000 * 30); // 0-30 days ago
+    const fbRandom = Math.floor(Math.random() * 9000000000) + 1000000000;
+    cmd.fbp = `fb.1.${fbTimestamp}.${fbRandom}`;
+  } else {
+    cmd.fbp = "";
+  }
+
+  return cmd;
 }
 
 /**
