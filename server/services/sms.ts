@@ -877,6 +877,10 @@ class SmsService {
     let lastError: Error | null = null;
     let attempt = 0;
     let usedFallbackDiscover = false;
+    let consecutiveTargetRejectionsThisCountry = 0;
+    // Após 2 rejeições consecutivas pelo alvo no mesmo país, o número desse país
+    // não está sendo aceito pelo Manus — não adianta tentar mais provedores do mesmo país.
+    const MAX_TARGET_REJECTIONS_PER_COUNTRY = 2;
 
     for (let queueIndex = 0; queueIndex < providerQueue.length && attempt < effectiveMaxRetries; queueIndex++) {
       attempt++;
@@ -944,6 +948,22 @@ class SmsService {
       }
 
       lastError = result.error || null;
+
+      // Rastreia rejeições consecutivas pelo alvo neste país
+      if (result.wasTargetRejection) {
+        consecutiveTargetRejectionsThisCountry++;
+        if (consecutiveTargetRejectionsThisCountry >= MAX_TARGET_REJECTIONS_PER_COUNTRY) {
+          await logger.warn("sms",
+            `[${name}] ${consecutiveTargetRejectionsThisCountry} rejeições consecutivas pelo Manus neste país. ` +
+            `Números deste país não estão sendo aceitos — abortando e tentando próximo país.`,
+            {}, jobId
+          );
+          throw new Error(`[${name}] Abortado após ${consecutiveTargetRejectionsThisCountry} rejeições consecutivas pelo alvo`);
+        }
+      } else {
+        // Reset contador se a falha foi por outro motivo (timeout, sem números, etc.)
+        consecutiveTargetRejectionsThisCountry = 0;
+      }
 
       // Fallback Auto-Discover quando todos da lista falharam
       if (
@@ -1257,11 +1277,13 @@ class SmsService {
 
     if (rentedAt && this.config) {
       const elapsed = Date.now() - rentedAt;
-      const maxCancelWait = Math.min(this.config.cancelWaitMs, 30_000);
-      if (elapsed < maxCancelWait) {
-        const waitTime = maxCancelWait - elapsed;
+      // Respeita o cancelWaitMs completo (padrão: 125s) para garantir devolução do saldo.
+      // A API SMSBower só aceita cancelamento e devolve saldo após 2 minutos do aluguel.
+      const minCancelWait = this.config.cancelWaitMs;
+      if (elapsed < minCancelWait) {
+        const waitTime = minCancelWait - elapsed;
         await logger.info("sms",
-          `Aguardando ${Math.ceil(waitTime / 1000)}s antes de cancelar (${Math.round(elapsed / 1000)}s já decorridos)`,
+          `Aguardando ${Math.ceil(waitTime / 1000)}s antes de cancelar (${Math.round(elapsed / 1000)}s já decorridos, mínimo: ${Math.round(minCancelWait / 1000)}s)`,
           {}, jobId
         );
         await sleep(waitTime);
