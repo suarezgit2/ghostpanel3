@@ -30,6 +30,7 @@ import { smsService } from "../../services/sms";
 import { httpRequest } from "../../services/httpClient";
 import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
 import type { BrowserProfile } from "../../services/fingerprint";
+import { fingerprintService } from "../../services/fingerprint";
 import { proxyService, getProxyRegion } from "../../services/proxy";
 import type { ProxyInfo } from "../../services/proxy";
 
@@ -419,12 +420,52 @@ export class ManusProvider {
             activationId,
           }, jobId);
 
-          await rpc.sendPhoneVerificationCode(
-            formattedPhone,
-            regionCode,
-            MANUS_CONFIG.smsLocale,
-            authedRpcOptions
-          );
+          // Rotate proxy/fingerprint on each SMS attempt to avoid detection
+          let currentRpcOptions = authedRpcOptions;
+          let smsProxyAttempt = 0;
+          const MAX_SMS_PROXY_RETRIES = 3;
+
+          while (smsProxyAttempt < MAX_SMS_PROXY_RETRIES) {
+            try {
+              await rpc.sendPhoneVerificationCode(
+                formattedPhone,
+                regionCode,
+                MANUS_CONFIG.smsLocale,
+                currentRpcOptions
+              );
+              break; // Success
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              
+              // If permission_denied, try with new proxy
+              if (errMsg.includes("permission_denied") && smsProxyAttempt < MAX_SMS_PROXY_RETRIES - 1) {
+                smsProxyAttempt++;
+                await logger.warn("step_6_sms",
+                  `SMS rejeitado (tentativa ${smsProxyAttempt}/${MAX_SMS_PROXY_RETRIES}): ${errMsg}. Trocando proxy e fingerprint...`,
+                  { attempt, activationId }, jobId
+                );
+                
+                try {
+                  const newProxy = await proxyService.getProxy(jobId);
+                  const newFingerprint = fingerprintService.generate();
+                  currentRpcOptions = {
+                    ...authedRpcOptions,
+                    proxy: newProxy,
+                    fingerprint: newFingerprint,
+                  };
+                  await sleep(2000); // Small backoff
+                } catch (proxyErr) {
+                  await logger.warn("step_6_sms",
+                    `Falha ao obter novo proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}`,
+                    {}, jobId
+                  );
+                  throw err; // Re-throw original SMS error
+                }
+              } else {
+                throw err; // Re-throw if not permission_denied or max retries reached
+              }
+            }
+          }
 
           await STEP_DELAYS.afterSmsSent();
         },
