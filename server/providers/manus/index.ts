@@ -230,10 +230,44 @@ export class ManusProvider {
       // Build authCommandCmd from fingerprint (locale, timezone, tzOffset DST-aware, firstEntry randomized, fbp)
       const authCommandCmd = buildAuthCommandCmd(fingerprint);
 
-      // [TESTE] STEP 0 DESATIVADO: Proxy health check removido (não existe no feature/tls-impersonation)
-      // O GET para manus.im/login com UA genérico "Mozilla/5.0" pode estar "queimando" o proxy.
-      // Para REVERTER: restaurar o bloco completo de proxy health check (15 tentativas, checkProxyHealth, etc.)
-      await logger.info("step_0_proxy", `[TESTE] Proxy health check DESATIVADO — usando proxy diretamente`, {}, jobId);
+      // SUSPEITA 4 REATIVADA: Proxy health check com 15 tentativas
+      const MAX_PROXY_ATTEMPTS = 15;
+      let proxyOk = false;
+      
+      for (let proxyAttempt = 1; proxyAttempt <= MAX_PROXY_ATTEMPTS; proxyAttempt++) {
+        const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : "sem proxy";
+        await logger.info("step_0_proxy",
+          `Verificando proxy ${proxyLabel} (tentativa ${proxyAttempt}/${MAX_PROXY_ATTEMPTS})...`,
+          {}, jobId
+        );
+        
+        proxyOk = await checkProxyHealth(proxy, jobId);
+        if (proxyOk) {
+          await logger.info("step_0_proxy", `Proxy ${proxyLabel} OK — prosseguindo`, {}, jobId);
+          break;
+        }
+        
+        await logger.warn("step_0_proxy",
+          `Proxy ${proxyLabel} inacessível. Trocando proxy...`,
+          {}, jobId
+        );
+        
+        if (proxyAttempt === MAX_PROXY_ATTEMPTS) {
+          return { email, password, status: "failed", error: `Proxy inacessível após ${MAX_PROXY_ATTEMPTS} tentativas`, metadata: {} };
+        }
+        
+        try {
+          await sleep(2000);
+          proxy = await proxyService.getProxy(jobId);
+        } catch (proxyErr) {
+          await logger.warn("step_0_proxy", `Falha ao obter novo proxy: ${proxyErr}. Retentando...`, {}, jobId);
+          await sleep(5000);
+        }
+      }
+      
+      if (!proxyOk) {
+        return { email, password, status: "failed", error: "Falha crítica na resolução de proxy", metadata: {} };
+      }
 
       // STEP 1: Solve Cloudflare Turnstile (WITH proxy — same IP as API calls)
       await logger.info("step_1_turnstile", "Resolvendo Turnstile...", {
