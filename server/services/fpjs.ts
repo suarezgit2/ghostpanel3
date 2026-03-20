@@ -91,6 +91,7 @@ class FpjsService {
   private browserPath: string | null = null;
   private unavailable = false;
   private initialized = false;
+  private isReconnecting = false;
 
   // Concurrency control: queue of pending generation callbacks
   private activeCount = 0;
@@ -117,10 +118,23 @@ class FpjsService {
     }
 
     await logger.info("fpjs", `Chromium encontrado em: ${this.browserPath}`);
+    await this.launchBrowser();
+    
+    // Inicia health check periódico para detectar crashes do browser
+    setInterval(() => this.healthCheck(), 60000);
+  }
+
+  private async launchBrowser(): Promise<void> {
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
 
     try {
+      if (this.browser) {
+        try { await this.browser.close(); } catch (e) {}
+      }
+
       this.browser = await (puppeteer as any).launch({
-        executablePath: this.browserPath,
+        executablePath: this.browserPath!,
         headless: true,
         args: [
           "--no-sandbox",
@@ -136,17 +150,47 @@ class FpjsService {
           "--disable-background-timer-throttling",
           "--disable-backgrounding-occluded-windows",
           "--disable-renderer-backgrounding",
+          "--js-flags=--max-old-space-size=512", // Limita uso de memória do V8
         ],
       });
 
+      // Monitora desconexões inesperadas (crash)
+      this.browser!.on('disconnected', () => {
+        logger.warn("fpjs", "Browser FPJS desconectado inesperadamente. Será recriado no próximo uso.");
+        this.browser = null;
+      });
+
       this.initialized = true;
-      await logger.info("fpjs", "Browser FPJS inicializado — geração sob demanda ativa");
+      this.isReconnecting = false;
+      await logger.info("fpjs", "Browser FPJS inicializado com sucesso");
     } catch (err) {
+      this.isReconnecting = false;
       const msg = err instanceof Error ? err.message : String(err);
-      await logger.error("fpjs", `Falha ao inicializar browser FPJS: ${msg}. IDs reais são obrigatórios.`);
-      this.unavailable = true;
-      this.initialized = true;
-      throw new Error(`Falha ao inicializar browser FPJS: ${msg}`);
+      await logger.error("fpjs", `Falha ao inicializar browser FPJS: ${msg}`);
+      
+      if (!this.initialized) {
+        this.unavailable = true;
+        this.initialized = true;
+        throw new Error(`Falha ao inicializar browser FPJS: ${msg}`);
+      }
+    }
+  }
+
+  private async healthCheck(): Promise<void> {
+    if (!this.initialized || this.unavailable || this.isReconnecting) return;
+    
+    try {
+      if (!this.browser || !this.browser.isConnected()) {
+        await logger.warn("fpjs", "Health check falhou: browser não conectado. Recriando...");
+        await this.launchBrowser();
+        return;
+      }
+      
+      // Tenta pegar a versão para confirmar que o processo do browser está vivo
+      await this.browser.version();
+    } catch (err) {
+      await logger.warn("fpjs", `Health check falhou: ${err}. Recriando browser...`);
+      await this.launchBrowser();
     }
   }
 
@@ -181,20 +225,37 @@ class FpjsService {
    * captures the requestId, and closes the page.
    */
   private async generateFresh(jobId?: number): Promise<string> {
-    if (!this.browser) throw new Error("Browser não disponível");
+    // Garante que o browser está vivo antes de tentar usar
+    if (!this.browser || !this.browser.isConnected()) {
+      await logger.warn("fpjs", "Browser não disponível ou desconectado. Tentando recriar...", {}, jobId);
+      await this.launchBrowser();
+      if (!this.browser) throw new Error("Falha ao recriar browser FPJS");
+    }
 
     await this.acquireSlot();
     let page: Page | null = null;
 
     try {
       page = await this.browser.newPage();
+      
+      // Otimização: intercepta e bloqueia recursos desnecessários para economizar memória e CPU
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        const resourceType = req.resourceType();
+        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
+
       await page.setViewport({ width: 1920, height: 1080 });
       await page.setUserAgent(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
       );
 
       await page.goto(FPJS_CONFIG.pageUrl, {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded", // Mais rápido que networkidle2 e suficiente para injetar script
         timeout: FPJS_CONFIG.timeout,
       });
 

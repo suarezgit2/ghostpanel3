@@ -136,22 +136,80 @@ interface RetryResult {
   regionCode: string;
 }
 
-// ============================================================
-// PROVIDER HEALTH TRACKER (v3.0 — com persistência e target-rejection)
-// ============================================================
+  // ============================================================
+  // PROVIDER HEALTH TRACKER (v3.0 — com persistência e target-rejection)
+  // ============================================================
 
-interface ProviderHealth {
-  providerId: number;
-  successes: number;
-  failures: number;
-  consecutiveFailures: number;
-  targetRejections: number;       // Rejeições pelo alvo (permission_denied) — não é culpa do provedor, mas indica números ruins
-  consecutiveTargetRejections: number;
-  totalResponseTimeMs: number;
-  lastFailureAt: number;
-  lastSuccessAt: number;
-  cooldownUntil: number;
-}
+  interface ProviderHealth {
+    providerId: number;
+    successes: number;
+    failures: number;
+    consecutiveFailures: number;
+    targetRejections: number;       // Rejeições pelo alvo (permission_denied) — não é culpa do provedor, mas indica números ruins
+    consecutiveTargetRejections: number;
+    totalResponseTimeMs: number;
+    lastFailureAt: number;
+    lastSuccessAt: number;
+    cooldownUntil: number;
+  }
+
+  // ============================================================
+  // PHONE NUMBER QUALITY TRACKER
+  // ============================================================
+  
+  class PhoneNumberQualityTracker {
+    private rejectionCache = new Map<string, {
+      rejectedAt: number;
+      rejectionCount: number;
+      lastProvider: number;
+    }>();
+    
+    private readonly REJECTION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 dias
+    
+    isNumberRejected(phoneNumber: string): boolean {
+      const rejection = this.rejectionCache.get(phoneNumber);
+      if (!rejection) return false;
+      
+      // Se expirou, remove do cache e permite tentar de novo
+      if (Date.now() - rejection.rejectedAt > this.REJECTION_TTL) {
+        this.rejectionCache.delete(phoneNumber);
+        return false;
+      }
+      
+      return true;
+    }
+    
+    recordRejection(phoneNumber: string, providerId: number) {
+      const existing = this.rejectionCache.get(phoneNumber);
+      this.rejectionCache.set(phoneNumber, {
+        rejectedAt: Date.now(),
+        rejectionCount: (existing?.rejectionCount || 0) + 1,
+        lastProvider: providerId
+      });
+    }
+    
+    // Serialização para persistência
+    serialize(): Record<string, any> {
+      const now = Date.now();
+      const data: Record<string, any> = {};
+      
+      for (const [number, info] of this.rejectionCache.entries()) {
+        if (now - info.rejectedAt <= this.REJECTION_TTL) {
+          data[number] = info;
+        }
+      }
+      return data;
+    }
+    
+    restore(data: Record<string, any>) {
+      const now = Date.now();
+      for (const [number, info] of Object.entries(data)) {
+        if (now - info.rejectedAt <= this.REJECTION_TTL) {
+          this.rejectionCache.set(number, info);
+        }
+      }
+    }
+  }
 
 // Serialized form for DB persistence (only what matters across restarts)
 interface PersistedProviderHealth {
@@ -440,81 +498,127 @@ class SmsService {
   private apiKey = "";
   private config: SmsConfig | null = null;
   readonly providerHealth = new ProviderHealthTracker();
+  readonly numberQuality = new PhoneNumberQualityTracker();
   private healthPersistTimer: ReturnType<typeof setTimeout> | null = null;
   private initialized = false;
 
   /**
-   * Fila de cancelamentos assíncronos.
-   * Quando um número é rejeitado pelo Manus (permission_denied), ele vai para esta fila
-   * e o job continua imediatamente tentando o próximo provedor.
-   * Em paralelo, cada item aguarda o tempo mínimo (sms_cancel_wait) antes de chamar a API.
-   *
-   * FIX: minWait é capturado no momento do enfileiramento (não lido do this.config depois),
-   * evitando cancelamentos imediatos quando a config é recarregada entre o enfileiramento
-   * e a execução do cancelamento.
+   * Fila de cancelamentos assíncronos (Refatorada para evitar memory leaks e race conditions).
+   * Usa um Map para deduplicação e processamento em batch controlado.
    */
-  private cancelQueue: Array<{ activationId: string; rentedAt: number; minWait: number; jobId?: number }> = [];
+  private cancelQueue = new Map<string, {
+    rentedAt: number;
+    minWait: number;
+    jobId?: number;
+    attempts: number;
+    nextRetry: number;
+  }>();
+  
+  private isProcessingQueue = false;
+  private readonly MAX_QUEUE_SIZE = 500;
+  private readonly PROCESSING_CONCURRENCY = 3; // Limita requisições simultâneas à API
+  private readonly ITEM_TTL = 24 * 60 * 60 * 1000; // 24h
 
   /**
    * Enfileira um cancelamento assíncrono. Retorna imediatamente sem bloquear.
    * O cancelamento real acontece em background após o tempo mínimo.
-   * O minWait é capturado agora (no momento do enfileiramento) para evitar race conditions.
    */
   enqueueCancelAsync(activationId: string, rentedAt: number, jobId?: number): void {
-    // Captura o minWait AGORA, antes de qualquer reload de config
-    const minWait = this.config?.cancelWaitMs ?? 125_000; // fallback: 125s (padrão SMSBower)
-    this.cancelQueue.push({ activationId, rentedAt, minWait, jobId });
-    // Fire-and-forget: não bloqueia o chamador
-    this._processCancelAsync(activationId, rentedAt, minWait, jobId).catch(err => {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.warn("sms", `Cancelamento assíncrono falhou para ${activationId}: ${msg}`, {}, jobId).catch(() => {});
-    }).finally(() => {
-      const idx = this.cancelQueue.findIndex(item => item.activationId === activationId);
-      if (idx !== -1) this.cancelQueue.splice(idx, 1);
-    });
-  }
-
-  private async _processCancelAsync(activationId: string, rentedAt: number, minWait: number, jobId?: number): Promise<void> {
-    // minWait já foi capturado no enfileiramento — não depende mais do this.config
-    const elapsed = Date.now() - rentedAt;
-    if (elapsed < minWait) {
-      const waitTime = minWait - elapsed;
-      await logger.info("sms",
-        `[Fila] Cancelamento assíncrono ${activationId}: aguardando ${Math.ceil(waitTime / 1000)}s em background (${Math.round(elapsed / 1000)}s já decorridos, mínimo: ${Math.round(minWait / 1000)}s)`,
-        {}, jobId
-      );
-      await sleep(waitTime);
+    // Deduplicação: se já está na fila, não adiciona novamente
+    if (this.cancelQueue.has(activationId)) {
+      return;
     }
 
-    // Retry até 3x com 10s de intervalo caso a API do SMSBower retorne erro transitório
-    const MAX_CANCEL_RETRIES = 3;
-    for (let attempt = 1; attempt <= MAX_CANCEL_RETRIES; attempt++) {
-      try {
-        const result = await this.setStatus(activationId, 8);
-        if (result === "ACCESS_CANCEL") {
-          await logger.info("sms", `[Fila] Número ${activationId} cancelado em background — saldo devolvido`, {}, jobId);
-          return;
-        } else if (result === "ALREADY_FINISH" || result === "NO_ACTIVATION") {
-          // Número já foi finalizado/cancelado por outro caminho — OK
-          await logger.info("sms", `[Fila] Cancelamento ${activationId}: ${result} (já finalizado, saldo não perdido)`, {}, jobId);
-          return;
-        } else {
-          await logger.warn("sms", `[Fila] Cancelamento ${activationId} tentativa ${attempt}/${MAX_CANCEL_RETRIES}: ${result}`, {}, jobId);
-          if (attempt < MAX_CANCEL_RETRIES) await sleep(10_000);
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        await logger.warn("sms", `[Fila] Cancelamento ${activationId} tentativa ${attempt}/${MAX_CANCEL_RETRIES} erro: ${msg}`, {}, jobId);
-        if (attempt < MAX_CANCEL_RETRIES) await sleep(10_000);
+    // Proteção contra memory leak
+    if (this.cancelQueue.size >= this.MAX_QUEUE_SIZE) {
+      logger.warn("sms", `[Fila] Fila de cancelamento cheia (${this.MAX_QUEUE_SIZE}). Forçando processamento...`, {}, jobId).catch(() => {});
+      this.processCancelQueue().catch(() => {});
+    }
+
+    const minWait = this.config?.cancelWaitMs ?? 125_000; // fallback: 125s (padrão SMSBower)
+    
+    this.cancelQueue.set(activationId, {
+      rentedAt,
+      minWait,
+      jobId,
+      attempts: 0,
+      nextRetry: rentedAt + minWait // Só processa após o tempo mínimo
+    });
+
+    // Inicia o loop de processamento se não estiver rodando
+    this.startQueueProcessor();
+  }
+
+  private startQueueProcessor() {
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
+    
+    // Roda em background
+    (async () => {
+      while (this.cancelQueue.size > 0) {
+        await this.processCancelQueue();
+        await sleep(5000); // Intervalo entre batches
+      }
+      this.isProcessingQueue = false;
+    })();
+  }
+
+  private async processCancelQueue(): Promise<void> {
+    const now = Date.now();
+    const toProcess: string[] = [];
+
+    for (const [activationId, item] of this.cancelQueue.entries()) {
+      // Remove itens expirados (proteção contra memory leak)
+      if (now - item.rentedAt > this.ITEM_TTL) {
+        this.cancelQueue.delete(activationId);
+        continue;
+      }
+
+      // Seleciona itens prontos para processamento
+      if (item.nextRetry <= now) {
+        toProcess.push(activationId);
       }
     }
 
-    await logger.error("sms", `[Fila] Cancelamento ${activationId} falhou após ${MAX_CANCEL_RETRIES} tentativas — saldo pode não ter sido devolvido`, {}, jobId);
+    // Processa em batches para não sobrecarregar a API
+    for (let i = 0; i < toProcess.length; i += this.PROCESSING_CONCURRENCY) {
+      const batch = toProcess.slice(i, i + this.PROCESSING_CONCURRENCY);
+      await Promise.all(batch.map(id => this.executeCancelation(id)));
+    }
+  }
+
+  private async executeCancelation(activationId: string): Promise<void> {
+    const item = this.cancelQueue.get(activationId);
+    if (!item) return;
+
+    try {
+      const result = await this.setStatus(activationId, 8);
+      
+      if (result === "ACCESS_CANCEL") {
+        await logger.info("sms", `[Fila] Número ${activationId} cancelado em background — saldo devolvido`, {}, item.jobId);
+        this.cancelQueue.delete(activationId);
+      } else if (result === "ALREADY_FINISH" || result === "NO_ACTIVATION") {
+        await logger.info("sms", `[Fila] Cancelamento ${activationId}: ${result} (já finalizado, saldo não perdido)`, {}, item.jobId);
+        this.cancelQueue.delete(activationId);
+      } else {
+        throw new Error(`Resposta inesperada: ${result}`);
+      }
+    } catch (err) {
+      item.attempts++;
+      if (item.attempts >= 3) {
+        await logger.warn("sms", `[Fila] Falha ao cancelar ${activationId} após 3 tentativas. Desistindo.`, {}, item.jobId);
+        this.cancelQueue.delete(activationId);
+      } else {
+        // Backoff exponencial: 10s, 20s, 40s
+        const backoff = 10000 * Math.pow(2, item.attempts - 1);
+        item.nextRetry = Date.now() + backoff;
+      }
+    }
   }
 
   /** Retorna quantos cancelamentos estão pendentes na fila */
   getPendingCancellations(): number {
-    return this.cancelQueue.length;
+    return this.cancelQueue.size;
   }
 
   async init(): Promise<void> {
@@ -622,14 +726,21 @@ class SmsService {
    */
   private async restoreHealth(): Promise<void> {
     try {
-      const raw = await getSetting("sms_provider_health");
-      if (raw && raw !== "{}" && raw !== "") {
-        const data = JSON.parse(raw) as Record<string, unknown>;
+      const rawHealth = await getSetting("sms_provider_health");
+      if (rawHealth && rawHealth !== "{}" && rawHealth !== "") {
+        const data = JSON.parse(rawHealth) as Record<string, unknown>;
         this.providerHealth.restore(data as any);
         console.log("[SmsService] Health dos provedores restaurado do banco");
       }
+      
+      const rawQuality = await getSetting("sms_number_quality");
+      if (rawQuality && rawQuality !== "{}" && rawQuality !== "") {
+        const data = JSON.parse(rawQuality) as Record<string, unknown>;
+        this.numberQuality.restore(data);
+        console.log("[SmsService] Qualidade dos números restaurada do banco");
+      }
     } catch (err) {
-      console.warn("[SmsService] Falha ao restaurar health:", err);
+      console.warn("[SmsService] Falha ao restaurar health/quality:", err);
     }
   }
 
@@ -641,10 +752,13 @@ class SmsService {
     this.healthPersistTimer = setTimeout(async () => {
       this.healthPersistTimer = null;
       try {
-        const data = this.providerHealth.serialize();
-        await setSetting("sms_provider_health", JSON.stringify(data));
+        const healthData = this.providerHealth.serialize();
+        await setSetting("sms_provider_health", JSON.stringify(healthData));
+        
+        const qualityData = this.numberQuality.serialize();
+        await setSetting("sms_number_quality", JSON.stringify(qualityData));
       } catch (err) {
-        console.warn("[SmsService] Falha ao persistir health:", err);
+        console.warn("[SmsService] Falha ao persistir health/quality:", err);
       }
     }, 30_000);
   }
@@ -1174,13 +1288,34 @@ class SmsService {
     const startTime = Date.now();
 
     try {
-      numberData = await this.getNumber({
-        country: opts.country,
-        service: opts.service,
-        maxPrice: opts.maxPrice,
-        providerIds: [providerId],
-        jobId: opts.jobId,
-      });
+      // Tenta alugar um número de qualidade (que não foi rejeitado recentemente)
+      let attempts = 0;
+      const MAX_RENT_ATTEMPTS = 5;
+      
+      while (attempts < MAX_RENT_ATTEMPTS) {
+        numberData = await this.getNumber({
+          country: opts.country,
+          service: opts.service,
+          maxPrice: opts.maxPrice,
+          providerIds: [providerId],
+          jobId: opts.jobId,
+        });
+        
+        // Verifica se o número já foi rejeitado antes
+        if (this.numberQuality.isNumberRejected(numberData.phoneNumber)) {
+          await logger.warn("sms", `Número ${numberData.phoneNumber} já foi rejeitado anteriormente. Cancelando e tentando outro...`, {}, opts.jobId);
+          this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
+          attempts++;
+          continue;
+        }
+        
+        // Número é bom, sai do loop
+        break;
+      }
+      
+      if (attempts >= MAX_RENT_ATTEMPTS || !numberData) {
+        throw new Error(`Não foi possível alugar um número não-rejeitado após ${MAX_RENT_ATTEMPTS} tentativas`);
+      }
 
       const cost = parseFloat(numberData.activationCost || opts.maxPrice);
 
@@ -1235,6 +1370,11 @@ class SmsService {
 
       if (numberData) {
         if (isTargetApiError || isProxyNetworkError) {
+          // Se foi rejeição pelo alvo, registra a qualidade ruim do número
+          if (isTargetApiError) {
+            this.numberQuality.recordRejection(numberData.phoneNumber, providerId);
+          }
+          
           // Rejeição pelo alvo ou erro de proxy: enfileira cancelamento assíncrono.
           // O job continua imediatamente tentando o próximo provedor.
           this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
