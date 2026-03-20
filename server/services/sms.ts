@@ -293,26 +293,21 @@ class ProviderHealthTracker {
 
   /**
    * Registra rejeição pelo alvo (permission_denied do Manus).
-   * Não é falha do provedor de SMS, mas indica que os números desse provedor
-   * não são aceitos pelo Manus. Cooldown mais suave, mas ainda penaliza.
+   * Não é falha do provedor de SMS — o provedor fez seu trabalho.
+   * O alvo (Manus) é que rejeitou o número.
+   * 
+   * Apenas rastreia para monitoramento — NÃO aplica cooldown.
+   * Rejeições do alvo são transitórias (proxy detectado, fingerprint, etc.)
+   * e podem funcionar na próxima tentativa com contexto diferente.
    */
   recordTargetRejection(providerId: number): void {
     const h = this.getOrCreate(providerId);
     h.targetRejections++;
     h.consecutiveTargetRejections++;
-
-    // Só aplica cooldown se tiver muitas rejeições consecutivas
-    if (h.consecutiveTargetRejections >= ProviderHealthTracker.TARGET_REJECTION_CONSECUTIVE_THRESHOLD) {
-      const stepIndex = Math.min(
-        Math.floor(h.consecutiveTargetRejections / ProviderHealthTracker.TARGET_REJECTION_CONSECUTIVE_THRESHOLD) - 1,
-        ProviderHealthTracker.TARGET_REJECTION_COOLDOWN_STEPS.length - 1
-      );
-      const newCooldown = Date.now() + ProviderHealthTracker.TARGET_REJECTION_COOLDOWN_STEPS[stepIndex];
-      // Só atualiza se o novo cooldown for maior que o atual
-      if (newCooldown > h.cooldownUntil) {
-        h.cooldownUntil = newCooldown;
-      }
-    }
+    
+    // NÃO aplicar cooldown para rejeições do alvo.
+    // O provedor continua disponível para próximas tentativas.
+    // Monitorar via logs/dashboard, mas não penalizar.
   }
 
   /**
@@ -1369,11 +1364,12 @@ class SmsService {
         );
         return { success: false, cost: 0, error, wasProxyError: true };
       } else if (isTargetApiError) {
-        // Rejeição pelo alvo (permission_denied, user is blocked, etc.): NÃO penaliza o provedor.
+        // Rejeição pelo alvo (permission_denied, user is blocked, etc.).
         // O provedor fez seu trabalho — o alvo (Manus) que rejeitou o número.
-        // Isso pode ser transitório (proxy ruim, fingerprint detectada, etc.) e pode funcionar na próxima tentativa.
+        // Rastreia para monitoramento, mas NÃO penaliza (sem cooldown).
+        this.providerHealth.recordTargetRejection(providerId);
         await logger.warn("sms",
-          `Provedor #${providerId}: número rejeitado pela API do alvo (NÃO penalizado): ${error.message}`,
+          `Provedor #${providerId}: número rejeitado pela API do alvo (rastreado, não penalizado): ${error.message}`,
           {}, opts.jobId
         );
         // Don't record failure — the provider did its job, the target rejected the number
