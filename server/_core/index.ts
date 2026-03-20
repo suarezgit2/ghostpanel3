@@ -18,7 +18,8 @@ import { getDb } from "../db";
 import { jobs } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { orchestrator } from "../core/orchestrator";
-import { fpjsService } from "../services/fpjs";
+// v6.0: Puppeteer-based FPJS replaced by fpjsDirectClient (HTTP POST direto)
+// import { fpjsService } from "../services/fpjs";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -165,12 +166,9 @@ async function startServer() {
       console.warn("[ProxyRecovery] Falhou (não-crítico):", err);
     }
 
-    // Inicializar FPJS Pro service em background (abre o browser Chromium)
-    // Feito no boot para que o browser já esteja pronto quando o primeiro job iniciar
-    // Não bloqueia o boot — se falhar, o sistema usa IDs sintéticos como fallback
-    fpjsService.init().catch((err) => {
-      console.warn("[FpjsService] Falha na inicialização (não-crítico):", err);
-    });
+    // v6.0: FPJS Direct Client (HTTP POST) não precisa de inicialização.
+    // Puppeteer-based fpjsService desativado — sem overhead de browser.
+    // O fpjsDirectClient gera requestIds reais via HTTP POST sob demanda.
 
     // Iniciar monitor de jobs travados
     startStaleJobsMonitor();

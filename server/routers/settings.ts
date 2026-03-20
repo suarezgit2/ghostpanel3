@@ -10,7 +10,8 @@ import { getDb } from "../db";
 import { settings, providers } from "../../drizzle/schema";
 import { getAllSettings, setSetting, clearSettingsCache } from "../utils/settings";
 import { smsService, CountryConfig, KNOWN_COUNTRIES } from "../services/sms";
-import { fpjsService } from "../services/fpjs";
+// v6.0: FPJS Direct Client (HTTP POST) replaces Puppeteer-based fpjsService
+// import { fpjsService } from "../services/fpjs";
 
 // Keys que contêm dados sensíveis e devem ser mascaradas na listagem
 const SENSITIVE_KEYS = new Set([
@@ -298,24 +299,28 @@ export const settingsRouter = router({
   }),
 
   /**
-   * Retorna o status do serviço FPJS Pro (pool de requestIds)
+   * Retorna o status do serviço FPJS (v6.0: Direct HTTP POST, sem Puppeteer)
    */
   getFpjsStatus: protectedProcedure.query(async () => {
     return {
-      available: fpjsService.isAvailable(),
-      poolSize: fpjsService.getPoolSize(),
+      available: true, // v6.0: FPJS Direct Client sempre disponível (sem dependência de Chromium)
+      mode: "direct-post",
+      description: "FPJS Direct Client v6.0 — HTTP POST com XOR obfuscation (sem Puppeteer)",
     };
   }),
 
   /**
-   * Força o reabastecimento do pool de requestIds FPJS Pro
+   * Testa o FPJS Direct Client gerando um requestId real
    */
   refillFpjsPool: protectedProcedure.mutation(async () => {
-    if (!fpjsService.isAvailable()) {
-      return { success: false, message: "FPJS Pro não disponível (Chromium não encontrado no servidor)" };
+    try {
+      const { getRequestIdDirect } = await import("../services/fpjsDirectClient");
+      const { fingerprintService } = await import("../services/fingerprint");
+      const profile = fingerprintService.generateProfile();
+      const requestId = await getRequestIdDirect(profile);
+      return { success: true, requestId, mode: "direct-post" };
+    } catch (err) {
+      return { success: false, message: `FPJS Direct falhou: ${err instanceof Error ? err.message : String(err)}` };
     }
-    // Trigger refill via getRequestId (it auto-refills when pool is low)
-    await fpjsService.getRequestId();
-    return { success: true, poolSize: fpjsService.getPoolSize() };
   }),
 });

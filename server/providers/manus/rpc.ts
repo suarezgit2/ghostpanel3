@@ -5,21 +5,22 @@
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
  *
- * ANTI-DETECTION (v5.5 — Proxy-Routed FPJS):
+ * ANTI-DETECTION (v6.0 — FPJS Direct POST):
  * - Uses impers (curl-impersonate) for Chrome-identical TLS/HTTP2 fingerprints
  * - JA3/JA4 TLS fingerprint matches real Chrome (not Node.js)
  * - HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order match real Chrome
  * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fresh fgRequestId)
- * - Each RPC call generates a FRESH real FPJS Pro requestId via fpjsService
- * - v5.5: FPJS Puppeteer is routed through the SAME proxy as RPC calls,
- *   ensuring IP consistency between FPJS identification and API requests.
- *   This prevents the "user is blocked" error caused by IP mismatch.
+ * - Each RPC call generates a FRESH real FPJS Pro requestId via HTTP POST direto
+ *   (reverse-engineered FPJS XOR obfuscation — NO Puppeteer needed)
+ * - FPJS POST is routed through the SAME proxy as RPC calls (IP consistency)
+ * - No browser process, no bot detection, no webdriver flag
+ * - ~100-500ms per requestId instead of 5-10s with Puppeteer
  * - Falls back to native fetch if curl-impersonate is not available
  */
 
 import { httpRequest } from "../../services/httpClient";
 import { fingerprintService, type BrowserProfile } from "../../services/fingerprint";
-import { fpjsService } from "../../services/fpjs";
+import { getRequestIdDirect } from "../../services/fpjsDirectClient";
 import type { ProxyInfo } from "../../services/proxy";
 
 const API_BASE = "https://api.manus.im";
@@ -55,16 +56,16 @@ async function rpcCall(
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}/${servicePath}`;
 
-  // FIX v5.5: Generate a FRESH real FPJS Pro requestId routed through the SAME proxy
-  // as the RPC calls. This ensures IP consistency between FPJS identification and RPC
-  // requests, preventing the "user is blocked" error caused by IP mismatch.
-  // The proxy is passed from the RPC options so Puppeteer uses the same IP.
+  // v6.0: Generate a FRESH real FPJS Pro requestId via HTTP POST direto.
+  // Reverse-engineered FPJS XOR obfuscation — NO Puppeteer/browser needed.
+  // Uses the SAME proxy as RPC calls for IP consistency.
+  // ~100-500ms per call vs 5-10s with Puppeteer.
   let freshFgRequestId: string | undefined;
   try {
-    freshFgRequestId = await fpjsService.getRequestId(undefined, options.proxy);
+    freshFgRequestId = await getRequestIdDirect(options.fingerprint, options.proxy);
   } catch (err) {
-    // If FPJS fails, regenerateDcr will fall back to synthetic ID via generateFgRequestId()
-    console.warn(`[RPC] Falha ao gerar FPJS real ID para ${servicePath}: ${err instanceof Error ? err.message : err}`);
+    // If FPJS Direct fails, regenerateDcr will fall back to synthetic ID via generateFgRequestId()
+    console.warn(`[RPC] Falha ao gerar FPJS Direct ID para ${servicePath}: ${err instanceof Error ? err.message : err}`);
   }
 
   // ANTI-DETECTION: Regenerate DCR fresh on EVERY call (fresh timestamp + fresh fgRequestId)
