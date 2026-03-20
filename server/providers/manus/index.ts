@@ -28,7 +28,7 @@ import { captchaService } from "../../services/captcha";
 import { emailService } from "../../services/email";
 import { smsService } from "../../services/sms";
 import { httpRequest } from "../../services/httpClient";
-import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
+import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode, checkAbort } from "../../utils/helpers";
 import type { BrowserProfile } from "../../services/fingerprint";
 import { proxyService, getProxyRegion } from "../../services/proxy";
 import type { ProxyInfo } from "../../services/proxy";
@@ -52,6 +52,8 @@ interface CreateAccountOptions {
   jobId?: number;
   /** Invite code específico deste job — evita race condition com setting global */
   inviteCode?: string;
+  /** AbortSignal for cooperative cancellation — checked between steps */
+  signal?: AbortSignal;
 }
 
 interface CreateAccountResult {
@@ -223,7 +225,7 @@ export class ManusProvider {
   name = "Manus.im";
 
   async createAccount(options: CreateAccountOptions): Promise<CreateAccountResult> {
-    const { email, password, fingerprint, jobId } = options;
+    const { email, password, fingerprint, jobId, signal } = options;
     let proxy = options.proxy;
 
     try {
@@ -235,6 +237,7 @@ export class ManusProvider {
       let proxyOk = false;
       
       for (let proxyAttempt = 1; proxyAttempt <= MAX_PROXY_ATTEMPTS; proxyAttempt++) {
+        checkAbort(signal);
         const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : "sem proxy";
         await logger.info("step_0_proxy",
           `Verificando proxy ${proxyLabel} (tentativa ${proxyAttempt}/${MAX_PROXY_ATTEMPTS})...`,
@@ -257,11 +260,12 @@ export class ManusProvider {
         }
         
         try {
-          await sleep(2000);
+          await sleep(2000, signal);
           proxy = await proxyService.getProxy(jobId);
         } catch (proxyErr) {
+          if (proxyErr instanceof DOMException && proxyErr.name === "AbortError") throw proxyErr;
           await logger.warn("step_0_proxy", `Falha ao obter novo proxy: ${proxyErr}. Retentando...`, {}, jobId);
-          await sleep(5000);
+          await sleep(5000, signal);
         }
       }
       
@@ -277,9 +281,11 @@ export class ManusProvider {
         tzOffset: fingerprint.timezoneOffset,
       }, jobId);
       const turnstileToken = await solveTurnstileWithRetry(proxy, jobId);
-      await STEP_DELAYS.afterTurnstile();
+      checkAbort(signal);
+      await STEP_DELAYS.afterTurnstile(signal);
 
       // SUSPEITA 5 REATIVADA: Step 2 retry com troca de proxy
+      checkAbort(signal);
       await logger.info("step_2_check_email", "Verificando se email é novo...", { email }, jobId);
 
       let rpcOptions = { fingerprint, proxy, authCommandCmd };
@@ -306,8 +312,9 @@ export class ManusProvider {
               const newProxy = await proxyService.getProxy(jobId);
               proxy = newProxy;
               rpcOptions = { fingerprint, proxy, authCommandCmd };
-              await sleep(3000);
+              await sleep(3000, signal);
             } catch (proxyErr) {
+              if (proxyErr instanceof DOMException && proxyErr.name === "AbortError") throw proxyErr;
               await logger.warn("step_2_check_email",
                 `Não foi possível obter novo proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}. Continuando sem proxy.`,
                 {}, jobId
@@ -330,14 +337,17 @@ export class ManusProvider {
         await logger.warn("step_2_check_email", "getUserPlatforms não retornou tempToken!", {}, jobId);
       }
 
-      await STEP_DELAYS.afterEmailCheck();
+      checkAbort(signal);
+      await STEP_DELAYS.afterEmailCheck(signal);
 
       // STEP 3: Send email verification code
       await logger.info("step_3_send_email", "Enviando código de verificação...", { email, hasTempToken: !!tempToken }, jobId);
       await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, tempToken, rpcOptions);
-      await STEP_DELAYS.afterEmailCodeSent();
+      checkAbort(signal);
+      await STEP_DELAYS.afterEmailCodeSent(signal);
 
       // STEP 4: Read code from email (Zoho polling)
+      checkAbort(signal);
       await logger.info("step_4_read_email", "Aguardando email de verificação...", { email }, jobId);
 
       // SUSPEITA 6 REATIVADA: Email retry 10x com dynamic timeout
@@ -369,14 +379,15 @@ export class ManusProvider {
             await STEP_DELAYS.afterEmailCodeSent();
           } catch (resendErr) {
             await logger.warn("step_4_read_email", `Falha ao reenviar código: ${resendErr}. Retentando no próximo ciclo...`, {}, jobId);
-            await sleep(5000);
+            await sleep(5000, signal);
           }
           
           attempt++;
         }
       }
 
-      await STEP_DELAYS.afterEmailCodeReceived();
+      checkAbort(signal);
+      await STEP_DELAYS.afterEmailCodeReceived(signal);
 
       // STEP 5: Register account with authCommandCmd
       await logger.info("step_5_register", "Registrando conta...", { email, authCommandCmd }, jobId);
@@ -390,13 +401,15 @@ export class ManusProvider {
 
       const authedRpcOptions = { fingerprint, proxy, authToken: jwtToken, authCommandCmd };
 
-      await STEP_DELAYS.afterRegistration();
+      checkAbort(signal);
+      await STEP_DELAYS.afterRegistration(signal);
 
       // STEP 6-7: SMS verification with robust retry
       await logger.info("step_6_sms", "Iniciando verificação SMS...", { email }, jobId);
 
       const smsResult = await smsService.getCodeWithRetry({
         jobId,
+        signal,
         onNumberRented: async ({ phoneNumber, activationId, attempt, regionCode }) => {
           const formattedPhone = formatPhoneForManus(phoneNumber, regionCode);
 
@@ -414,7 +427,7 @@ export class ManusProvider {
             authedRpcOptions
           );
 
-          await STEP_DELAYS.afterSmsSent();
+          await STEP_DELAYS.afterSmsSent(signal);
         },
       });
 
@@ -453,7 +466,7 @@ export class ManusProvider {
         // Short human-like delay before navigating to the invitation page
         const inviteDelay = 3000 + Math.random() * 4000; // 3-7 seconds
         await logger.info("step_8_invite", `Aguardando ${Math.round(inviteDelay / 1000)}s antes de aplicar convite...`, { email }, jobId);
-        await sleep(inviteDelay);
+        await sleep(inviteDelay, signal);
 
         for (let attempt = 1; attempt <= MAX_INVITE_RETRIES; attempt++) {
           await logger.info("step_8_invite", `[Tentativa ${attempt}/${MAX_INVITE_RETRIES}] Ativando código de convite: ${inviteCode}`, { email }, jobId);
@@ -508,7 +521,7 @@ export class ManusProvider {
           if (attempt < MAX_INVITE_RETRIES && !inviteAccepted) {
             const retryDelay = 5000 * attempt + Math.random() * 3000;
             await logger.info("step_8_invite", `Aguardando ${Math.round(retryDelay / 1000)}s antes da próxima tentativa...`, { email }, jobId);
-            await sleep(retryDelay);
+            await sleep(retryDelay, signal);
           }
         }
 
@@ -552,6 +565,8 @@ export class ManusProvider {
       };
 
     } catch (err: unknown) {
+      // Re-throw AbortError so orchestrator handles it as cancellation, not as a failed account
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
       const errorMsg = err instanceof Error ? err.message : String(err);
       await logger.error("failed", `Falha: ${errorMsg}`, { email }, jobId);
       return {

@@ -28,7 +28,7 @@
  */
 
 import { getSetting, setSetting } from "../utils/settings";
-import { sleep, logger } from "../utils/helpers";
+import { sleep, logger, checkAbort } from "../utils/helpers";
 
 const SMSBOWER_API = "https://smsbower.app/stubs/handler_api.php";
 
@@ -124,6 +124,8 @@ interface RetryOptions {
   /** Callback chamado quando um número é alugado. Inclui regionCode do país para enviar ao Manus. */
   onNumberRented?: (data: { phoneNumber: string; activationId: string; attempt: number; regionCode: string }) => Promise<void>;
   jobId?: number;
+  /** AbortSignal for cooperative cancellation */
+  signal?: AbortSignal;
 }
 
 interface RetryResult {
@@ -937,6 +939,7 @@ class SmsService {
     const waitTimeMs = options.waitTimeMs ?? configSnapshot.waitTimeMs;
     const onNumberRented = options.onNumberRented || undefined;
     const jobId = options.jobId;
+    const signal = options.signal;
     const service = options.service || configSnapshot.service;
 
     // Determina a lista de países a tentar
@@ -961,6 +964,7 @@ class SmsService {
         );
 
         try {
+          checkAbort(signal);
           const result = await this._getCodeForCountry({
             countryConfig,
             service,
@@ -968,9 +972,12 @@ class SmsService {
             waitTimeMs,
             onNumberRented,
             jobId,
+            signal,
           });
           return result;
         } catch (err) {
+          // Re-throw AbortError immediately — don't try next country
+          if (err instanceof DOMException && err.name === "AbortError") throw err;
           lastCountryError = err instanceof Error ? err : new Error(String(err));
           await logger.warn("sms",
             `País ${countryConfig.name} falhou completamente: ${lastCountryError.message}. Tentando próximo país...`,
@@ -1007,6 +1014,7 @@ class SmsService {
       waitTimeMs,
       onNumberRented,
       jobId,
+      signal,
     });
     return result;
   }
@@ -1022,8 +1030,9 @@ class SmsService {
     waitTimeMs: number;
     onNumberRented: RetryOptions["onNumberRented"];
     jobId?: number;
+    signal?: AbortSignal;
   }): Promise<RetryResult> {
-    const { countryConfig, service, maxRetries, waitTimeMs, onNumberRented, jobId } = opts;
+    const { countryConfig, service, maxRetries, waitTimeMs, onNumberRented, jobId, signal } = opts;
     const { countryCode, regionCode, maxPrice, name } = countryConfig;
     const configSnapshot = this.config!;
 
@@ -1098,6 +1107,7 @@ class SmsService {
     let consecutiveProxyErrors = 0;
 
     for (let queueIndex = 0; queueIndex < providerQueue.length && attempt < effectiveMaxRetries; queueIndex++) {
+      checkAbort(signal);
       attempt++;
       const currentProviderId = providerQueue[queueIndex];
 
@@ -1115,6 +1125,7 @@ class SmsService {
         jobId,
         attempt,
         regionCode,
+        signal,
       });
 
       this.schedulePersistHealth();
@@ -1218,7 +1229,7 @@ class SmsService {
       // Delay entre tentativas
       if (attempt < effectiveMaxRetries && queueIndex < providerQueue.length - 1) {
         const delay = configSnapshot.retryDelayMin + Math.random() * (configSnapshot.retryDelayMax - configSnapshot.retryDelayMin);
-        await sleep(delay);
+        await sleep(delay, signal);
       }
     }
 
@@ -1246,6 +1257,7 @@ class SmsService {
       jobId?: number;
       attempt: number;
       regionCode?: string;
+      signal?: AbortSignal;
     }
   ): Promise<{
     success: boolean;
@@ -1301,7 +1313,8 @@ class SmsService {
         });
       }
 
-      const code = await this.waitForCode(numberData.activationId, opts.waitTimeMs, opts.jobId);
+      checkAbort(opts.signal);
+      const code = await this.waitForCode(numberData.activationId, opts.waitTimeMs, opts.jobId, opts.signal);
 
       if (code) {
         const responseTime = Date.now() - startTime;
@@ -1319,9 +1332,10 @@ class SmsService {
       this.providerHealth.recordFailure(providerId);
       return { success: false, cost: 0, error: new Error(`Timeout no provedor #${providerId}`) };
 
-    } catch (err: unknown) {
+     } catch (err: unknown) {
+      // Re-throw AbortError immediately — don't process as provider failure
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
       const error = err instanceof Error ? err : new Error(String(err));
-
       // Detecta se é rejeição pelo alvo (Manus)
       const isTargetApiError =
         error.message.includes("RPC ") ||
@@ -1571,7 +1585,7 @@ class SmsService {
     return result;
   }
 
-  async waitForCode(activationId: string, timeoutMs?: number, jobId?: number): Promise<string | null> {
+  async waitForCode(activationId: string, timeoutMs?: number, jobId?: number, signal?: AbortSignal): Promise<string | null> {
     if (!this.config) await this.init();
 
     const timeout = timeoutMs || this.config!.waitTimeMs;
@@ -1584,6 +1598,7 @@ class SmsService {
     let lastProgressLog = startTime;
 
     while (Date.now() - startTime < timeout) {
+      checkAbort(signal);
       try {
         const result = await this.getStatus(activationId);
 
@@ -1597,6 +1612,7 @@ class SmsService {
           return null;
         }
       } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") throw err;
         const msg = err instanceof Error ? err.message : String(err);
         await logger.warn("sms", `Erro ao consultar status: ${msg}`, { activationId }, jobId);
       }
@@ -1612,7 +1628,7 @@ class SmsService {
         lastProgressLog = now;
       }
 
-      await sleep(pollInterval);
+      await sleep(pollInterval, signal);
     }
 
     await logger.warn("sms",

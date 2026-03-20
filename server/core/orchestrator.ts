@@ -16,7 +16,7 @@ import { getDb } from "../db";
 import { jobs, accounts, providers, jobFolders } from "../../drizzle/schema";
 import { proxyService, getProxyRegion } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
-import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
+import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode, checkAbort } from "../utils/helpers";
 import { getSetting } from "../utils/settings";
 import { manusProvider, type ManusProvider } from "../providers/manus";
 
@@ -261,13 +261,7 @@ class Orchestrator {
       if (currentStatus === "paused") {
         await logger.info("orchestrator", `Job ${jobId} pausado, aguardando...`, {}, jobId);
         while (true) {
-          await sleep(5000);
-          // Verifica abort durante pausa também
-          if (signal?.aborted) {
-            const abortErr = new Error(`Job ${jobId} abortado durante pausa`);
-            abortErr.name = "AbortError";
-            throw abortErr;
-          }
+          await sleep(5000, signal);
           const check = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
           const checkStatus = check[0]?.status;
           if (!checkStatus || checkStatus === "cancelled") {
@@ -286,7 +280,7 @@ class Orchestrator {
           `(progresso: ${successCount}/${options.quantity} sucesso, ${totalAttempts} tentativas)`,
           {}, jobId
         );
-        await sleep(currentBackoffMs);
+        await sleep(currentBackoffMs, signal);
         currentBackoffMs = Math.min(currentBackoffMs * BACKOFF_CONFIG.multiplier, BACKOFF_CONFIG.maxBackoffMs);
       }
 
@@ -327,7 +321,7 @@ class Orchestrator {
         );
 
         // Pass invite code directly to createAccount (no global setting mutation = no race condition)
-        const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId, inviteCode: jobInviteCode });
+        const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId, inviteCode: jobInviteCode, signal });
 
         await db.update(accounts).set({
           status: result.status,
@@ -371,6 +365,12 @@ class Orchestrator {
         }
 
       } catch (err) {
+        // AbortError = job cancelled — bail out immediately
+        if (err instanceof DOMException && err.name === "AbortError") {
+          await logger.info("orchestrator", `Job ${jobId} abortado durante createAccount`, {}, jobId);
+          await db.update(accounts).set({ status: "failed", metadata: { error: "Job cancelado" } }).where(eq(accounts.id, accountId));
+          return;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         await db.update(accounts).set({
           status: "failed",
@@ -390,7 +390,7 @@ class Orchestrator {
 
       // Delay between attempts (only if we need more)
       if (successCount < options.quantity && totalAttempts < maxAttempts) {
-        await STEP_DELAYS.betweenAccounts();
+        await STEP_DELAYS.betweenAccounts(signal);
       }
     }
 

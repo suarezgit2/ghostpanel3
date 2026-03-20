@@ -16,36 +16,54 @@ import { logs } from "../../drizzle/schema";
 // DELAY
 // ============================================================
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    if (signal) {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
 }
 
-export function randomDelay(minMs: number, maxMs: number): Promise<void> {
+/**
+ * Throws AbortError if signal is already aborted.
+ * Use as a checkpoint between steps to bail out early.
+ */
+export function checkAbort(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+}
+
+export function randomDelay(minMs: number, maxMs: number, signal?: AbortSignal): Promise<void> {
   const delay = minMs + Math.random() * (maxMs - minMs);
-  return sleep(Math.round(delay));
+  return sleep(Math.round(delay), signal);
 }
 
-export function gaussianDelay(meanMs: number, stdDevMs: number, minMs?: number, maxMs?: number): Promise<void> {
+export function gaussianDelay(meanMs: number, stdDevMs: number, minMs?: number, maxMs?: number, signal?: AbortSignal): Promise<void> {
   const u1 = Math.random();
   const u2 = Math.random();
   const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
   let delay = meanMs + z0 * stdDevMs;
   if (minMs !== undefined) delay = Math.max(delay, minMs);
   if (maxMs !== undefined) delay = Math.min(delay, maxMs);
-  return sleep(Math.round(delay));
+  return sleep(Math.round(delay), signal);
 }
 
 export const STEP_DELAYS = {
-  afterTurnstile: () => gaussianDelay(2000, 800, 1000, 4000),
-  afterEmailCheck: () => gaussianDelay(1500, 500, 800, 3000),
-  afterEmailCodeSent: () => gaussianDelay(3000, 1000, 1500, 6000),
-  afterEmailCodeReceived: () => gaussianDelay(4000, 1500, 2000, 8000),
-  afterRegistration: () => gaussianDelay(8000, 3000, 4000, 15000),
-  afterSmsSent: () => gaussianDelay(2000, 800, 1000, 4000),
-  afterSmsCodeReceived: () => gaussianDelay(3000, 1000, 1500, 6000),
+  afterTurnstile: (signal?: AbortSignal) => gaussianDelay(2000, 800, 1000, 4000, signal),
+  afterEmailCheck: (signal?: AbortSignal) => gaussianDelay(1500, 500, 800, 3000, signal),
+  afterEmailCodeSent: (signal?: AbortSignal) => gaussianDelay(3000, 1000, 1500, 6000, signal),
+  afterEmailCodeReceived: (signal?: AbortSignal) => gaussianDelay(4000, 1500, 2000, 8000, signal),
+  afterRegistration: (signal?: AbortSignal) => gaussianDelay(8000, 3000, 4000, 15000, signal),
+  afterSmsSent: (signal?: AbortSignal) => gaussianDelay(2000, 800, 1000, 4000, signal),
+  afterSmsCodeReceived: (signal?: AbortSignal) => gaussianDelay(3000, 1000, 1500, 6000, signal),
   // ANTI-DETECTION: Increased from 5-10s to 30-120s between account creations
   // A human would take minutes between registrations; 5s is clearly a bot
-  betweenAccounts: () => gaussianDelay(60000, 25000, 30000, 120000),
+  betweenAccounts: (signal?: AbortSignal) => gaussianDelay(60000, 25000, 30000, 120000, signal),
 };
 
 // ============================================================
