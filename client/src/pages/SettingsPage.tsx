@@ -230,7 +230,7 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [showSensitive, setShowSensitive] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<"keys" | "sms" | "general">("keys");
+  const [activeTab, setActiveTab] = useState<"keys" | "sms" | "proxy" | "general">("keys");
 
   const { data: allSettings, isLoading: loading, refetch: loadSettings } = trpc.settings.getAll.useQuery();
   const { data: healthData, refetch: refetchHealth } = trpc.settings.getSmsHealth.useQuery();
@@ -1213,6 +1213,45 @@ export default function SettingsPage() {
                     )}
                   </span>
                 </div>
+              </FieldWithHelp>
+            </div>
+          </motion.div>
+
+          {/* Proxy Blocked Countries */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.12 }}
+            className="rounded-xl border border-border bg-card"
+          >
+            <div className="flex items-center gap-3 px-6 py-4 border-b border-border">
+              <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-ghost-surface-2">
+                <Ban className="w-4 h-4 text-muted-foreground" />
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">Países Bloqueados (Proxy)</h2>
+                <p className="text-xs text-muted-foreground">
+                  Proxies desses países serão automaticamente pulados
+                </p>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <FieldWithHelp
+                label="Países Bloqueados"
+                description="Lista de códigos de país (ex: ID,BR,US) cujos proxies serão ignorados. Use códigos de país ISO 2 letras. Separe múltiplos países por vírgula. Deixe vazio para desativar."
+              >
+                <Input
+                  type="text"
+                  value={settings["proxy_blocked_countries"] || ""}
+                  onChange={(e) => updateSetting("proxy_blocked_countries", e.target.value.toUpperCase())}
+                  placeholder="Ex: ID,BR,US,CN"
+                  className="bg-ghost-surface-2 border-border font-mono text-xs uppercase tracking-wider"
+                />
+                <p className="text-[10px] text-muted-foreground/60 mt-1">
+                  {settings["proxy_blocked_countries"]
+                    ? `Bloqueado: ${settings["proxy_blocked_countries"]}`
+                    : "Nenhum país bloqueado — todos os proxies serão usados"}
+                </p>
               </FieldWithHelp>
             </div>
           </motion.div>
