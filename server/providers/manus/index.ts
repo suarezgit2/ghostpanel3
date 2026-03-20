@@ -245,12 +245,47 @@ export class ManusProvider {
       const turnstileToken = await solveTurnstileWithRetry(proxy, jobId);
       await STEP_DELAYS.afterTurnstile();
 
-      // [TESTE] STEP 2 SIMPLIFICADO: Sem retry com troca de proxy (como no feature/tls-impersonation)
-      // Para REVERTER: restaurar o loop de 5 tentativas com troca de proxy
+      // SUSPEITA 5 REATIVADA: Step 2 retry com troca de proxy
       await logger.info("step_2_check_email", "Verificando se email é novo...", { email }, jobId);
 
-      const rpcOptions = { fingerprint, proxy, authCommandCmd };
-      const { platforms, tempToken } = await rpc.getUserPlatforms(email, turnstileToken, rpcOptions);
+      let rpcOptions = { fingerprint, proxy, authCommandCmd };
+      let step2Platforms: unknown[] = [];
+      let tempToken = "";
+      const MAX_STEP2_RETRIES = 5;
+
+      for (let step2Attempt = 1; step2Attempt <= MAX_STEP2_RETRIES; step2Attempt++) {
+        try {
+          const result = await rpc.getUserPlatforms(email, turnstileToken, rpcOptions);
+          step2Platforms = result.platforms || [];
+          tempToken = result.tempToken || "";
+          break;
+        } catch (step2Err) {
+          const step2ErrMsg = step2Err instanceof Error ? step2Err.message : String(step2Err);
+          
+          if (step2Attempt < MAX_STEP2_RETRIES) {
+            await logger.warn("step_2_check_email",
+              `Falha na tentativa ${step2Attempt}/${MAX_STEP2_RETRIES} (${step2ErrMsg}). Trocando proxy e retentando...`,
+              {}, jobId
+            );
+            
+            try {
+              const newProxy = await proxyService.getProxy(jobId);
+              proxy = newProxy;
+              rpcOptions = { fingerprint, proxy, authCommandCmd };
+              await sleep(3000);
+            } catch (proxyErr) {
+              await logger.warn("step_2_check_email",
+                `Não foi possível obter novo proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}. Continuando sem proxy.`,
+                {}, jobId
+              );
+            }
+          } else {
+            throw step2Err;
+          }
+        }
+      }
+
+      const platforms = step2Platforms;
 
       if (platforms && platforms.length > 0) {
         await logger.error("step_2_check_email", "Email já cadastrado!", { platforms }, jobId);
@@ -271,27 +306,39 @@ export class ManusProvider {
       // STEP 4: Read code from email (Zoho polling)
       await logger.info("step_4_read_email", "Aguardando email de verificação...", { email }, jobId);
 
-      // [TESTE] EMAIL RETRY SIMPLIFICADO (como no feature/tls-impersonation)
-      // Para REVERTER: restaurar loop com 10 tentativas, dynamic timeout, e try/catch no reenvio
+      // SUSPEITA 6 REATIVADA: Email retry 10x com dynamic timeout
       let emailCode: string;
-      let retries = 0;
+      let attempt = 1;
+      const MAX_EMAIL_RETRIES = 10;
 
       while (true) {
         try {
+          const dynamicTimeout = MANUS_CONFIG.emailTimeout + (attempt - 1) * 30000;
+          
           emailCode = await emailService.waitForVerificationCode(
-            email, MANUS_CONFIG.emailFromDomain, MANUS_CONFIG.emailTimeout, jobId
+            email, MANUS_CONFIG.emailFromDomain, dynamicTimeout, jobId
           );
           break;
         } catch (err) {
-          retries++;
-          if (retries >= MANUS_CONFIG.maxRetries) {
-            throw new Error(`Email não recebido após ${retries} tentativas: ${err}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          
+          if (attempt >= MAX_EMAIL_RETRIES) {
+            throw new Error(`Email não recebido após ${MAX_EMAIL_RETRIES} tentativas: ${msg}`);
           }
-          await logger.warn("step_4_read_email", `Tentativa ${retries} falhou, reenviando...`, {}, jobId);
-          const newTurnstileToken = await solveTurnstileWithRetry(proxy, jobId);
-          const { tempToken: newTempToken } = await rpc.getUserPlatforms(email, newTurnstileToken, rpcOptions);
-          await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, newTempToken, rpcOptions);
-          await STEP_DELAYS.afterEmailCodeSent();
+          
+          await logger.warn("step_4_read_email", `Tentativa ${attempt}/${MAX_EMAIL_RETRIES} falhou (${msg}). Reenviando código...`, {}, jobId);
+          
+          try {
+            const newTurnstileToken = await solveTurnstileWithRetry(proxy, jobId);
+            const { tempToken: newTempToken } = await rpc.getUserPlatforms(email, newTurnstileToken, rpcOptions);
+            await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, newTempToken, rpcOptions);
+            await STEP_DELAYS.afterEmailCodeSent();
+          } catch (resendErr) {
+            await logger.warn("step_4_read_email", `Falha ao reenviar código: ${resendErr}. Retentando no próximo ciclo...`, {}, jobId);
+            await sleep(5000);
+          }
+          
+          attempt++;
         }
       }
 
