@@ -953,9 +953,12 @@ class SmsService {
     let attempt = 0;
     let usedFallbackDiscover = false;
     let consecutiveTargetRejectionsThisCountry = 0;
+    let consecutiveProxyErrors = 0;
     // Após 2 rejeições consecutivas pelo alvo no mesmo país, o número desse país
     // não está sendo aceito pelo Manus — não adianta tentar mais provedores do mesmo país.
     const MAX_TARGET_REJECTIONS_PER_COUNTRY = 2;
+    // Após 3 erros de proxy consecutivos, algo estrutural está errado (sem proxies disponíveis, etc.)
+    const MAX_CONSECUTIVE_PROXY_ERRORS = 3;
 
     for (let queueIndex = 0; queueIndex < providerQueue.length && attempt < effectiveMaxRetries; queueIndex++) {
       attempt++;
@@ -1016,13 +1019,38 @@ class SmsService {
         };
       }
 
-      // Falhou — verifica blacklist
-      const toBlacklist = this.providerHealth.getProvidersToBlacklist([currentProviderId]);
-      if (toBlacklist.length > 0) {
-        await this.addToBlacklist(toBlacklist, jobId);
+      // Falhou — verifica blacklist (apenas se não foi erro de proxy)
+      if (!result.wasProxyError) {
+        const toBlacklist = this.providerHealth.getProvidersToBlacklist([currentProviderId]);
+        if (toBlacklist.length > 0) {
+          await this.addToBlacklist(toBlacklist, jobId);
+        }
       }
 
       lastError = result.error || null;
+
+      // Erro de proxy/rede: não consome slot de provedor, não penaliza o provedor.
+      // O mesmo provedor será tentado novamente na próxima iteração (com proxy diferente).
+      if (result.wasProxyError) {
+        consecutiveProxyErrors++;
+        if (consecutiveProxyErrors >= MAX_CONSECUTIVE_PROXY_ERRORS) {
+          await logger.warn("sms",
+            `[${name}] ${consecutiveProxyErrors} erros de proxy consecutivos. Problema estrutural de rede — abortando país.`,
+            {}, jobId
+          );
+          throw new Error(`[${name}] Abortado após ${consecutiveProxyErrors} erros de proxy consecutivos`);
+        }
+        await logger.warn("sms",
+          `[${name}] Erro de proxy na tentativa ${attempt} (provedor #${currentProviderId} não penalizado, proxy #${consecutiveProxyErrors}/${MAX_CONSECUTIVE_PROXY_ERRORS}). Retentando...`,
+          {}, jobId
+        );
+        // Não avança o queueIndex — o mesmo provedor será tentado de novo
+        // (mas o proxy já foi substituído automaticamente pelo ProxyService)
+        queueIndex--;
+        continue;
+      }
+      // Reset contador de erros de proxy quando há sucesso ou outro tipo de erro
+      consecutiveProxyErrors = 0;
 
       // Rastreia rejeições consecutivas pelo alvo neste país
       if (result.wasTargetRejection) {
@@ -1113,6 +1141,7 @@ class SmsService {
     cost: number;
     error?: Error;
     wasTargetRejection?: boolean;
+    wasProxyError?: boolean;
   }> {
     let numberData: NumberData | null = null;
     const startTime = Date.now();
@@ -1158,7 +1187,7 @@ class SmsService {
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
 
-      // Detecta se é rejeição pelo alvo (Manus) ou falha do provedor de SMS
+      // Detecta se é rejeição pelo alvo (Manus)
       const isTargetApiError =
         error.message.includes("RPC ") ||
         error.message.includes("permission_denied") ||
@@ -1166,11 +1195,21 @@ class SmsService {
         error.message.includes("Failed to send the code") ||
         error.message.includes("resource_exhausted");
 
+      // Detecta erro de proxy/rede (curl code 28 = timeout, code 56 = recv error)
+      // Esses erros NÃO são falha do provedor de SMS — o provedor nem chegou a ser testado.
+      const isProxyNetworkError =
+        error.message.includes("Transfer failed with code 28") ||
+        error.message.includes("Transfer failed with code 56") ||
+        error.message.includes("Transfer failed with code 7") ||
+        error.message.includes("CURLE_") ||
+        error.message.includes("ECONNRESET") ||
+        error.message.includes("ECONNREFUSED") ||
+        error.message.includes("ETIMEDOUT");
+
       if (numberData) {
-        if (isTargetApiError) {
-          // Rejeição pelo alvo: enfileira cancelamento assíncrono.
+        if (isTargetApiError || isProxyNetworkError) {
+          // Rejeição pelo alvo ou erro de proxy: enfileira cancelamento assíncrono.
           // O job continua imediatamente tentando o próximo provedor.
-          // O cancelamento aguarda os 2 minutos em background.
           this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
           await logger.info("sms",
             `Número ${numberData.activationId} enfileirado para cancelamento em background (job continua imediatamente)`,
@@ -1187,7 +1226,15 @@ class SmsService {
         }
       }
 
-      if (isTargetApiError) {
+      if (isProxyNetworkError) {
+        // Erro de proxy/rede: NÃO penaliza o provedor de SMS.
+        // O provedor não teve chance de funcionar — o problema foi no proxy.
+        await logger.warn("sms",
+          `Provedor #${providerId}: erro de proxy/rede (não penaliza provedor): ${error.message}`,
+          {}, opts.jobId
+        );
+        return { success: false, cost: 0, error, wasProxyError: true };
+      } else if (isTargetApiError) {
         // Rejeição pelo alvo: penaliza com target rejection (não com failure de SMS)
         this.providerHealth.recordTargetRejection(providerId);
         await logger.warn("sms",
