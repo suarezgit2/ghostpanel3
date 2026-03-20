@@ -1,11 +1,11 @@
 # Ghost Panel — Pendências e Changelog
 
-**Data:** 19 de março de 2026  
-**Última atualização:** 19/03/2026
+**Data:** 20 de março de 2026  
+**Última atualização:** 20/03/2026
 
 ---
 
-## Correções Aplicadas (v4.1-fixed)
+## Correções Aplicadas (v5.2+)
 
 ### 1. Fix: Import quebrado no ApiTokens.tsx
 
@@ -73,34 +73,19 @@ Este era o erro que causava falha nos últimos 5 deploys no Railway.
 
 ---
 
-## Pendências Obrigatórias (antes do deploy)
-
-### Migration da tabela `api_tokens`
-
-A tabela `api_tokens` está definida no schema Drizzle mas NÃO tem migration SQL. Antes de fazer deploy:
-
-```bash
-npx drizzle-kit generate
-npx drizzle-kit push
-```
-
-Ou rodar o SQL manualmente no TiDB Cloud. Sem isso, a página API Tokens crashará em runtime.
-
----
-
 ## Pendências Recomendadas
-
-### Endpoint de resume
-
-O backend tem `orchestrator.resumeJob()` mas o router `jobs.ts` não expõe um endpoint `resume`. A UI também não tem botão de resume.
 
 ### Expor health summary na UI
 
 Criar endpoint tRPC para `smsService.getProviderHealthSummary()` e exibir na página de Settings ou em um dashboard de monitoramento.
 
-### Monitoramento de jobs travados
+### Testes com Vitest
 
-Criar cron job (a cada 10min) para detectar jobs com status "running" há mais de 30 minutos sem progresso e marcá-los como "failed".
+Cobertura de testes para o orchestrator v2 e SMS service v2.
+
+### Melhorar UI de Logs
+
+Adicionar filtros por nível de log (info, warn, error) e busca por texto na página de logs.
 
 ### Upgrade Railway Pro
 

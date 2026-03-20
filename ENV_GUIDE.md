@@ -1,4 +1,4 @@
-# Ghost Panel v3.3 - Guia de Variáveis de Ambiente
+# Ghost Panel v5.2+ - Guia de Variáveis de Ambiente
 
 Para rodar o projeto localmente ou em produção, crie um arquivo `.env` na raiz do projeto com as variáveis abaixo. Todas as variáveis são lidas pelo servidor no boot e ficam disponíveis via `process.env`.
 
@@ -70,6 +70,15 @@ tar xzf libcurl-impersonate-v0.8.0.x86_64-linux-gnu.tar.gz -C /opt/curl-imperson
 echo 'LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so' >> .env
 ```
 
+## Puppeteer (FPJS Pro on-demand)
+
+O sistema usa Puppeteer para gerar requestIds autênticos do FingerprintJS Pro, evitando detecção por IDs sintéticos.
+
+| Variável | Descrição |
+|----------|----------|
+| `PUPPETEER_EXECUTABLE_PATH` | Caminho para o executável do Chromium (ex: `/usr/bin/chromium`) |
+| `PUPPETEER_SKIP_CHROMIUM_DOWNLOAD` | Define como `true` se já tiver o Chromium instalado no sistema |
+
 ## Manus OAuth (opcional)
 
 Estas variáveis só são necessárias se `LOCAL_AUTH=false` (modo produção com autenticação Manus).
@@ -109,6 +118,10 @@ ZOHO_ACCOUNT_ID=1410307000000008002
 
 # === TLS Impersonation (opcional, recomendado) ===
 LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so
+
+# === Puppeteer (FPJS Pro) ===
+PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 # === Manus OAuth (opcional, só se LOCAL_AUTH=false) ===
 # VITE_APP_ID=

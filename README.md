@@ -1,4 +1,4 @@
-# Ghost Panel v3.3
+# Ghost Panel v5.2+
 
 Sistema de automação para criação de contas manus.im em lote, com dashboard completo, gerenciamento de jobs, proxies, SMS e captcha. O fluxo completo de criação de conta (Turnstile, verificação de email, registro, verificação SMS) leva aproximadamente 72 segundos por conta.
 
@@ -12,25 +12,31 @@ Sistema de automação para criação de contas manus.im em lote, com dashboard 
 | Runtime | Node.js 22 |
 | Autenticação | Manus OAuth ou LOCAL_AUTH bypass |
 
-## Fluxo de Criação de Conta (v3.3)
+## Fluxo de Criação de Conta (v5.2+)
 
-O fluxo foi validado por engenharia reversa direta do frontend manus.im em 13/03/2026. Cada conta passa pelas seguintes etapas:
+O fluxo foi validado por engenharia reversa direta do frontend manus.im. Cada conta passa pelas seguintes etapas:
 
 | Etapa | Descrição | Tempo Médio |
 |-------|-----------|-------------|
-| 1. Turnstile | Resolver CAPTCHA Cloudflare via 2Captcha ou CapSolver | ~10s |
+| 0. Proxy Health Check | Verifica se proxy consegue alcançar manus.im (até 3 retries) | ~2s |
+| 1. Turnstile | Resolver CAPTCHA Cloudflare **COM proxy** (mesmo IP das chamadas API) | ~10s |
 | 2. getUserPlatforms | Verificar se email é novo + obter `tempToken` | ~2s |
 | 3. sendEmailVerifyCodeWithCaptcha | Enviar código de verificação (usa `tempToken`, não Turnstile) | ~3s |
 | 4. Zoho Mail polling | Ler código de 6 dígitos do campo `summary` | ~10s |
-| 5. registerByEmail | Registrar conta com `authCommandCmd` | ~1s |
-| 6. SMS (SMSBower) | Alugar número indonésio e receber código | ~25s |
+| 5. registerByEmail | Registrar conta com `authCommandCmd` (inclui `firstFromPlatform: "web"`) | ~1s |
+| 5b. Aplicar Invite Code | Aceita código de convite (timing-crítico, dentro de ~30s) | ~2s |
+| 6. SMS (SMSBower) | Alugar número indonésio e receber código (retry robusto) | ~25s |
 | 7. bindPhoneTrait | Vincular telefone à conta | ~1s |
 
 **Tempo total estimado:** ~72 segundos por conta. Custo estimado: ~$0.02/conta (captcha + SMS).
 
 ### Detalhes Técnicos Importantes
 
-O campo `action` em `sendEmailVerifyCodeWithCaptcha` é um **enum numérico protobuf** (REGISTER = 1), não uma string. O campo de captcha neste endpoint é `token` (que recebe o `tempToken` do passo 2), diferente do `cfCaptchaCode` usado em `getUserPlatforms`. O campo `tzOffset` em `registerByEmail` deve ser uma **string** (ex: `"300"`), não um número.
+- **Turnstile:** Resolvido COM proxy para evitar detecção de IP mismatch.
+- **Email Verification:** O campo `action` é um **enum numérico protobuf** (REGISTER = 1). O campo de captcha é `token` (recebe o `tempToken` do passo 2).
+- **Registration:** O campo `tzOffset` deve ser uma **string** (ex: `"300"`). O campo `tz` é usado (não `timezone`). O campo `name` deve ser `""`.
+- **FingerprintJS Pro:** RequestIds gerados on-demand via Puppeteer/Chromium, **nunca** sintéticos.
+- **TLS Impersonation:** Usa `curl-impersonate` para fingerprint TLS/HTTP2 idêntico ao Chrome real.
 
 ## Estrutura do Projeto
 
@@ -40,16 +46,18 @@ server/
   services/
     captcha.ts        ← CaptchaService (CapSolver + 2Captcha, auto-fallback)
     email.ts          ← EmailService (Zoho Mail OAuth2, summary extraction)
-    sms.ts            ← SmsService (SMSBower, retry robusto, Gold $0.01)
+    sms.ts            ← SmsService (SMSBower, retry robusto, multi-país)
     proxy.ts          ← ProxyService (Webshare, sync automático)
-    fingerprint.ts    ← FingerprintService (humanização de headers/UA)
+    fingerprint.ts    ← FingerprintService (geo-coherent profiles)
+    fpjs.ts           ← FingerprintJS Pro (Puppeteer on-demand)
+    httpClient.ts     ← HTTP Client (TLS/HTTP2 Impersonation)
   providers/
     manus/
       index.ts        ← ManusProvider (fluxo completo de criação)
       rpc.ts          ← ConnectRPC client (payloads validados por eng. reversa)
   core/
-    orchestrator.ts   ← Gerenciador de jobs (paralelo, pause/resume, rate limit)
-  routers/            ← tRPC routers (dashboard, jobs, accounts, proxies, logs, settings)
+    orchestrator.ts   ← Orchestrator v2 (Quick Jobs, Job Folders, backoff inteligente)
+  routers/            ← tRPC routers (dashboard, jobs, accounts, proxies, logs, settings, keys)
   utils/
     helpers.ts        ← Logger estruturado, delays, helpers
     settings.ts       ← Cache de configurações do banco
@@ -63,7 +71,8 @@ client/src/
     Accounts.tsx      ← Lista de contas criadas
     Proxies.tsx       ← Gerenciamento de proxies
     Logs.tsx          ← Logs do sistema
-    SettingsPage.tsx  ← Configurações (API keys, captcha provider, etc.)
+    SettingsPage.tsx  ← Configurações dinâmicas
+    RedeemKey.tsx     ← Resgate de chaves (público)
   components/         ← DashboardLayout, MetricCard, StatusBadge, shadcn/ui
 drizzle/              ← Schema + migrações SQL
 ```
@@ -133,57 +142,6 @@ docker compose logs -f app
 docker compose down
 ```
 
-## Deploy no Oracle Cloud Free Tier
-
-### 1. Criar instância
-
-Acesse o Oracle Cloud e crie uma instância **Always Free** (ARM Ampere A1 ou AMD). Escolha Ubuntu 22.04 como sistema operacional e configure as regras de segurança para abrir a porta 3000 (ou 80/443 com Nginx).
-
-### 2. Instalar Docker
-
-```bash
-ssh -i sua-chave.pem ubuntu@ip-da-instancia
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-sudo apt install docker-compose-plugin -y
-```
-
-### 3. Upload e iniciar
-
-```bash
-# Na sua máquina local
-scp -i sua-chave.pem ghost-panel-v3.3.tar.gz ubuntu@ip-da-instancia:~/
-
-# No servidor Oracle
-tar xzf ghost-panel-v3.3.tar.gz
-cd ghost-panel
-nano .env  # preencher com suas API keys
-docker compose up -d
-```
-
-### 4. Nginx reverso (opcional, para porta 80)
-
-```bash
-sudo apt install nginx -y
-sudo tee /etc/nginx/sites-available/ghost-panel << 'EOF'
-server {
-    listen 80;
-    server_name _;
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-EOF
-sudo ln -sf /etc/nginx/sites-available/ghost-panel /etc/nginx/sites-enabled/default
-sudo nginx -t && sudo systemctl reload nginx
-```
-
 ## Autenticação
 
 | Modo | Variável | Descrição |
@@ -216,21 +174,15 @@ Para uso local e Oracle Cloud, use `LOCAL_AUTH=true`.
 
 O provedor de captcha pode ser selecionado em **Configurações > Provedor de Captcha**. Se o provedor selecionado não tiver API key configurada, o sistema automaticamente usa o outro como fallback.
 
-## Primeiro Uso
-
-Após o setup, acesse `http://localhost:3000` e:
-
-1. Vá em **Configurações** e verifique se as API keys estão configuradas (ou clique **Seed Defaults** se for a primeira vez)
-2. Vá em **Proxies** e clique **Sincronizar** para importar proxies do Webshare
-3. Vá em **Criar Job** para criar seu primeiro job de teste (comece com 1 conta para validar)
-
 ## Histórico de Versões
 
 | Versão | Data | Mudanças Principais |
 |--------|------|---------------------|
-| v3.3 | 13/03/2026 | Engenharia reversa v2: corrigido sendEmailVerifyCodeWithCaptcha (token/action enum), EmailService (summary extraction + folderId), registerByEmail (tzOffset string). Primeira conta criada com sucesso! |
-| v3.2 | 13/03/2026 | Multi-captcha provider (2Captcha + CapSolver com auto-fallback) |
-| v3.1 | 13/03/2026 | Correções de authCommandCmd, autoSeed, formatPhoneForManus, rate limiting |
-| v3.0 | 13/03/2026 | Migração para full-stack (tRPC + Drizzle + MySQL), 34 testes |
-| v2.0 | 12/03/2026 | Frontend completo, API Gateway, Orchestrator |
-| v1.0 | 11/03/2026 | Análise teórica, endpoints RPC, serviços base |
+| **v5.2+** | 20/03/2026 | SMS cancel queue, FPJS on-demand com retry robusto, anti-ban improvements |
+| v5.2 | 13/03/2026 | Adicionado `firstFromPlatform: "web"` ao authCommandCmd |
+| v5.1 | 13/03/2026 | Engenharia reversa v2: corrigido `tz` (não timezone), `tzOffset` como string, `name: ""` |
+| v5.0 | 12/03/2026 | TLS/HTTP2 Impersonation via curl-impersonate |
+| v4.2 | 12/03/2026 | Turnstile resolvido COM proxy (mesmo IP das chamadas API) |
+| v4.1 | 11/03/2026 | Multi-captcha provider com auto-fallback |
+| v4.0 | 11/03/2026 | Orchestrator v2 com Quick Jobs e Job Folders |
+| v3.3 | 13/03/2026 | Engenharia reversa completa, 7 passos validados |
