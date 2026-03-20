@@ -252,9 +252,11 @@ class FingerprintService {
    * @param region - Geo region bucket (us, br, eu, asia, id, sg, default)
    * @param realFgRequestId - REQUIRED real FPJS Pro requestId from fpjsService.
    */
-  // [TESTE] realFgRequestId agora é opcional (como no feature/tls-impersonation)
-  // Para REVERTER: tornar realFgRequestId obrigatório e restaurar throw
+  // SUSPEITA 1 REATIVADA: realFgRequestId obrigatório
   generateProfile(region = "default", realFgRequestId?: string): BrowserProfile {
+    if (!realFgRequestId) {
+      console.warn(`[FingerprintService] realFgRequestId não fornecido, usando sintético como fallback`);
+    }
     // Weighted random UA selection
     const totalWeight = UA_PROFILES.reduce((sum, p) => sum + p.weight, 0);
     let random = Math.random() * totalWeight;
@@ -371,8 +373,7 @@ class FingerprintService {
    * @param newRealFgRequestId - Optional NEW real FPJS requestId for this specific call.
    *                             If not provided, reuses profile.realFgRequestId.
    */
-  // [TESTE] regenerateDcr sem exigir realFgRequestId (como no feature/tls-impersonation)
-  // Para REVERTER: restaurar throw quando realFgRequestId é vazio
+  // SUSPEITA 1 REATIVADA: regenerateDcr com realFgRequestId
   regenerateDcr(profile: BrowserProfile, newRealFgRequestId?: string): string {
     const realFgRequestId = newRealFgRequestId || profile.realFgRequestId;
 

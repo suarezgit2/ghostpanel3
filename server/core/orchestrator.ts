@@ -314,11 +314,9 @@ class Orchestrator {
         // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
         const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
 
-        // [TESTE] FPJS desativado - usando ID sintético (como no feature/tls-impersonation)
-        // Para REVERTER: descomentar as 2 linhas abaixo e remover a linha com generateProfile(proxyRegion)
-        // const realFgRequestId = await fpjsService.getRequestId(jobId);
-        // const fingerprint = fingerprintService.generateProfile(proxyRegion, realFgRequestId);
-        const fingerprint = fingerprintService.generateProfile(proxyRegion);
+        // SUSPEITA 1 REATIVADA: FPJS real ID
+        const realFgRequestId = await fpjsService.getRequestId(jobId);
+        const fingerprint = fingerprintService.generateProfile(proxyRegion, realFgRequestId);
 
         await logger.info("orchestrator",
           `Tentativa ${totalAttempts}/${maxAttempts} (sucesso: ${successCount}/${options.quantity}): ${email}`,
@@ -327,7 +325,7 @@ class Orchestrator {
             clientId: fingerprint.clientId,
             locale: fingerprint.locale,
             timezone: fingerprint.timezone,
-            fpjsReal: false, // [TESTE] FPJS desativado
+            fpjsReal: !!realFgRequestId,
           }, jobId
         );
 
