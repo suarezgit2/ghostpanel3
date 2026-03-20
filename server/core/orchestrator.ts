@@ -316,54 +316,10 @@ class Orchestrator {
 
         // Get a real FPJS Pro requestId for the DCR.
         // CRITICAL: synthetic IDs are detected by Manus via server-side FPJS Pro validation,
-        // causing batch bans. We NEVER use synthetic IDs — if FPJS fails, we retry up to
-        // FPJS_MAX_RETRIES times with FPJS_RETRY_DELAY_MS between attempts.
-        // If all retries fail, the account attempt is skipped (counted as failure) and
-        // the job loop retries the whole account creation from scratch.
-        const FPJS_MAX_RETRIES = 5;
-        const FPJS_RETRY_DELAY_MS = 8000;
-        let realFgRequestId: string | undefined;
-
-        for (let fpjsAttempt = 1; fpjsAttempt <= FPJS_MAX_RETRIES; fpjsAttempt++) {
-          try {
-            const id = await fpjsService.getRequestId(jobId);
-            if (id) {
-              realFgRequestId = id;
-              await logger.info("orchestrator", `FPJS requestId real obtido (tentativa ${fpjsAttempt}/${FPJS_MAX_RETRIES}): ${id}`, {}, jobId);
-              break;
-            } else {
-              await logger.warn("orchestrator",
-                `FPJS retornou vazio (tentativa ${fpjsAttempt}/${FPJS_MAX_RETRIES}) — aguardando ${FPJS_RETRY_DELAY_MS / 1000}s antes de tentar novamente`,
-                {}, jobId
-              );
-            }
-          } catch (fpjsErr) {
-            const fpjsMsg = fpjsErr instanceof Error ? fpjsErr.message : String(fpjsErr);
-            await logger.warn("orchestrator",
-              `FPJS falhou (tentativa ${fpjsAttempt}/${FPJS_MAX_RETRIES}): ${fpjsMsg} — aguardando ${FPJS_RETRY_DELAY_MS / 1000}s`,
-              {}, jobId
-            );
-          }
-
-          if (fpjsAttempt < FPJS_MAX_RETRIES) {
-            await sleep(FPJS_RETRY_DELAY_MS);
-          }
-        }
-
-        // If we still don't have a real ID after all retries, skip this account attempt.
-        // The job loop will count it as a failure and try again with a new account.
-        if (!realFgRequestId) {
-          await logger.error("orchestrator",
-            `FPJS falhou em todas as ${FPJS_MAX_RETRIES} tentativas — pulando esta tentativa de conta (ID sintético NUNCA é usado)`,
-            {}, jobId
-          );
-          consecutiveFailures++;
-          await db.update(jobs).set({
-            failedAccounts: sql`${jobs.failedAccounts} + 1`,
-          }).where(eq(jobs.id, jobId));
-          await db.update(accounts).set({ status: "failed" }).where(eq(accounts.id, accountId));
-          continue;
-        }
+        // causing batch bans. We NEVER use synthetic IDs.
+        // The fpjsService now has infinite retry with backoff built-in, so it will block
+        // here until it successfully gets a real ID (or throws if Chromium is missing).
+        const realFgRequestId = await fpjsService.getRequestId(jobId);
 
         const fingerprint = fingerprintService.generateProfile(proxyRegion, realFgRequestId);
 

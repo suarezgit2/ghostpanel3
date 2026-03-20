@@ -30,25 +30,9 @@
 import { encodeDCR, generateClientId } from "../utils/helpers";
 
 /**
- * Generate a SYNTHETIC FingerprintJS Pro requestId (fallback only).
- * Format: {timestamp}.{6 random alphanumeric chars}
- * Reverse-engineered from real manus.im traffic (e.g. "1773892887732.wI3xcp").
- *
- * WARNING: Synthetic IDs are NOT validated by FPJS Pro server-side.
- * Use fpjsService.getRequestId() to get real IDs whenever possible.
- * This is only used as a fallback when the FPJS service is unavailable.
+ * SYNTHETIC FALLBACK REMOVED.
+ * The system MUST use real FPJS Pro requestIds to avoid detection.
  */
-function generateSyntheticFgRequestId(): string {
-  const ALPHANUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  // Simulate page loaded 20-40 seconds ago
-  const pageLoadDelay = 20000 + Math.floor(Math.random() * 20000);
-  const ts = Date.now() - pageLoadDelay;
-  let rand = '';
-  for (let i = 0; i < 6; i++) {
-    rand += ALPHANUM[Math.floor(Math.random() * ALPHANUM.length)];
-  }
-  return `${ts}.${rand}`;
-}
 
 /**
  * Get the REAL timezone offset in minutes for a given IANA timezone.
@@ -224,8 +208,11 @@ function buildDcrPayload(params: {
 }): string {
   const tzOffset = getRealTimezoneOffset(params.timezone);
 
-  // Use real FPJS requestId if available, otherwise fall back to synthetic
-  const fgRequestId = params.realFgRequestId || generateSyntheticFgRequestId();
+  // MUST use real FPJS requestId. Synthetic fallback is strictly forbidden.
+  if (!params.realFgRequestId) {
+    throw new Error("CRÍTICO: realFgRequestId é obrigatório para gerar o DCR. Fallback sintético desativado.");
+  }
+  const fgRequestId = params.realFgRequestId;
 
   const payload = {
     ua: params.ua,
@@ -255,10 +242,12 @@ class FingerprintService {
    * Generate a browser profile for the given region.
    *
    * @param region - Geo region bucket (us, br, eu, asia, id, sg, default)
-   * @param realFgRequestId - Optional real FPJS Pro requestId from fpjsService.
-   *                          If provided, used in DCR. If not, synthetic fallback.
+   * @param realFgRequestId - REQUIRED real FPJS Pro requestId from fpjsService.
    */
-  generateProfile(region = "default", realFgRequestId?: string): BrowserProfile {
+  generateProfile(region = "default", realFgRequestId: string): BrowserProfile {
+    if (!realFgRequestId) {
+      throw new Error("CRÍTICO: realFgRequestId é obrigatório para gerar o perfil. Fallback sintético desativado.");
+    }
     // Weighted random UA selection
     const totalWeight = UA_PROFILES.reduce((sum, p) => sum + p.weight, 0);
     let random = Math.random() * totalWeight;
@@ -294,7 +283,7 @@ class FingerprintService {
     const jitterMinutes = Math.floor(Math.random() * 31) - 15; // -15 to +15
     const timezoneOffset = baseOffset + jitterMinutes;
 
-    // Build DCR with fresh timestamp and fgRequestId (real or synthetic)
+    // Build DCR with fresh timestamp and real fgRequestId
     const dcrPayload = buildDcrPayload({
       ua: selectedProfile.ua,
       locale,
@@ -375,9 +364,14 @@ class FingerprintService {
    *
    * @param profile - The browser profile to regenerate DCR for
    * @param newRealFgRequestId - Optional NEW real FPJS requestId for this specific call.
-   *                             If not provided, reuses profile.realFgRequestId (or synthetic fallback).
+   *                             If not provided, reuses profile.realFgRequestId.
    */
   regenerateDcr(profile: BrowserProfile, newRealFgRequestId?: string): string {
+    const realFgRequestId = newRealFgRequestId || profile.realFgRequestId;
+    if (!realFgRequestId) {
+      throw new Error("CRÍTICO: realFgRequestId é obrigatório para regenerar o DCR.");
+    }
+
     const dcrPayload = buildDcrPayload({
       ua: profile.userAgent,
       locale: profile.locale,
@@ -388,8 +382,7 @@ class FingerprintService {
       screenHeight: profile.screenHeight,
       viewportWidth: profile.viewportWidth,
       viewportHeight: profile.viewportHeight,
-      // Use new ID if provided, otherwise reuse the one stored in profile
-      realFgRequestId: newRealFgRequestId || profile.realFgRequestId,
+      realFgRequestId,
     });
     return encodeDCR(dcrPayload);
   }

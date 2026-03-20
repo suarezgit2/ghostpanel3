@@ -106,14 +106,14 @@ class FpjsService {
     this.browserPath = findChromiumPath();
 
     if (!this.browserPath) {
-      await logger.warn(
+      await logger.error(
         "fpjs",
-        "Chromium não encontrado. FPJS Pro desativado — usando IDs sintéticos como fallback. " +
+        "CRÍTICO: Chromium não encontrado. FPJS Pro não pode gerar IDs reais. " +
         "Para ativar, defina PUPPETEER_EXECUTABLE_PATH ou instale chromium."
       );
       this.unavailable = true;
       this.initialized = true;
-      return;
+      throw new Error("Chromium não encontrado. IDs reais são obrigatórios.");
     }
 
     await logger.info("fpjs", `Chromium encontrado em: ${this.browserPath}`);
@@ -143,9 +143,10 @@ class FpjsService {
       await logger.info("fpjs", "Browser FPJS inicializado — geração sob demanda ativa");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await logger.error("fpjs", `Falha ao inicializar browser FPJS: ${msg}. Usando IDs sintéticos.`);
+      await logger.error("fpjs", `Falha ao inicializar browser FPJS: ${msg}. IDs reais são obrigatórios.`);
       this.unavailable = true;
       this.initialized = true;
+      throw new Error(`Falha ao inicializar browser FPJS: ${msg}`);
     }
   }
 
@@ -238,11 +239,11 @@ class FpjsService {
 
       if (requestId) {
         await logger.info("fpjs", `RequestId gerado: ${requestId}`, {}, jobId);
+        return requestId;
       } else {
-        await logger.warn("fpjs", "FPJS SDK retornou vazio", {}, jobId);
+        await logger.error("fpjs", "FPJS SDK retornou vazio", {}, jobId);
+        throw new Error("FPJS SDK retornou vazio");
       }
-
-      return requestId;
     } finally {
       if (page) {
         try { await page.close(); } catch { /* ignore */ }
@@ -256,40 +257,53 @@ class FpjsService {
    *
    * - Always generates a new ID (never reuses old ones).
    * - Concurrent calls are serialized up to maxConcurrent=3 at a time.
-   * - Returns "" if FPJS is unavailable (orchestrator uses synthetic fallback).
+   * - Resilient: Retries infinitely with backoff until a real ID is generated.
+   * - Throws error ONLY if Chromium is completely missing from the system.
    */
   async getRequestId(jobId?: number): Promise<string> {
-    // Lazy init
-    if (!this.initialized) {
-      await this.init();
-    }
+    let attempt = 1;
+    const maxBackoff = 30000; // Max 30s between retries
 
-    if (this.unavailable || !this.browser) return "";
+    while (true) {
+      // Lazy init
+      if (!this.initialized) {
+        await this.init();
+      }
 
-    try {
-      return await this.generateFresh(jobId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await logger.error("fpjs", `Falha ao gerar requestId: ${msg}`, {}, jobId);
+      if (this.unavailable) {
+        throw new Error("CRÍTICO: Chromium não encontrado no sistema. Instale o Chromium para gerar IDs reais.");
+      }
 
-      // If browser crashed, try to restart it once
-      if (msg.includes("Target closed") || msg.includes("Session closed") || msg.includes("Protocol error")) {
-        await logger.warn("fpjs", "Browser FPJS crashou — tentando reiniciar...");
-        try {
-          if (this.browser) await this.browser.close().catch(() => {});
+      if (!this.browser) {
+        await logger.warn("fpjs", "Browser não inicializado, tentando novamente em 5s...", {}, jobId);
+        await new Promise(r => setTimeout(r, 5000));
+        this.initialized = false;
+        continue;
+      }
+
+      try {
+        const id = await this.generateFresh(jobId);
+        if (id) return id;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await logger.warn("fpjs", `Falha ao gerar requestId (tentativa ${attempt}): ${msg}`, {}, jobId);
+
+        // If browser crashed or is unresponsive, force restart
+        if (msg.includes("Target closed") || msg.includes("Session closed") || msg.includes("Protocol error") || msg.includes("timeout")) {
+          await logger.warn("fpjs", "Browser FPJS instável — forçando reinicialização...", {}, jobId);
+          try {
+            if (this.browser) await this.browser.close().catch(() => {});
+          } catch (e) { /* ignore */ }
           this.browser = null;
           this.initialized = false;
-          await this.init();
-          if (this.browser) {
-            return await this.generateFresh(jobId);
-          }
-        } catch (restartErr) {
-          const restartMsg = restartErr instanceof Error ? restartErr.message : String(restartErr);
-          await logger.error("fpjs", `Falha ao reiniciar browser: ${restartMsg}`);
         }
       }
 
-      return "";
+      // Exponential backoff with jitter
+      const backoff = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, maxBackoff);
+      await logger.info("fpjs", `Aguardando ${Math.round(backoff/1000)}s antes de tentar novamente...`, {}, jobId);
+      await new Promise(r => setTimeout(r, backoff));
+      attempt++;
     }
   }
 

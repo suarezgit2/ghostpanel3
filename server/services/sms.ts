@@ -79,6 +79,7 @@ export const KNOWN_COUNTRIES: Record<string, { regionCode: string; name: string 
   "82": { regionCode: "+91",  name: "India" },
   "86": { regionCode: "+84",  name: "Vietnam" },
   "95": { regionCode: "+234", name: "Nigeria" },
+  "146": { regionCode: "+57", name: "Colombia" },
 };
 
 interface SmsConfig {
@@ -183,16 +184,16 @@ class ProviderHealthTracker {
   // Cooldown progressivo para falhas de SMS: 60s, 120s, 300s, 600s (máx 10min)
   private static COOLDOWN_STEPS = [60_000, 120_000, 300_000, 600_000];
 
-  // Cooldown para target rejections: 120s, 300s, 600s (mais suave — pode ser azar)
-  private static TARGET_REJECTION_COOLDOWN_STEPS = [120_000, 300_000, 600_000];
+  // Cooldown para target rejections: 300s, 600s, 1800s (mais agressivo para evitar bloqueios)
+  private static TARGET_REJECTION_COOLDOWN_STEPS = [300_000, 600_000, 1800_000];
 
   // Threshold para blacklist automática
-  private static BLACKLIST_CONSECUTIVE_FAILURES = 10;
+  private static BLACKLIST_CONSECUTIVE_FAILURES = 8;
   private static BLACKLIST_MIN_ATTEMPTS = 5;
-  private static BLACKLIST_MAX_SUCCESS_RATE = 0.10; // < 10% de sucesso
+  private static BLACKLIST_MAX_SUCCESS_RATE = 0.15; // < 15% de sucesso
 
-  // Threshold para cooldown por target rejection
-  private static TARGET_REJECTION_CONSECUTIVE_THRESHOLD = 5;
+  // Threshold para cooldown por target rejection (reduzido para punir mais rápido)
+  private static TARGET_REJECTION_CONSECUTIVE_THRESHOLD = 3;
 
   private getOrCreate(providerId: number): ProviderHealth {
     if (!this.health.has(providerId)) {
