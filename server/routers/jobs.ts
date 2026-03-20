@@ -117,10 +117,14 @@ export const jobsRouter = router({
       // Get all jobs in this folder
       const folderJobs = await db.select({ id: jobs.id, status: jobs.status }).from(jobs).where(eq(jobs.folderId, input.id));
 
-      // Check if any job is running or paused
-      const activeJob = folderJobs.find(j => j.status === "running" || j.status === "paused");
-      if (activeJob) {
-        throw new Error(`Não é possível deletar a pasta: Job #${activeJob.id} está ${activeJob.status}. Cancele-o primeiro.`);
+      // Force-abort any running/paused jobs before deleting
+      const activeJobs = folderJobs.filter(j => j.status === "running" || j.status === "paused");
+      for (const activeJob of activeJobs) {
+        orchestrator.forceAbort(activeJob.id);
+      }
+      if (activeJobs.length > 0) {
+        // Small wait to let aborts propagate before deleting from DB
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
 
       const jobIds = folderJobs.map(j => j.id);
@@ -175,7 +179,8 @@ export const jobsRouter = router({
   }),
 
   /**
-   * Delete - Remove um job específico (apenas concluído, falhou ou cancelado)
+   * Delete - Remove um job específico.
+   * Se o job estiver rodando ou pausado, aborta imediatamente antes de deletar.
    */
   delete: protectedProcedure
     .input(z.object({ id: z.number() }))
@@ -187,8 +192,12 @@ export const jobsRouter = router({
       if (result.length === 0) throw new Error(`Job ${input.id} não encontrado`);
 
       const { status, folderId } = result[0];
+
+      // If job is active, force-abort it immediately before deleting
       if (status === "running" || status === "paused") {
-        throw new Error(`Não é possível deletar um job com status "${status}". Cancele-o primeiro.`);
+        orchestrator.forceAbort(input.id);
+        // Small wait to let the abort propagate before we delete from DB
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
 
       // Deleta contas associadas e depois o job

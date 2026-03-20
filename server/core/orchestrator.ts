@@ -65,7 +65,8 @@ export interface QuickJobRecipient {
 }
 
 class Orchestrator {
-  private activeJobs = new Map<number, boolean>();
+  /** Maps jobId -> AbortController for immediate cancellation signaling */
+  private activeJobs = new Map<number, AbortController>();
 
   async createJob(options: CreateJobOptions): Promise<number> {
     const { provider: providerSlug, quantity } = options;
@@ -107,9 +108,14 @@ class Orchestrator {
     const label = options.label ? ` [${options.label}]` : "";
     await logger.info("orchestrator", `Job ${jobId}${label} criado: ${quantity} contas via ${providerSlug}`, {}, jobId);
 
-    // Execute in background
-    this.activeJobs.set(jobId, true);
-    this.executeJob(jobId, provider, providerId, options).catch(async (err) => {
+    // Execute in background with AbortController for immediate cancellation
+    const abortController = new AbortController();
+    this.activeJobs.set(jobId, abortController);
+    this.executeJob(jobId, provider, providerId, options, abortController.signal).catch(async (err) => {
+      if (err instanceof Error && err.name === "AbortError") {
+        // Job was aborted — status already set by cancelJob/deleteJob
+        return;
+      }
       await logger.error("orchestrator", `Job ${jobId} falhou: ${err}`, {}, jobId);
       const db2 = await getDb();
       if (db2) await db2.update(jobs).set({ status: "failed" }).where(eq(jobs.id, jobId));
@@ -202,7 +208,7 @@ class Orchestrator {
    *   - Limite de segurança: maxAttempts = quantity * 5 (evita loop infinito)
    *   - Se atingir maxAttempts sem completar, finaliza com o que conseguiu
    */
-  private async executeJob(jobId: number, provider: ProviderInstance, providerId: number, options: CreateJobOptions): Promise<void> {
+  private async executeJob(jobId: number, provider: ProviderInstance, providerId: number, options: CreateJobOptions, signal?: AbortSignal): Promise<void> {
     const emailDomain = (await getSetting("email_domain")) || "lojasmesh.com";
     const region = options.region || "default";
     const db = await getDb();
@@ -224,22 +230,44 @@ class Orchestrator {
     await logger.info("orchestrator", `Job ${jobId}: meta=${options.quantity} contas, maxTentativas=${maxAttempts}`, {}, jobId);
 
     while (successCount < options.quantity && totalAttempts < maxAttempts) {
-      // Check for cancellation or pause
-      const currentJob = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
-      if (currentJob[0]?.status === "cancelled") {
-        await logger.info("orchestrator", `Job ${jobId} cancelado pelo usuário`, {}, jobId);
-        break;
+      // Check AbortSignal first (immediate cancellation from cancelJob/deleteJob)
+      if (signal?.aborted) {
+        await logger.info("orchestrator", `Job ${jobId} abortado imediatamente (sinal de cancelamento)`, {}, jobId);
+        const abortErr = new Error(`Job ${jobId} abortado`);
+        abortErr.name = "AbortError";
+        throw abortErr;
       }
-      if (currentJob[0]?.status === "paused") {
+
+      // Check DB status (handles cancelled/paused/deleted)
+      const currentJob = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
+      const currentStatus = currentJob[0]?.status;
+
+      // Job deletado do banco (currentStatus === undefined) ou cancelado
+      if (!currentStatus || currentStatus === "cancelled") {
+        await logger.info("orchestrator",
+          `Job ${jobId} ${!currentStatus ? "deletado" : "cancelado"} — parando execução`,
+          {}, jobId
+        );
+        return; // return em vez de break para não tentar atualizar status de job deletado
+      }
+
+      if (currentStatus === "paused") {
         await logger.info("orchestrator", `Job ${jobId} pausado, aguardando...`, {}, jobId);
         while (true) {
           await sleep(5000);
+          // Verifica abort durante pausa também
+          if (signal?.aborted) {
+            const abortErr = new Error(`Job ${jobId} abortado durante pausa`);
+            abortErr.name = "AbortError";
+            throw abortErr;
+          }
           const check = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
-          if (check[0]?.status === "running") break;
-          if (check[0]?.status === "cancelled") {
-            await logger.info("orchestrator", `Job ${jobId} cancelado durante pausa`, {}, jobId);
+          const checkStatus = check[0]?.status;
+          if (!checkStatus || checkStatus === "cancelled") {
+            await logger.info("orchestrator", `Job ${jobId} ${!checkStatus ? "deletado" : "cancelado"} durante pausa`, {}, jobId);
             return;
           }
+          if (checkStatus === "running") break;
         }
       }
 
@@ -403,8 +431,14 @@ class Orchestrator {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
 
+    // Signal abort immediately so the running loop stops ASAP
+    const controller = this.activeJobs.get(jobId);
+    if (controller) {
+      controller.abort();
+    }
+
     await db.update(jobs).set({ status: "cancelled" }).where(eq(jobs.id, jobId));
-    await logger.info("orchestrator", `Job ${jobId} marcado para cancelamento`, {}, jobId);
+    await logger.info("orchestrator", `Job ${jobId} cancelado (sinal de abort enviado)`, {}, jobId);
   }
 
   async pauseJob(jobId: number): Promise<void> {
@@ -429,6 +463,18 @@ class Orchestrator {
 
   isJobActive(jobId: number): boolean {
     return this.activeJobs.has(jobId);
+  }
+
+  /**
+   * Force-cancels a job immediately by aborting its signal.
+   * Used by the delete endpoint to stop a running job before removing it from DB.
+   */
+  forceAbort(jobId: number): void {
+    const controller = this.activeJobs.get(jobId);
+    if (controller) {
+      controller.abort();
+      this.activeJobs.delete(jobId);
+    }
   }
 }
 
