@@ -16,6 +16,7 @@ import { getDb } from "../db";
 import { jobs, accounts, providers, jobFolders } from "../../drizzle/schema";
 import { proxyService, getProxyRegion } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
+import { fpjsService } from "../services/fpjs";
 import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
 import { getSetting } from "../utils/settings";
 import { manusProvider, type ManusProvider } from "../providers/manus";
@@ -209,7 +210,14 @@ class Orchestrator {
    *   - Se atingir maxAttempts sem completar, finaliza com o que conseguiu
    */
   private async executeJob(jobId: number, provider: ProviderInstance, providerId: number, options: CreateJobOptions, signal?: AbortSignal): Promise<void> {
-    const emailDomain = (await getSetting("email_domain")) || "lojasmesh.com";
+    // Multi-domain rotation: email_domain can be a comma-separated list
+    // e.g. "lojasmesh.com, outrodominio.com, terceiro.com"
+    // Each account gets a randomly chosen domain to avoid batch-ban by domain
+    const emailDomainRaw = (await getSetting("email_domain")) || "lojasmesh.com";
+    const emailDomains = emailDomainRaw
+      .split(",")
+      .map((d) => d.trim())
+      .filter((d) => d.length > 0);
     const region = options.region || "default";
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
@@ -285,6 +293,8 @@ class Orchestrator {
 
       totalAttempts++;
 
+      // Pick a random domain from the list for each account
+      const emailDomain = emailDomains[Math.floor(Math.random() * emailDomains.length)];
       const email = `${generateEmailPrefix(12)}@${emailDomain}`;
       const password = options.password === "auto" || !options.password ? generatePassword(16) : options.password;
 
@@ -303,7 +313,25 @@ class Orchestrator {
         const proxy = await proxyService.getProxy(jobId);
         // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
         const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
-        const fingerprint = fingerprintService.generateProfile(proxyRegion);
+
+        // Get a real FPJS Pro requestId for the DCR.
+        // This is the most critical anti-detection measure: synthetic IDs are
+        // detected by Manus via server-side FPJS Pro validation, causing batch bans.
+        // Falls back to synthetic ID silently if FPJS service is unavailable.
+        let realFgRequestId: string | undefined;
+        try {
+          realFgRequestId = await fpjsService.getRequestId(jobId);
+          if (realFgRequestId) {
+            await logger.info("orchestrator", `FPJS requestId real obtido: ${realFgRequestId}`, {}, jobId);
+          } else {
+            await logger.warn("orchestrator", "FPJS requestId vazio — usando ID sintético como fallback", {}, jobId);
+          }
+        } catch (fpjsErr) {
+          const fpjsMsg = fpjsErr instanceof Error ? fpjsErr.message : String(fpjsErr);
+          await logger.warn("orchestrator", `FPJS service indisponível (${fpjsMsg}) — usando ID sintético como fallback`, {}, jobId);
+        }
+
+        const fingerprint = fingerprintService.generateProfile(proxyRegion, realFgRequestId || undefined);
 
         await logger.info("orchestrator",
           `Tentativa ${totalAttempts}/${maxAttempts} (sucesso: ${successCount}/${options.quantity}): ${email}`,
@@ -312,6 +340,7 @@ class Orchestrator {
             clientId: fingerprint.clientId,
             locale: fingerprint.locale,
             timezone: fingerprint.timezone,
+            fpjsReal: !!realFgRequestId,
           }, jobId
         );
 

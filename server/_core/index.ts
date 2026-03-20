@@ -18,6 +18,7 @@ import { getDb } from "../db";
 import { jobs } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { orchestrator } from "../core/orchestrator";
+import { fpjsService } from "../services/fpjs";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -163,6 +164,12 @@ async function startServer() {
     } catch (err) {
       console.warn("[ProxyRecovery] Falhou (não-crítico):", err);
     }
+
+    // Iniciar FPJS Pro service em background (pré-gera pool de requestIds reais)
+    // Não bloqueia o boot — se falhar, o sistema usa IDs sintéticos como fallback
+    fpjsService.init().catch((err) => {
+      console.warn("[FpjsService] Falha na inicialização (não-crítico):", err);
+    });
 
     // Iniciar monitor de jobs travados
     startStaleJobsMonitor();

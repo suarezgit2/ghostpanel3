@@ -1,7 +1,9 @@
 # ============================================================
 # Ghost Panel - Dockerfile (Otimizado)
 # Build multi-stage para produção
-# Includes curl-impersonate for TLS/HTTP2 fingerprint impersonation
+# Includes:
+#   - curl-impersonate for TLS/HTTP2 fingerprint impersonation
+#   - Chromium for FingerprintJS Pro real requestId generation (Puppeteer)
 # ============================================================
 
 # ---------- Stage 1: Build ----------
@@ -42,11 +44,38 @@ FROM node:22-slim AS runner
 
 WORKDIR /app
 
-# Instalar dependências de sistema necessárias para curl-impersonate
-# node:22-slim é Debian (glibc), compatível nativamente com libcurl-impersonate
+# Instalar dependências de sistema:
+#   - curl-impersonate: libstdc++6
+#   - Puppeteer/Chromium: chromium + todas as suas dependências de sistema
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends wget ca-certificates libstdc++6 && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends \
+      wget \
+      ca-certificates \
+      libstdc++6 \
+      # Chromium browser for Puppeteer (FPJS Pro requestId generation)
+      chromium \
+      # Chromium runtime dependencies
+      fonts-liberation \
+      libatk-bridge2.0-0 \
+      libatk1.0-0 \
+      libcups2 \
+      libdbus-1-3 \
+      libdrm2 \
+      libgbm1 \
+      libglib2.0-0 \
+      libgtk-3-0 \
+      libnspr4 \
+      libnss3 \
+      libx11-6 \
+      libxcb1 \
+      libxcomposite1 \
+      libxdamage1 \
+      libxext6 \
+      libxfixes3 \
+      libxkbcommon0 \
+      libxrandr2 \
+      xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 # Instalar pnpm
 RUN corepack enable && corepack prepare pnpm@10.4.1 --activate
@@ -74,6 +103,10 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so
 ENV LD_LIBRARY_PATH=/opt/curl-impersonate
+# Chromium path for Puppeteer (FPJS Pro service)
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Disable Puppeteer's auto-download of Chrome (we use system Chromium)
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 EXPOSE 3000
 

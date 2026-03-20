@@ -10,6 +10,7 @@ import { getDb } from "../db";
 import { settings, providers } from "../../drizzle/schema";
 import { getAllSettings, setSetting, clearSettingsCache } from "../utils/settings";
 import { smsService, CountryConfig, KNOWN_COUNTRIES } from "../services/sms";
+import { fpjsService } from "../services/fpjs";
 
 // Keys que contêm dados sensíveis e devem ser mascaradas na listagem
 const SENSITIVE_KEYS = new Set([
@@ -293,5 +294,27 @@ export const settingsRouter = router({
     }
 
     return { success: true, message: "Defaults seeded" };
+  }),
+
+  /**
+   * Retorna o status do serviço FPJS Pro (pool de requestIds)
+   */
+  getFpjsStatus: protectedProcedure.query(async () => {
+    return {
+      available: fpjsService.isAvailable(),
+      poolSize: fpjsService.getPoolSize(),
+    };
+  }),
+
+  /**
+   * Força o reabastecimento do pool de requestIds FPJS Pro
+   */
+  refillFpjsPool: protectedProcedure.mutation(async () => {
+    if (!fpjsService.isAvailable()) {
+      return { success: false, message: "FPJS Pro não disponível (Chromium não encontrado no servidor)" };
+    }
+    // Trigger refill via getRequestId (it auto-refills when pool is low)
+    await fpjsService.getRequestId();
+    return { success: true, poolSize: fpjsService.getPoolSize() };
   }),
 });

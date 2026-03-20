@@ -8,7 +8,7 @@
  *   locale: string,       // e.g. "en-US"
  *   languages: string[],  // navigator.languages
  *   timezone: string,     // IANA timezone
- *   fgRequestId: string,  // FingerprintJS Pro requestId (real or synthetic)
+ *   fgRequestId: string,  // FingerprintJS Pro requestId (real or synthetic fallback)
  *   clientId: string,     // localStorage client_id_v2
  *   screen: { width, height },
  *   viewport: { width, height },
@@ -16,24 +16,29 @@
  *   timezoneOffset: number // new Date().getTimezoneOffset()
  * }
  *
- * ANTI-DETECTION IMPROVEMENTS (v4.2):
+ * ANTI-DETECTION IMPROVEMENTS (v5.3):
+ * - Real FPJS Pro requestIds via fpjsService (Puppeteer stealth browser)
+ * - Synthetic fgRequestId used ONLY as fallback when FPJS service unavailable
+ * - generateProfile() accepts optional realFgRequestId parameter
+ * - regenerateDcr() accepts optional realFgRequestId parameter
  * - Real timezone offsets with DST awareness (Intl.DateTimeFormat)
  * - DCR is regenerated fresh on every call (fresh timestamp + fresh fgRequestId)
  * - Updated Chrome versions (133 removed, 134/135/136 added)
  * - firstEntry randomized with realistic distribution
- * - X-Client-Version updated to match current Manus frontend
  */
 
 import { encodeDCR, generateClientId } from "../utils/helpers";
 
 /**
- * Generate a realistic FingerprintJS Pro requestId.
+ * Generate a SYNTHETIC FingerprintJS Pro requestId (fallback only).
  * Format: {timestamp}.{6 random alphanumeric chars}
  * Reverse-engineered from real manus.im traffic (e.g. "1773892887732.wI3xcp").
- * The timestamp is set to ~20-40 seconds BEFORE the DCR is built,
- * simulating the page load time before the API call.
+ *
+ * WARNING: Synthetic IDs are NOT validated by FPJS Pro server-side.
+ * Use fpjsService.getRequestId() to get real IDs whenever possible.
+ * This is only used as a fallback when the FPJS service is unavailable.
  */
-function generateFgRequestId(): string {
+function generateSyntheticFgRequestId(): string {
   const ALPHANUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   // Simulate page loaded 20-40 seconds ago
   const pageLoadDelay = 20000 + Math.floor(Math.random() * 20000);
@@ -99,7 +104,7 @@ interface UAProfile {
 }
 
 // UPDATED: Chrome 132 removed (too old), Chrome 134/135/136 added
-// Chrome 143 remains dominant (most recent stable in early 2026)
+// Chrome 136 remains dominant (most recent stable in early 2026)
 const UA_PROFILES: UAProfile[] = [
   { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 25, chromeVersion: "136" },
   { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 20, chromeVersion: "135" },
@@ -188,14 +193,22 @@ export interface BrowserProfile {
   firstEntry: string | undefined;
   /** Real timezone offset in minutes (DST-aware) */
   timezoneOffset: number;
+  /**
+   * The real FPJS Pro requestId used in the DCR (or synthetic fallback).
+   * Stored here so regenerateDcr() can use a fresh real ID on each call.
+   */
+  realFgRequestId?: string;
 }
 
 /**
  * Build the DCR payload matching the exact format used by manus.im frontend.
  * Reverse-engineered from module 54273 of the manus.im webapp.
  *
- * IMPORTANT: This function generates a FRESH fgRequestId and timestamp on every call.
+ * IMPORTANT: This function generates a FRESH timestamp on every call.
  * The real browser regenerates the DCR for each API call (timestamp changes).
+ *
+ * @param realFgRequestId - Real FPJS Pro requestId. If provided, uses it.
+ *                          If not, falls back to synthetic ID (less safe).
  */
 function buildDcrPayload(params: {
   ua: string;
@@ -207,14 +220,19 @@ function buildDcrPayload(params: {
   screenHeight: number;
   viewportWidth: number;
   viewportHeight: number;
+  realFgRequestId?: string;
 }): string {
   const tzOffset = getRealTimezoneOffset(params.timezone);
+
+  // Use real FPJS requestId if available, otherwise fall back to synthetic
+  const fgRequestId = params.realFgRequestId || generateSyntheticFgRequestId();
+
   const payload = {
     ua: params.ua,
     locale: params.locale,
     languages: params.languages,
     timezone: params.timezone,
-    fgRequestId: generateFgRequestId(), // Fresh on every call — matches real browser behavior
+    fgRequestId,
     clientId: params.clientId,
     screen: {
       width: params.screenWidth,
@@ -233,7 +251,14 @@ function buildDcrPayload(params: {
 }
 
 class FingerprintService {
-  generateProfile(region = "default"): BrowserProfile {
+  /**
+   * Generate a browser profile for the given region.
+   *
+   * @param region - Geo region bucket (us, br, eu, asia, id, sg, default)
+   * @param realFgRequestId - Optional real FPJS Pro requestId from fpjsService.
+   *                          If provided, used in DCR. If not, synthetic fallback.
+   */
+  generateProfile(region = "default", realFgRequestId?: string): BrowserProfile {
     // Weighted random UA selection
     const totalWeight = UA_PROFILES.reduce((sum, p) => sum + p.weight, 0);
     let random = Math.random() * totalWeight;
@@ -269,7 +294,7 @@ class FingerprintService {
     const jitterMinutes = Math.floor(Math.random() * 31) - 15; // -15 to +15
     const timezoneOffset = baseOffset + jitterMinutes;
 
-    // Build DCR with fresh timestamp and fgRequestId
+    // Build DCR with fresh timestamp and fgRequestId (real or synthetic)
     const dcrPayload = buildDcrPayload({
       ua: selectedProfile.ua,
       locale,
@@ -280,6 +305,7 @@ class FingerprintService {
       screenHeight,
       viewportWidth,
       viewportHeight,
+      realFgRequestId,
     });
 
     const dcrEncoded = encodeDCR(dcrPayload);
@@ -338,6 +364,7 @@ class FingerprintService {
       screenWidth, screenHeight, viewportWidth, viewportHeight,
       colorDepth, timezone, locale, languages, clientId, dcrEncoded, headers,
       firstEntry, timezoneOffset,
+      realFgRequestId,  // Store for use in regenerateDcr()
     };
   }
 
@@ -345,8 +372,12 @@ class FingerprintService {
    * Regenerate the DCR for a given profile with a fresh timestamp and fgRequestId.
    * MUST be called before every RPC call to match real browser behavior.
    * The real manus.im frontend always generates a fresh DCR per call.
+   *
+   * @param profile - The browser profile to regenerate DCR for
+   * @param newRealFgRequestId - Optional NEW real FPJS requestId for this specific call.
+   *                             If not provided, reuses profile.realFgRequestId (or synthetic fallback).
    */
-  regenerateDcr(profile: BrowserProfile): string {
+  regenerateDcr(profile: BrowserProfile, newRealFgRequestId?: string): string {
     const dcrPayload = buildDcrPayload({
       ua: profile.userAgent,
       locale: profile.locale,
@@ -357,6 +388,8 @@ class FingerprintService {
       screenHeight: profile.screenHeight,
       viewportWidth: profile.viewportWidth,
       viewportHeight: profile.viewportHeight,
+      // Use new ID if provided, otherwise reuse the one stored in profile
+      realFgRequestId: newRealFgRequestId || profile.realFgRequestId,
     });
     return encodeDCR(dcrPayload);
   }

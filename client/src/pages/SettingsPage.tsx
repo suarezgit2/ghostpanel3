@@ -93,7 +93,7 @@ const API_KEY_GROUPS: SettingGroup[] = [
       { key: "zoho_client_secret", label: "Client Secret", sensitive: true, placeholder: "Client secret" },
       { key: "zoho_refresh_token", label: "Refresh Token", sensitive: true, placeholder: "1000.XXX" },
       { key: "zoho_account_id", label: "Account ID", sensitive: false, placeholder: "1410307000000008002" },
-      { key: "email_domain", label: "Domínio do Email", sensitive: false, placeholder: "seudominio.com" },
+      { key: "email_domain", label: "Domínio(s) do Email", sensitive: false, placeholder: "dominio1.com, dominio2.com, dominio3.com", description: "Separe múltiplos domínios por vírgula. Cada conta usará um domínio aleatório — evita ban em lote por domínio compartilhado." },
     ],
   },
 ];
@@ -236,6 +236,7 @@ export default function SettingsPage() {
   const { data: healthData, refetch: refetchHealth } = trpc.settings.getSmsHealth.useQuery();
   const { data: blacklistData, refetch: refetchBlacklist } = trpc.settings.getSmsBlacklist.useQuery();
   const { data: countriesData, refetch: refetchCountries } = trpc.settings.getSmsCountries.useQuery();
+  const { data: fpjsStatus, refetch: refetchFpjs } = trpc.settings.getFpjsStatus.useQuery(undefined, { refetchInterval: 15000 });
 
   // Multi-country state
   const [editingCountries, setEditingCountries] = useState<any[]>([]);
@@ -314,6 +315,18 @@ export default function SettingsPage() {
       setSettings(allSettings);
     }
   }, [allSettings]);
+
+  const refillFpjsMutation = trpc.settings.refillFpjsPool.useMutation({
+    onSuccess: (data) => {
+      if (data.success) {
+        toast.success("Pool FPJS reabastecido!", { description: `${data.poolSize} requestIds disponíveis` });
+      } else {
+        toast.warning("FPJS indisponível", { description: (data as any).message });
+      }
+      refetchFpjs();
+    },
+    onError: (err) => toast.error("Erro ao reabastecer pool FPJS", { description: err.message }),
+  });
 
   const setBulkMutation = trpc.settings.setBulk.useMutation({
     onSuccess: () => {
@@ -1204,11 +1217,77 @@ export default function SettingsPage() {
             </div>
           </motion.div>
 
-          {/* Info Banner */}
+          {/* FPJS Pro Status */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.12 }}
+            className="rounded-xl border border-border bg-card"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-ghost-surface-2">
+                  <Shield className="w-4 h-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">FingerprintJS Pro</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Pool de requestIds reais para o DCR — evita bans por ID sintético
+                  </p>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => refillFpjsMutation.mutate()}
+                disabled={refillFpjsMutation.isPending}
+                className="gap-1.5 text-xs"
+              >
+                <RefreshCw className={`w-3 h-3 ${refillFpjsMutation.isPending ? 'animate-spin' : ''}`} />
+                Reabastecer Pool
+              </Button>
+            </div>
+            <div className="p-6 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">Status do serviço</span>
+                {fpjsStatus?.available ? (
+                  <span className="flex items-center gap-1.5 text-xs text-green-400">
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    Ativo (Chromium encontrado)
+                  </span>
+                ) : fpjsStatus === undefined ? (
+                  <span className="text-xs text-muted-foreground/60">Carregando...</span>
+                ) : (
+                  <span className="flex items-center gap-1.5 text-xs text-amber-400">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Inativo — usando IDs sintéticos (fallback)
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">RequestIds no pool</span>
+                <span className={`text-xs font-mono font-semibold ${
+                  (fpjsStatus?.poolSize ?? 0) >= 3 ? 'text-green-400' :
+                  (fpjsStatus?.poolSize ?? 0) >= 1 ? 'text-amber-400' : 'text-red-400'
+                }`}>
+                  {fpjsStatus?.poolSize ?? 0} / 5
+                </span>
+              </div>
+              {!fpjsStatus?.available && fpjsStatus !== undefined && (
+                <p className="text-[10px] text-amber-300/60 mt-2">
+                  Chromium não encontrado no servidor. Para ativar, o Docker precisa ter o
+                  pacote <code className="font-mono">chromium</code> instalado. O Dockerfile já foi
+                  atualizado — faça um novo deploy para ativar.
+                </p>
+              )}
+            </div>
+          </motion.div>
+
+          {/* Info Banner */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.18 }}
             className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4"
           >
             <div className="flex items-start gap-3">
