@@ -1236,16 +1236,7 @@ export default function SettingsPage() {
                   </p>
                 </div>
               </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => refillFpjsMutation.mutate()}
-                disabled={refillFpjsMutation.isPending}
-                className="gap-1.5 text-xs"
-              >
-                <RefreshCw className={`w-3 h-3 ${refillFpjsMutation.isPending ? 'animate-spin' : ''}`} />
-                Reabastecer Pool
-              </Button>
+
             </div>
             <div className="p-6 space-y-3">
               <div className="flex items-center justify-between">
@@ -1265,12 +1256,15 @@ export default function SettingsPage() {
                 )}
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-xs text-muted-foreground">RequestIds no pool</span>
-                <span className={`text-xs font-mono font-semibold ${
-                  (fpjsStatus?.poolSize ?? 0) >= 15 ? 'text-green-400' :
-                  (fpjsStatus?.poolSize ?? 0) >= 5 ? 'text-amber-400' : 'text-red-400'
-                }`}>
-                  {fpjsStatus?.poolSize ?? 0} / 25
+                <span className="text-xs text-muted-foreground">Modo de geração</span>
+                <span className="text-xs font-mono text-blue-400 font-semibold">
+                  Sob demanda (sem pool)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">Concorrência máxima</span>
+                <span className="text-xs font-mono text-muted-foreground">
+                  3 gerações simultâneas
                 </span>
               </div>
               {!fpjsStatus?.available && fpjsStatus !== undefined && (

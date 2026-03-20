@@ -165,7 +165,8 @@ async function startServer() {
       console.warn("[ProxyRecovery] Falhou (não-crítico):", err);
     }
 
-    // Iniciar FPJS Pro service em background (pré-gera pool de requestIds reais)
+    // Inicializar FPJS Pro service em background (abre o browser Chromium)
+    // Feito no boot para que o browser já esteja pronto quando o primeiro job iniciar
     // Não bloqueia o boot — se falhar, o sistema usa IDs sintéticos como fallback
     fpjsService.init().catch((err) => {
       console.warn("[FpjsService] Falha na inicialização (não-crítico):", err);
