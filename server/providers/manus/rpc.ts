@@ -5,14 +5,15 @@
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
  *
- * ANTI-DETECTION (v5.4 — Fresh FPJS per RPC):
+ * ANTI-DETECTION (v5.5 — Proxy-Routed FPJS):
  * - Uses impers (curl-impersonate) for Chrome-identical TLS/HTTP2 fingerprints
  * - JA3/JA4 TLS fingerprint matches real Chrome (not Node.js)
  * - HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order match real Chrome
  * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fresh fgRequestId)
- * - NEW: Each RPC call generates a FRESH real FPJS Pro requestId via fpjsService
- *   This prevents the "user is blocked" error caused by reusing the same fgRequestId
- *   across multiple RPC calls (which the Manus backend detects as bot behavior).
+ * - Each RPC call generates a FRESH real FPJS Pro requestId via fpjsService
+ * - v5.5: FPJS Puppeteer is routed through the SAME proxy as RPC calls,
+ *   ensuring IP consistency between FPJS identification and API requests.
+ *   This prevents the "user is blocked" error caused by IP mismatch.
  * - Falls back to native fetch if curl-impersonate is not available
  */
 
@@ -54,14 +55,13 @@ async function rpcCall(
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}/${servicePath}`;
 
-  // FIX v5.4: Generate a FRESH real FPJS Pro requestId for THIS specific RPC call.
-  // Previously, a single realFgRequestId was generated once in the orchestrator and
-  // reused across all ~10 RPC calls. The Manus backend detected this reuse pattern
-  // (impossible for a real browser) and blocked users at the SMS step.
-  // Now each RPC call gets its own unique fgRequestId, matching real browser behavior.
+  // FIX v5.5: Generate a FRESH real FPJS Pro requestId routed through the SAME proxy
+  // as the RPC calls. This ensures IP consistency between FPJS identification and RPC
+  // requests, preventing the "user is blocked" error caused by IP mismatch.
+  // The proxy is passed from the RPC options so Puppeteer uses the same IP.
   let freshFgRequestId: string | undefined;
   try {
-    freshFgRequestId = await fpjsService.getRequestId();
+    freshFgRequestId = await fpjsService.getRequestId(undefined, options.proxy);
   } catch (err) {
     // If FPJS fails, regenerateDcr will fall back to synthetic ID via generateFgRequestId()
     console.warn(`[RPC] Falha ao gerar FPJS real ID para ${servicePath}: ${err instanceof Error ? err.message : err}`);

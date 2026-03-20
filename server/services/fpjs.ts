@@ -1,22 +1,28 @@
 /**
- * FingerprintJS Pro Service — On-Demand Generation
+ * FingerprintJS Pro Service — On-Demand Generation (v5.5 — Proxy-Routed)
  *
  * Generates a REAL FPJS Pro requestId for each account creation by running
  * the actual FPJS Pro SDK inside a stealth Puppeteer browser.
  *
- * Architecture (v2 — no pool):
- * - NO pre-generated pool. Every call to getRequestId() opens a fresh browser
- *   page, loads manus.im/login, runs the FPJS SDK, and returns a brand-new ID.
- * - This eliminates the requestId expiry problem entirely (IDs expire in ~2-5min).
+ * Architecture (v5.5 — proxy-routed):
+ * - Each call to getRequestId() opens a fresh browser page routed through
+ *   the SAME proxy used for RPC calls, ensuring IP consistency.
+ * - Cookies are cleared between calls to prevent cross-account correlation
+ *   via FPJS tracking cookies (_iidt, _vid_t).
  * - Concurrent calls are serialized via a queue to avoid launching too many
  *   Chromium pages simultaneously (memory safety for Railway).
- * - Graceful degradation: if Chromium is not available, returns "" and the
- *   orchestrator falls back to a synthetic ID.
+ * - Graceful degradation: if Chromium is not available, throws error
+ *   (real IDs are mandatory).
+ *
+ * Key changes from v5.4:
+ * - Browser is launched WITH proxy (--proxy-server flag)
+ * - page.authenticate() is called for proxy auth
+ * - Cookies are cleared after each ID generation
+ * - Browser is re-launched when proxy changes (different job = different proxy)
  *
  * Performance:
  * - Each requestId takes ~5-10s to generate (page load + SDK execution).
- * - With 20 concurrent jobs, they queue up and each gets a fresh ID in order.
- * - The browser instance is kept alive (singleton) to avoid cold-start overhead.
+ * - The browser instance is kept alive (singleton) per proxy to avoid cold-start.
  *
  * Docker/Railway compatibility:
  * - Uses PUPPETEER_EXECUTABLE_PATH env var if set (set in Dockerfile).
@@ -28,6 +34,7 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { Browser, Page } from "puppeteer-core";
 import { execSync } from "child_process";
 import { logger } from "../utils/helpers";
+import type { ProxyInfo } from "./proxy";
 
 puppeteer.use(StealthPlugin());
 
@@ -86,23 +93,41 @@ function findChromiumPath(): string | null {
   return null;
 }
 
+/**
+ * Build the proxy URL string for Puppeteer's --proxy-server flag.
+ * Format: protocol://host:port (without auth — auth is handled by page.authenticate)
+ */
+function buildProxyServerArg(proxy: ProxyInfo): string {
+  const protocol = proxy.protocol === "socks5" ? "socks5" : "http";
+  return `${protocol}://${proxy.host}:${proxy.port}`;
+}
+
+/**
+ * Build a unique key for a proxy to detect when we need to re-launch the browser.
+ */
+function proxyKey(proxy?: ProxyInfo | null): string {
+  if (!proxy) return "no-proxy";
+  return `${proxy.protocol}://${proxy.host}:${proxy.port}`;
+}
+
 class FpjsService {
   private browser: Browser | null = null;
   private browserPath: string | null = null;
   private unavailable = false;
   private initialized = false;
   private isReconnecting = false;
+  private currentProxyKey = "no-proxy";
 
   // Concurrency control: queue of pending generation callbacks
   private activeCount = 0;
   private queue: Array<() => void> = [];
 
   /**
-   * Initialize the browser singleton.
+   * Initialize: find Chromium path.
    * Called lazily on first getRequestId() call.
    */
   async init(): Promise<void> {
-    if (this.initialized) return;
+    if (this.initialized && this.browserPath) return;
 
     this.browserPath = findChromiumPath();
 
@@ -118,79 +143,90 @@ class FpjsService {
     }
 
     await logger.info("fpjs", `Chromium encontrado em: ${this.browserPath}`);
-    await this.launchBrowser();
-    
-    // Inicia health check periódico para detectar crashes do browser
-    setInterval(() => this.healthCheck(), 60000);
+    this.initialized = true;
   }
 
-  private async launchBrowser(): Promise<void> {
+  /**
+   * Launch (or re-launch) the browser with a specific proxy.
+   * If the proxy changes, the browser is closed and re-launched with the new proxy.
+   */
+  private async launchBrowser(proxy?: ProxyInfo | null): Promise<void> {
     if (this.isReconnecting) return;
     this.isReconnecting = true;
 
     try {
+      // Close existing browser if any
       if (this.browser) {
         try { await this.browser.close(); } catch (e) {}
+        this.browser = null;
+      }
+
+      const args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--window-size=1920,1080",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-extensions",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--js-flags=--max-old-space-size=512",
+      ];
+
+      // KEY CHANGE v5.5: Route Puppeteer through the SAME proxy as RPC calls
+      if (proxy) {
+        args.push(`--proxy-server=${buildProxyServerArg(proxy)}`);
+        await logger.info("fpjs", `Lançando browser com proxy: ${proxy.host}:${proxy.port}`);
+      } else {
+        await logger.warn("fpjs", "Lançando browser SEM proxy (não recomendado)");
       }
 
       this.browser = await (puppeteer as any).launch({
         executablePath: this.browserPath!,
         headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--disable-software-rasterizer",
-          "--window-size=1920,1080",
-          "--disable-blink-features=AutomationControlled",
-          "--disable-extensions",
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--disable-background-timer-throttling",
-          "--disable-backgrounding-occluded-windows",
-          "--disable-renderer-backgrounding",
-          "--js-flags=--max-old-space-size=512", // Limita uso de memória do V8
-        ],
+        args,
       });
 
-      // Monitora desconexões inesperadas (crash)
+      // Track which proxy this browser is using
+      this.currentProxyKey = proxyKey(proxy);
+
+      // Monitor unexpected disconnections (crash)
       this.browser!.on('disconnected', () => {
         logger.warn("fpjs", "Browser FPJS desconectado inesperadamente. Será recriado no próximo uso.");
         this.browser = null;
       });
 
-      this.initialized = true;
       this.isReconnecting = false;
       await logger.info("fpjs", "Browser FPJS inicializado com sucesso");
     } catch (err) {
       this.isReconnecting = false;
       const msg = err instanceof Error ? err.message : String(err);
       await logger.error("fpjs", `Falha ao inicializar browser FPJS: ${msg}`);
-      
-      if (!this.initialized) {
-        this.unavailable = true;
-        this.initialized = true;
+
+      if (!this.browser) {
         throw new Error(`Falha ao inicializar browser FPJS: ${msg}`);
       }
     }
   }
 
-  private async healthCheck(): Promise<void> {
-    if (!this.initialized || this.unavailable || this.isReconnecting) return;
-    
-    try {
-      if (!this.browser || !this.browser.isConnected()) {
-        await logger.warn("fpjs", "Health check falhou: browser não conectado. Recriando...");
-        await this.launchBrowser();
-        return;
+  /**
+   * Ensure the browser is alive and using the correct proxy.
+   * Re-launches if the proxy changed or the browser crashed.
+   */
+  private async ensureBrowser(proxy?: ProxyInfo | null): Promise<void> {
+    const requiredKey = proxyKey(proxy);
+
+    // Re-launch if: no browser, browser disconnected, or proxy changed
+    if (!this.browser || !this.browser.isConnected() || this.currentProxyKey !== requiredKey) {
+      if (this.currentProxyKey !== requiredKey && this.browser) {
+        await logger.info("fpjs", `Proxy mudou (${this.currentProxyKey} → ${requiredKey}). Relançando browser...`);
       }
-      
-      // Tenta pegar a versão para confirmar que o processo do browser está vivo
-      await this.browser.version();
-    } catch (err) {
-      await logger.warn("fpjs", `Health check falhou: ${err}. Recriando browser...`);
-      await this.launchBrowser();
+      await this.launchBrowser(proxy);
     }
   }
 
@@ -223,22 +259,29 @@ class FpjsService {
    * Generate a single fresh FPJS requestId from a new browser page.
    * This is the core operation — opens manus.im/login, runs the FPJS SDK,
    * captures the requestId, and closes the page.
+   *
+   * v5.5: Proxy authentication is done via page.authenticate().
+   * Cookies are cleared after each generation to prevent cross-account correlation.
    */
-  private async generateFresh(jobId?: number): Promise<string> {
-    // Garante que o browser está vivo antes de tentar usar
-    if (!this.browser || !this.browser.isConnected()) {
-      await logger.warn("fpjs", "Browser não disponível ou desconectado. Tentando recriar...", {}, jobId);
-      await this.launchBrowser();
-      if (!this.browser) throw new Error("Falha ao recriar browser FPJS");
-    }
+  private async generateFresh(proxy?: ProxyInfo | null, jobId?: number): Promise<string> {
+    await this.ensureBrowser(proxy);
+    if (!this.browser) throw new Error("Falha ao garantir browser FPJS");
 
     await this.acquireSlot();
     let page: Page | null = null;
 
     try {
       page = await this.browser.newPage();
-      
-      // Otimização: intercepta e bloqueia recursos desnecessários para economizar memória e CPU
+
+      // v5.5: Authenticate with proxy credentials if provided
+      if (proxy?.username && proxy?.password) {
+        await page.authenticate({
+          username: proxy.username,
+          password: proxy.password,
+        });
+      }
+
+      // Optimize: intercept and block unnecessary resources
       await page.setRequestInterception(true);
       page.on('request', (req) => {
         const resourceType = req.resourceType();
@@ -255,7 +298,7 @@ class FpjsService {
       );
 
       await page.goto(FPJS_CONFIG.pageUrl, {
-        waitUntil: "domcontentloaded", // Mais rápido que networkidle2 e suficiente para injetar script
+        waitUntil: "domcontentloaded",
         timeout: FPJS_CONFIG.timeout,
       });
 
@@ -298,8 +341,23 @@ class FpjsService {
         { apiKey: FPJS_CONFIG.apiKey, endpoint: FPJS_CONFIG.endpoint, scriptUrl: FPJS_CONFIG.scriptUrl }
       );
 
+      // v5.5: Clear cookies after generation to prevent cross-account correlation
+      // The FPJS cookies (_iidt, _vid_t) would link multiple accounts to the same visitorId
+      try {
+        const client = await page.createCDPSession();
+        await client.send('Network.clearBrowserCookies');
+        await client.send('Storage.clearDataForOrigin', {
+          origin: 'https://manus.im',
+          storageTypes: 'cookies,local_storage,session_storage',
+        });
+        await client.detach();
+      } catch (cookieErr) {
+        // Non-fatal: log and continue
+        await logger.warn("fpjs", `Falha ao limpar cookies: ${cookieErr}`, {}, jobId);
+      }
+
       if (requestId) {
-        await logger.info("fpjs", `RequestId gerado: ${requestId}`, {}, jobId);
+        await logger.info("fpjs", `RequestId gerado via proxy ${proxy ? `${proxy.host}:${proxy.port}` : 'direto'}: ${requestId}`, {}, jobId);
         return requestId;
       } else {
         await logger.error("fpjs", "FPJS SDK retornou vazio", {}, jobId);
@@ -316,16 +374,21 @@ class FpjsService {
   /**
    * Get a fresh, valid FPJS requestId for this account creation.
    *
+   * v5.5: Now accepts an optional proxy parameter to route the Puppeteer
+   * browser through the SAME proxy used for RPC calls. This ensures IP
+   * consistency between FPJS identification and RPC requests, preventing
+   * the "user is blocked" error.
+   *
    * - Always generates a new ID (never reuses old ones).
    * - Concurrent calls are serialized up to maxConcurrent=3 at a time.
-   * - Resilient: Retries infinitely with backoff until a real ID is generated.
-   * - Throws error ONLY if Chromium is completely missing from the system.
+   * - Resilient: Retries with backoff until a real ID is generated.
    */
-  async getRequestId(jobId?: number): Promise<string> {
+  async getRequestId(jobId?: number, proxy?: ProxyInfo | null): Promise<string> {
     let attempt = 1;
-    const maxBackoff = 30000; // Max 30s between retries
+    const maxAttempts = 5;
+    const maxBackoff = 30000;
 
-    while (true) {
+    while (attempt <= maxAttempts) {
       // Lazy init
       if (!this.initialized) {
         await this.init();
@@ -335,28 +398,20 @@ class FpjsService {
         throw new Error("CRÍTICO: Chromium não encontrado no sistema. Instale o Chromium para gerar IDs reais.");
       }
 
-      if (!this.browser) {
-        await logger.warn("fpjs", "Browser não inicializado, tentando novamente em 5s...", {}, jobId);
-        await new Promise(r => setTimeout(r, 5000));
-        this.initialized = false;
-        continue;
-      }
-
       try {
-        const id = await this.generateFresh(jobId);
+        const id = await this.generateFresh(proxy, jobId);
         if (id) return id;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        await logger.warn("fpjs", `Falha ao gerar requestId (tentativa ${attempt}): ${msg}`, {}, jobId);
+        await logger.warn("fpjs", `Falha ao gerar requestId (tentativa ${attempt}/${maxAttempts}): ${msg}`, {}, jobId);
 
         // If browser crashed or is unresponsive, force restart
-        if (msg.includes("Target closed") || msg.includes("Session closed") || msg.includes("Protocol error") || msg.includes("timeout")) {
+        if (msg.includes("Target closed") || msg.includes("Session closed") || msg.includes("Protocol error") || msg.includes("timeout") || msg.includes("net::ERR_")) {
           await logger.warn("fpjs", "Browser FPJS instável — forçando reinicialização...", {}, jobId);
           try {
             if (this.browser) await this.browser.close().catch(() => {});
           } catch (e) { /* ignore */ }
           this.browser = null;
-          this.initialized = false;
         }
       }
 
@@ -366,6 +421,8 @@ class FpjsService {
       await new Promise(r => setTimeout(r, backoff));
       attempt++;
     }
+
+    throw new Error(`FPJS falhou após ${maxAttempts} tentativas. Verifique o proxy e a conectividade.`);
   }
 
   /**
@@ -377,10 +434,10 @@ class FpjsService {
   }
 
   /**
-   * Check if FPJS service is available (Chromium found and browser running).
+   * Check if FPJS service is available (Chromium found).
    */
   isAvailable(): boolean {
-    return !this.unavailable && this.initialized && this.browser !== null;
+    return !this.unavailable && this.initialized;
   }
 
   /**
@@ -390,7 +447,6 @@ class FpjsService {
     if (this.browser) {
       try { await this.browser.close(); } catch { /* ignore */ }
       this.browser = null;
-      this.initialized = false;
     }
   }
 }
