@@ -27,6 +27,7 @@ import { EmailVerifyCodeAction } from "./rpc";
 import { captchaService } from "../../services/captcha";
 import { emailService } from "../../services/email";
 import { smsService } from "../../services/sms";
+import { httpRequest } from "../../services/httpClient";
 import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
 import type { BrowserProfile } from "../../services/fingerprint";
 import { proxyService } from "../../services/proxy";
@@ -172,6 +173,42 @@ async function solveTurnstileWithRetry(proxy: ProxyInfo | null, jobId?: number):
   }
 }
 
+// Cache de proxies verificados: proxy key → timestamp do último check OK
+const proxyHealthCache = new Map<string, number>();
+const PROXY_HEALTH_CACHE_TTL_MS = 60_000; // 60s
+const PROXY_CHECK_TIMEOUT_S = 8;         // 8s timeout para o ping
+const MAX_PROXY_RETRIES = 3;             // Máximo de proxies a tentar antes de desistir
+
+/**
+ * Verifica se o proxy consegue alcançar manus.im.
+ * Usa cache de 60s para não pingar em toda tentativa quando o proxy está saudável.
+ * Retorna true se OK, false se morto.
+ */
+async function checkProxyHealth(proxy: ProxyInfo | null, jobId?: number): Promise<boolean> {
+  if (!proxy) return true; // Sem proxy = conexão direta, sempre OK
+
+  const key = `${proxy.host}:${proxy.port}`;
+  const cached = proxyHealthCache.get(key);
+  if (cached && (Date.now() - cached) < PROXY_HEALTH_CACHE_TTL_MS) {
+    return true; // Proxy verificado recentemente
+  }
+
+  try {
+    await httpRequest({
+      method: "GET",
+      url: "https://manus.im/login",
+      headers: { "User-Agent": "Mozilla/5.0" },
+      proxy,
+      timeout: PROXY_CHECK_TIMEOUT_S,
+    });
+    proxyHealthCache.set(key, Date.now());
+    return true;
+  } catch {
+    proxyHealthCache.delete(key);
+    return false;
+  }
+}
+
 export class ManusProvider {
   slug = "manus";
   name = "Manus.im";
@@ -183,6 +220,38 @@ export class ManusProvider {
     try {
       // Build authCommandCmd from fingerprint (locale, timezone, tzOffset DST-aware, firstEntry randomized, fbp)
       const authCommandCmd = buildAuthCommandCmd(fingerprint);
+
+      // STEP 0: Proxy health check — verifica conectividade antes de gastar recursos
+      // Testa se o proxy consegue alcançar manus.im (timeout: 8s).
+      // Se falhar, troca o proxy e retesta (até MAX_PROXY_RETRIES vezes).
+      // Isso evita desperdiçar captcha, email e números SMS em proxies mortos.
+      for (let proxyAttempt = 1; proxyAttempt <= MAX_PROXY_RETRIES; proxyAttempt++) {
+        const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : "sem proxy";
+        await logger.info("step_0_proxy",
+          `Verificando proxy ${proxyLabel} (tentativa ${proxyAttempt}/${MAX_PROXY_RETRIES})...`,
+          {}, jobId
+        );
+        const proxyOk = await checkProxyHealth(proxy, jobId);
+        if (proxyOk) {
+          await logger.info("step_0_proxy", `Proxy ${proxyLabel} OK — prosseguindo`, {}, jobId);
+          break;
+        }
+        // Proxy morto: tenta obter um novo
+        await logger.warn("step_0_proxy",
+          `Proxy ${proxyLabel} inacessível. ${proxyAttempt < MAX_PROXY_RETRIES ? "Trocando proxy..." : "Nenhum proxy funcional disponível."}`,
+          {}, jobId
+        );
+        if (proxyAttempt === MAX_PROXY_RETRIES) {
+          return { email, password, status: "failed", error: "Proxy inacessível após 3 tentativas", metadata: {} };
+        }
+        try {
+          proxy = await proxyService.getProxy(jobId);
+        } catch (proxyErr) {
+          return { email, password, status: "failed",
+            error: `Não foi possível obter proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}`,
+            metadata: {} };
+        }
+      }
 
       // STEP 1: Solve Cloudflare Turnstile (WITH proxy — same IP as API calls)
       await logger.info("step_1_turnstile", "Resolvendo Turnstile...", {
