@@ -77,39 +77,77 @@ async function rpcCall(
     Object.assign(headers, extraHeaders);
   }
 
-  // [TESTE] RPC SEM RETRY (como no feature/tls-impersonation)
-  // Para REVERTER: restaurar loop de 5 tentativas com backoff exponencial e PermanentRpcError
-  const response = await httpRequest({
-    method: "POST",
-    url,
-    headers,
-    body: JSON.stringify(payload),
-    proxy: options.proxy,
-    userAgent: options.fingerprint.userAgent,
-    timeout: 30,
-  });
+  // SUSPEITA 7 REATIVADA: RPC retry 5x com backoff exponencial e PermanentRpcError
+  const MAX_RETRIES = 5;
+  let attempt = 1;
+  let lastError: Error | null = null;
 
-  const text = response.text;
+  while (attempt <= MAX_RETRIES) {
+    try {
+      const response = await httpRequest({
+        method: "POST",
+        url,
+        headers,
+        body: JSON.stringify(payload),
+        proxy: options.proxy,
+        userAgent: options.fingerprint.userAgent,
+        timeout: 45 + (attempt * 15),
+      });
 
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`RPC ${servicePath} (${response.status}): resposta não-JSON: ${text.substring(0, 200)}`);
+      const text = response.text;
+
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`RPC ${servicePath} (${response.status}): resposta não-JSON: ${text.substring(0, 200)}`);
+      }
+
+      if (data.code && !["ok", "OK"].includes(data.code as string)) {
+        const details = data.details as Array<{ debug?: { message?: string } }> | undefined;
+        const debugMsg = details?.[0]?.debug?.message || (data.message as string) || "";
+        
+        const permanentErrors = ["invalid_argument", "unauthenticated", "not_found", "already_exists", "permission_denied"];
+        if (permanentErrors.includes(data.code as string)) {
+          const err = new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
+          err.name = "PermanentRpcError";
+          throw err;
+        }
+        
+        throw new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
+      }
+
+      if (response.status >= 400 && !data.code) {
+        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+          const err = new Error(`RPC ${servicePath} (${response.status}): ${text.substring(0, 200)}`);
+          err.name = "PermanentRpcError";
+          throw err;
+        }
+        throw new Error(`RPC ${servicePath} (${response.status}): ${text.substring(0, 200)}`);
+      }
+
+      return data;
+      
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      
+      if (lastError.name === "PermanentRpcError") {
+        throw lastError;
+      }
+      
+      if (attempt === MAX_RETRIES) {
+        break;
+      }
+      
+      const backoff = Math.min(2000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 30000);
+      console.warn(`[RPC] Falha transitória em ${servicePath} (tentativa ${attempt}/${MAX_RETRIES}): ${lastError.message}. Retentando em ${Math.round(backoff/1000)}s...`);
+      
+      await new Promise(r => setTimeout(r, backoff));
+      attempt++;
+    }
   }
 
-  // ConnectRPC returns errors with "code" field
-  if (data.code && !["ok", "OK"].includes(data.code as string)) {
-    const details = data.details as Array<{ debug?: { message?: string } }> | undefined;
-    const debugMsg = details?.[0]?.debug?.message || (data.message as string) || "";
-    throw new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
-  }
-
-  if (response.status >= 400 && !data.code) {
-    throw new Error(`RPC ${servicePath} (${response.status}): ${text.substring(0, 200)}`);
-  }
-
-  return data;
+  throw lastError || new Error(`RPC ${servicePath} falhou após ${MAX_RETRIES} tentativas`);
 }
 
 // ============================================================
