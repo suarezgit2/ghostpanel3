@@ -1093,11 +1093,7 @@ class SmsService {
     let lastError: Error | null = null;
     let attempt = 0;
     let usedFallbackDiscover = false;
-    let consecutiveTargetRejectionsThisCountry = 0;
     let consecutiveProxyErrors = 0;
-    // Após 2 rejeições consecutivas pelo alvo no mesmo país, o número desse país
-    // não está sendo aceito pelo Manus — não adianta tentar mais provedores do mesmo país.
-    const MAX_TARGET_REJECTIONS_PER_COUNTRY = 2;
     // Após 3 erros de proxy consecutivos, algo estrutural está errado (sem proxies disponíveis, etc.)
     const MAX_CONSECUTIVE_PROXY_ERRORS = 3;
 
@@ -1192,22 +1188,6 @@ class SmsService {
       }
       // Reset contador de erros de proxy quando há sucesso ou outro tipo de erro
       consecutiveProxyErrors = 0;
-
-      // Rastreia rejeições consecutivas pelo alvo neste país
-      if (result.wasTargetRejection) {
-        consecutiveTargetRejectionsThisCountry++;
-        if (consecutiveTargetRejectionsThisCountry >= MAX_TARGET_REJECTIONS_PER_COUNTRY) {
-          await logger.warn("sms",
-            `[${name}] ${consecutiveTargetRejectionsThisCountry} rejeições consecutivas pelo Manus neste país. ` +
-            `Números deste país não estão sendo aceitos — abortando e tentando próximo país.`,
-            {}, jobId
-          );
-          throw new Error(`[${name}] Abortado após ${consecutiveTargetRejectionsThisCountry} rejeições consecutivas pelo alvo`);
-        }
-      } else {
-        // Reset contador se a falha foi por outro motivo (timeout, sem números, etc.)
-        consecutiveTargetRejectionsThisCountry = 0;
-      }
 
       // Fallback Auto-Discover quando todos da lista falharam
       if (
