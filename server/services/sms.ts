@@ -1094,8 +1094,6 @@ class SmsService {
     let attempt = 0;
     let usedFallbackDiscover = false;
     let consecutiveProxyErrors = 0;
-    // Após 3 erros de proxy consecutivos, algo estrutural está errado (sem proxies disponíveis, etc.)
-    const MAX_CONSECUTIVE_PROXY_ERRORS = 3;
 
     for (let queueIndex = 0; queueIndex < providerQueue.length && attempt < effectiveMaxRetries; queueIndex++) {
       attempt++;
@@ -1170,15 +1168,8 @@ class SmsService {
       // O mesmo provedor será tentado novamente na próxima iteração (com proxy diferente).
       if (result.wasProxyError) {
         consecutiveProxyErrors++;
-        if (consecutiveProxyErrors >= MAX_CONSECUTIVE_PROXY_ERRORS) {
-          await logger.warn("sms",
-            `[${name}] ${consecutiveProxyErrors} erros de proxy consecutivos. Problema estrutural de rede — abortando país.`,
-            {}, jobId
-          );
-          throw new Error(`[${name}] Abortado após ${consecutiveProxyErrors} erros de proxy consecutivos`);
-        }
         await logger.warn("sms",
-          `[${name}] Erro de proxy na tentativa ${attempt} (provedor #${currentProviderId} não penalizado, proxy #${consecutiveProxyErrors}/${MAX_CONSECUTIVE_PROXY_ERRORS}). Retentando...`,
+          `[${name}] Erro de proxy na tentativa ${attempt} (provedor #${currentProviderId} não penalizado, proxy #${consecutiveProxyErrors}). Retentando com proxy diferente...`,
           {}, jobId
         );
         // Não avança o queueIndex — o mesmo provedor será tentado de novo
