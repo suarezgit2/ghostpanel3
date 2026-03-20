@@ -447,17 +447,24 @@ class SmsService {
    * Quando um número é rejeitado pelo Manus (permission_denied), ele vai para esta fila
    * e o job continua imediatamente tentando o próximo provedor.
    * Em paralelo, cada item aguarda o tempo mínimo (sms_cancel_wait) antes de chamar a API.
+   *
+   * FIX: minWait é capturado no momento do enfileiramento (não lido do this.config depois),
+   * evitando cancelamentos imediatos quando a config é recarregada entre o enfileiramento
+   * e a execução do cancelamento.
    */
-  private cancelQueue: Array<{ activationId: string; rentedAt: number; jobId?: number }> = [];
+  private cancelQueue: Array<{ activationId: string; rentedAt: number; minWait: number; jobId?: number }> = [];
 
   /**
    * Enfileira um cancelamento assíncrono. Retorna imediatamente sem bloquear.
    * O cancelamento real acontece em background após o tempo mínimo.
+   * O minWait é capturado agora (no momento do enfileiramento) para evitar race conditions.
    */
   enqueueCancelAsync(activationId: string, rentedAt: number, jobId?: number): void {
-    this.cancelQueue.push({ activationId, rentedAt, jobId });
+    // Captura o minWait AGORA, antes de qualquer reload de config
+    const minWait = this.config?.cancelWaitMs ?? 125_000; // fallback: 125s (padrão SMSBower)
+    this.cancelQueue.push({ activationId, rentedAt, minWait, jobId });
     // Fire-and-forget: não bloqueia o chamador
-    this._processCancelAsync(activationId, rentedAt, jobId).catch(err => {
+    this._processCancelAsync(activationId, rentedAt, minWait, jobId).catch(err => {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn("sms", `Cancelamento assíncrono falhou para ${activationId}: ${msg}`, {}, jobId).catch(() => {});
     }).finally(() => {
@@ -466,24 +473,42 @@ class SmsService {
     });
   }
 
-  private async _processCancelAsync(activationId: string, rentedAt: number, jobId?: number): Promise<void> {
-    if (!this.config) await this.init();
-    const minWait = this.config!.cancelWaitMs;
+  private async _processCancelAsync(activationId: string, rentedAt: number, minWait: number, jobId?: number): Promise<void> {
+    // minWait já foi capturado no enfileiramento — não depende mais do this.config
     const elapsed = Date.now() - rentedAt;
     if (elapsed < minWait) {
       const waitTime = minWait - elapsed;
       await logger.info("sms",
-        `[Fila] Cancelamento assíncrono ${activationId}: aguardando ${Math.ceil(waitTime / 1000)}s em background (${Math.round(elapsed / 1000)}s já decorridos)`,
+        `[Fila] Cancelamento assíncrono ${activationId}: aguardando ${Math.ceil(waitTime / 1000)}s em background (${Math.round(elapsed / 1000)}s já decorridos, mínimo: ${Math.round(minWait / 1000)}s)`,
         {}, jobId
       );
       await sleep(waitTime);
     }
-    const result = await this.setStatus(activationId, 8);
-    if (result === "ACCESS_CANCEL") {
-      await logger.info("sms", `[Fila] Número ${activationId} cancelado em background — saldo devolvido`, {}, jobId);
-    } else {
-      await logger.warn("sms", `[Fila] Cancelamento ${activationId} retornou: ${result}`, {}, jobId);
+
+    // Retry até 3x com 10s de intervalo caso a API do SMSBower retorne erro transitório
+    const MAX_CANCEL_RETRIES = 3;
+    for (let attempt = 1; attempt <= MAX_CANCEL_RETRIES; attempt++) {
+      try {
+        const result = await this.setStatus(activationId, 8);
+        if (result === "ACCESS_CANCEL") {
+          await logger.info("sms", `[Fila] Número ${activationId} cancelado em background — saldo devolvido`, {}, jobId);
+          return;
+        } else if (result === "ALREADY_FINISH" || result === "NO_ACTIVATION") {
+          // Número já foi finalizado/cancelado por outro caminho — OK
+          await logger.info("sms", `[Fila] Cancelamento ${activationId}: ${result} (já finalizado, saldo não perdido)`, {}, jobId);
+          return;
+        } else {
+          await logger.warn("sms", `[Fila] Cancelamento ${activationId} tentativa ${attempt}/${MAX_CANCEL_RETRIES}: ${result}`, {}, jobId);
+          if (attempt < MAX_CANCEL_RETRIES) await sleep(10_000);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await logger.warn("sms", `[Fila] Cancelamento ${activationId} tentativa ${attempt}/${MAX_CANCEL_RETRIES} erro: ${msg}`, {}, jobId);
+        if (attempt < MAX_CANCEL_RETRIES) await sleep(10_000);
+      }
     }
+
+    await logger.error("sms", `[Fila] Cancelamento ${activationId} falhou após ${MAX_CANCEL_RETRIES} tentativas — saldo pode não ter sido devolvido`, {}, jobId);
   }
 
   /** Retorna quantos cancelamentos estão pendentes na fila */
