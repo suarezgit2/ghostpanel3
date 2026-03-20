@@ -1324,6 +1324,7 @@ class SmsService {
       const isTargetApiError =
         error.message.includes("RPC ") ||
         error.message.includes("permission_denied") ||
+        error.message.includes("user is blocked") ||
         error.message.includes("invalid_argument") ||
         error.message.includes("Failed to send the code") ||
         error.message.includes("resource_exhausted");
@@ -1341,11 +1342,6 @@ class SmsService {
 
       if (numberData) {
         if (isTargetApiError || isProxyNetworkError) {
-          // Se foi rejeição pelo alvo, registra a qualidade ruim do número
-          if (isTargetApiError) {
-            this.numberQuality.recordRejection(numberData.phoneNumber, providerId);
-          }
-          
           // Rejeição pelo alvo ou erro de proxy: enfileira cancelamento assíncrono.
           // O job continua imediatamente tentando o próximo provedor.
           this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
@@ -1373,14 +1369,14 @@ class SmsService {
         );
         return { success: false, cost: 0, error, wasProxyError: true };
       } else if (isTargetApiError) {
-        // Rejeição pelo alvo: penaliza com target rejection (não com failure de SMS)
-        this.providerHealth.recordTargetRejection(providerId);
+        // Rejeição pelo alvo (permission_denied, user is blocked, etc.): NÃO penaliza o provedor.
+        // O provedor fez seu trabalho — o alvo (Manus) que rejeitou o número.
+        // Isso pode ser transitório (proxy ruim, fingerprint detectada, etc.) e pode funcionar na próxima tentativa.
         await logger.warn("sms",
-          `Provedor #${providerId}: número rejeitado pelo alvo (target rejection #${
-            (this.providerHealth.getSummary().find(h => h.providerId === providerId) as any)?.consecutiveTargetRejections || "?"
-          }): ${error.message}`,
+          `Provedor #${providerId}: número rejeitado pela API do alvo (NÃO penalizado): ${error.message}`,
           {}, opts.jobId
         );
+        // Don't record failure — the provider did its job, the target rejected the number
         return { success: false, cost: 0, error, wasTargetRejection: true };
       } else {
         await logger.error("sms", `Provedor #${providerId} falhou: ${error.message}`, {}, opts.jobId);

@@ -116,7 +116,8 @@ async function rpcCall(
         const debugMsg = details?.[0]?.debug?.message || (data.message as string) || "";
         
         // Erros permanentes (não adianta tentar de novo)
-        const permanentErrors = ["invalid_argument", "unauthenticated", "permission_denied", "not_found", "already_exists"];
+        // NOTA: permission_denied foi removido porque "user is blocked" é transitório (pode ser resolvido trocando proxy/fingerprint)
+        const permanentErrors = ["invalid_argument", "unauthenticated", "not_found", "already_exists"];
         if (permanentErrors.includes(data.code as string)) {
           const err = new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
           err.name = "PermanentRpcError";
