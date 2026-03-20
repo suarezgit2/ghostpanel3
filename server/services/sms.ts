@@ -47,6 +47,7 @@ const DEFAULTS: Record<string, string> = {
   sms_blacklisted_providers: "",
   sms_provider_health: "{}",
   sms_countries: "",
+  sms_proxy_blocked_countries: "",
 };
 
 /**
@@ -96,6 +97,8 @@ interface SmsConfig {
   autoDiscover: boolean;
   /** Lista de países configurados (multi-país). Vazio = usa country/providerIds legados. */
   countries: CountryConfig[];
+  /** Lista de códigos de países bloqueados por proxy/Manus */
+  proxyBlockedCountries: string[];
 }
 
 interface NumberData {
@@ -663,6 +666,7 @@ class SmsService {
       cancelWaitMs: (parseInt(await get("sms_cancel_wait")) || 125) * 1000,
       autoDiscover: (await get("sms_auto_discover")) === "true",
       countries,
+      proxyBlockedCountries: (await get("sms_proxy_blocked_countries")).split(",").map(c => c.trim()).filter(c => c.length > 0),
     };
 
     const enabledCountries = this.config.countries.filter(c => c.enabled);
@@ -953,6 +957,15 @@ class SmsService {
       let lastCountryError: Error | null = null;
 
       for (const countryConfig of enabledCountries) {
+        // Pula países que estão na blacklist de proxy/Manus
+        if (configSnapshot.proxyBlockedCountries.includes(countryConfig.countryCode)) {
+          await logger.warn("sms",
+            `País ${countryConfig.name} (código ${countryConfig.countryCode}) ignorado: está na blacklist de bloqueio do Manus (sms_proxy_blocked_countries)`,
+            {}, jobId
+          );
+          continue;
+        }
+
         await logger.info("sms",
           `--- Tentando país: ${countryConfig.name} (código ${countryConfig.countryCode}, ${countryConfig.regionCode}, max $${countryConfig.maxPrice}) ---`,
           {}, jobId
