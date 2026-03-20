@@ -335,6 +335,30 @@ class ProviderHealthTracker {
   }
 
   /**
+   * Retorna a lista de provedores com ordem embaralhada por job.
+   * O melhor provedor (maior score) fica na primeira posição.
+   * Os demais são embaralhados aleatoriamente, garantindo que jobs concorrentes
+   * não tentem os mesmos provedores na mesma ordem.
+   *
+   * Isso evita que todos os jobs falhem pelo mesmo provedor ruim ao mesmo tempo.
+   */
+  shuffleForJob(providerIds: number[]): number[] {
+    const ranked = this.rankAvailableProviders(providerIds);
+    if (ranked.length <= 1) return ranked;
+
+    // Mantém o melhor provedor na frente
+    const [best, ...rest] = ranked;
+
+    // Embaralha o restante (Fisher-Yates)
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rest[i], rest[j]] = [rest[j], rest[i]];
+    }
+
+    return [best, ...rest];
+  }
+
+  /**
    * Retorna resumo legível do estado de todos os provedores.
    */
   getSummary(): Record<string, unknown>[] {
@@ -416,6 +440,55 @@ class SmsService {
   readonly providerHealth = new ProviderHealthTracker();
   private healthPersistTimer: ReturnType<typeof setTimeout> | null = null;
   private initialized = false;
+
+  /**
+   * Fila de cancelamentos assíncronos.
+   * Quando um número é rejeitado pelo Manus (permission_denied), ele vai para esta fila
+   * e o job continua imediatamente tentando o próximo provedor.
+   * Em paralelo, cada item aguarda o tempo mínimo (sms_cancel_wait) antes de chamar a API.
+   */
+  private cancelQueue: Array<{ activationId: string; rentedAt: number; jobId?: number }> = [];
+
+  /**
+   * Enfileira um cancelamento assíncrono. Retorna imediatamente sem bloquear.
+   * O cancelamento real acontece em background após o tempo mínimo.
+   */
+  enqueueCancelAsync(activationId: string, rentedAt: number, jobId?: number): void {
+    this.cancelQueue.push({ activationId, rentedAt, jobId });
+    // Fire-and-forget: não bloqueia o chamador
+    this._processCancelAsync(activationId, rentedAt, jobId).catch(err => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn("sms", `Cancelamento assíncrono falhou para ${activationId}: ${msg}`, {}, jobId).catch(() => {});
+    }).finally(() => {
+      const idx = this.cancelQueue.findIndex(item => item.activationId === activationId);
+      if (idx !== -1) this.cancelQueue.splice(idx, 1);
+    });
+  }
+
+  private async _processCancelAsync(activationId: string, rentedAt: number, jobId?: number): Promise<void> {
+    if (!this.config) await this.init();
+    const minWait = this.config!.cancelWaitMs;
+    const elapsed = Date.now() - rentedAt;
+    if (elapsed < minWait) {
+      const waitTime = minWait - elapsed;
+      await logger.info("sms",
+        `[Fila] Cancelamento assíncrono ${activationId}: aguardando ${Math.ceil(waitTime / 1000)}s em background (${Math.round(elapsed / 1000)}s já decorridos)`,
+        {}, jobId
+      );
+      await sleep(waitTime);
+    }
+    const result = await this.setStatus(activationId, 8);
+    if (result === "ACCESS_CANCEL") {
+      await logger.info("sms", `[Fila] Número ${activationId} cancelado em background — saldo devolvido`, {}, jobId);
+    } else {
+      await logger.warn("sms", `[Fila] Cancelamento ${activationId} retornou: ${result}`, {}, jobId);
+    }
+  }
+
+  /** Retorna quantos cancelamentos estão pendentes na fila */
+  getPendingCancellations(): number {
+    return this.cancelQueue.length;
+  }
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -829,8 +902,10 @@ class SmsService {
       }
     }
 
-    // 3. Ranquear apenas provedores DISPONÍVEIS (sem cooldown)
-    const rankedProviders = this.providerHealth.rankAvailableProviders(configuredProviders);
+    // 3. Ranquear provedores DISPONÍVEIS (sem cooldown) com embaralhamento por job.
+    // O melhor provedor fica na frente; os demais são embaralhados aleatoriamente
+    // para que jobs concorrentes não tentem os mesmos provedores na mesma ordem.
+    const rankedProviders = this.providerHealth.shuffleForJob(configuredProviders);
     const cooldownCount = configuredProviders.length - rankedProviders.length;
 
     if (cooldownCount > 0) {
@@ -1083,14 +1158,6 @@ class SmsService {
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
 
-      if (numberData) {
-        try {
-          await this.cancel(numberData.activationId, numberData.rentedAt, opts.jobId);
-        } catch {
-          // Ignore cancel errors
-        }
-      }
-
       // Detecta se é rejeição pelo alvo (Manus) ou falha do provedor de SMS
       const isTargetApiError =
         error.message.includes("RPC ") ||
@@ -1098,6 +1165,27 @@ class SmsService {
         error.message.includes("invalid_argument") ||
         error.message.includes("Failed to send the code") ||
         error.message.includes("resource_exhausted");
+
+      if (numberData) {
+        if (isTargetApiError) {
+          // Rejeição pelo alvo: enfileira cancelamento assíncrono.
+          // O job continua imediatamente tentando o próximo provedor.
+          // O cancelamento aguarda os 2 minutos em background.
+          this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
+          await logger.info("sms",
+            `Número ${numberData.activationId} enfileirado para cancelamento em background (job continua imediatamente)`,
+            {}, opts.jobId
+          );
+        } else {
+          // Falha do provedor SMS (timeout, erro de rede, etc.): cancela de forma síncrona
+          // pois o job já esperou o waitForCode e não há pressa em continuar.
+          try {
+            await this.cancel(numberData.activationId, numberData.rentedAt, opts.jobId);
+          } catch {
+            // Ignore cancel errors
+          }
+        }
+      }
 
       if (isTargetApiError) {
         // Rejeição pelo alvo: penaliza com target rejection (não com failure de SMS)
