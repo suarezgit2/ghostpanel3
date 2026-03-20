@@ -1267,10 +1267,10 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted-foreground">RequestIds no pool</span>
                 <span className={`text-xs font-mono font-semibold ${
-                  (fpjsStatus?.poolSize ?? 0) >= 3 ? 'text-green-400' :
-                  (fpjsStatus?.poolSize ?? 0) >= 1 ? 'text-amber-400' : 'text-red-400'
+                  (fpjsStatus?.poolSize ?? 0) >= 15 ? 'text-green-400' :
+                  (fpjsStatus?.poolSize ?? 0) >= 5 ? 'text-amber-400' : 'text-red-400'
                 }`}>
-                  {fpjsStatus?.poolSize ?? 0} / 5
+                  {fpjsStatus?.poolSize ?? 0} / 25
                 </span>
               </div>
               {!fpjsStatus?.available && fpjsStatus !== undefined && (

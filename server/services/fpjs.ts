@@ -33,8 +33,8 @@ const FPJS_CONFIG = {
   scriptUrl: "https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js",
   pageUrl: "https://manus.im/login",
   timeout: 30000,
-  poolSize: 5,          // Pre-generate this many requestIds
-  poolRefillAt: 2,      // Refill when pool drops to this level
+  poolSize: 25,         // Pre-generate this many requestIds (supports 20 concurrent jobs + buffer)
+  poolRefillAt: 10,     // Refill when pool drops to this level (keep half full)
 };
 
 /**
