@@ -5,16 +5,20 @@
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
  *
- * ANTI-DETECTION (v5.0 — TLS Impersonation):
+ * ANTI-DETECTION (v5.4 — Fresh FPJS per RPC):
  * - Uses impers (curl-impersonate) for Chrome-identical TLS/HTTP2 fingerprints
  * - JA3/JA4 TLS fingerprint matches real Chrome (not Node.js)
  * - HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order match real Chrome
- * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fgRequestId)
+ * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fresh fgRequestId)
+ * - NEW: Each RPC call generates a FRESH real FPJS Pro requestId via fpjsService
+ *   This prevents the "user is blocked" error caused by reusing the same fgRequestId
+ *   across multiple RPC calls (which the Manus backend detects as bot behavior).
  * - Falls back to native fetch if curl-impersonate is not available
  */
 
 import { httpRequest } from "../../services/httpClient";
 import { fingerprintService, type BrowserProfile } from "../../services/fingerprint";
+import { fpjsService } from "../../services/fpjs";
 import type { ProxyInfo } from "../../services/proxy";
 
 const API_BASE = "https://api.manus.im";
@@ -50,9 +54,22 @@ async function rpcCall(
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}/${servicePath}`;
 
-  // ANTI-DETECTION: Regenerate DCR fresh on EVERY call (fresh timestamp + fgRequestId)
+  // FIX v5.4: Generate a FRESH real FPJS Pro requestId for THIS specific RPC call.
+  // Previously, a single realFgRequestId was generated once in the orchestrator and
+  // reused across all ~10 RPC calls. The Manus backend detected this reuse pattern
+  // (impossible for a real browser) and blocked users at the SMS step.
+  // Now each RPC call gets its own unique fgRequestId, matching real browser behavior.
+  let freshFgRequestId: string | undefined;
+  try {
+    freshFgRequestId = await fpjsService.getRequestId();
+  } catch (err) {
+    // If FPJS fails, regenerateDcr will fall back to synthetic ID via generateFgRequestId()
+    console.warn(`[RPC] Falha ao gerar FPJS real ID para ${servicePath}: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // ANTI-DETECTION: Regenerate DCR fresh on EVERY call (fresh timestamp + fresh fgRequestId)
   // This matches real browser behavior — getDCR(true) is called before each API request
-  const freshDcr = fingerprintService.regenerateDcr(options.fingerprint);
+  const freshDcr = fingerprintService.regenerateDcr(options.fingerprint, freshFgRequestId);
 
   // Update the profile's DCR header with the fresh value
   const profileWithFreshDcr = {
@@ -77,7 +94,7 @@ async function rpcCall(
     Object.assign(headers, extraHeaders);
   }
 
-  // SUSPEITA 7 REATIVADA: RPC retry 5x com backoff exponencial e PermanentRpcError
+  // RPC retry 5x com backoff exponencial e PermanentRpcError
   const MAX_RETRIES = 5;
   let attempt = 1;
   let lastError: Error | null = null;
@@ -229,18 +246,15 @@ export async function bindPhoneTrait(phoneNumber: string, regionCode: string, ph
  * IMPORTANT: The real manus.im frontend (invitation/page.js) always generates a
  * FRESH x-client-dcr for this call via getDCR(true). The DCR includes a fresh
  * timestamp and fgRequestId. The rpcCall() function already handles this by
- * regenerating DCR on every call, but we keep explicit regeneration here for clarity.
+ * generating a fresh FPJS ID and regenerating DCR on every call.
  */
 export async function checkInvitationCode(code: string, options: RpcOptions) {
-  // DCR is already regenerated inside rpcCall(), but we explicitly pass a fresh one
-  // to make the intent clear and ensure the header override takes effect
-  const freshDcr = fingerprintService.regenerateDcr(options.fingerprint);
-
+  // rpcCall() already generates a fresh FPJS ID and regenerates DCR,
+  // so no need for explicit regeneration here anymore
   const result = await rpcCall(
     "user.v1.UserService/CheckInvitationCode",
     { code },
-    options,
-    { "x-client-dcr": freshDcr }
+    options
   );
   return result;
 }

@@ -16,7 +16,6 @@ import { getDb } from "../db";
 import { jobs, accounts, providers, jobFolders } from "../../drizzle/schema";
 import { proxyService, getProxyRegion } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
-import { fpjsService } from "../services/fpjs";
 import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
 import { getSetting } from "../utils/settings";
 import { manusProvider, type ManusProvider } from "../providers/manus";
@@ -314,9 +313,8 @@ class Orchestrator {
         // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
         const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
 
-        // SUSPEITA 1 REATIVADA: FPJS real ID
-        const realFgRequestId = await fpjsService.getRequestId(jobId);
-        const fingerprint = fingerprintService.generateProfile(proxyRegion, realFgRequestId);
+        // FPJS real ID agora é gerado por chamada RPC dentro de rpc.ts (v5.4)
+        const fingerprint = fingerprintService.generateProfile(proxyRegion);
 
         await logger.info("orchestrator",
           `Tentativa ${totalAttempts}/${maxAttempts} (sucesso: ${successCount}/${options.quantity}): ${email}`,
@@ -325,7 +323,6 @@ class Orchestrator {
             clientId: fingerprint.clientId,
             locale: fingerprint.locale,
             timezone: fingerprint.timezone,
-            fpjsReal: !!realFgRequestId,
           }, jobId
         );
 

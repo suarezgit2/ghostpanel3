@@ -8,7 +8,7 @@
  *   locale: string,       // e.g. "en-US"
  *   languages: string[],  // navigator.languages
  *   timezone: string,     // IANA timezone
- *   fgRequestId: string,  // FingerprintJS Pro requestId (real or synthetic fallback)
+ *   fgRequestId: string,  // FingerprintJS Pro requestId (real via rpc.ts, synthetic fallback)
  *   clientId: string,     // localStorage client_id_v2
  *   screen: { width, height },
  *   viewport: { width, height },
@@ -16,11 +16,11 @@
  *   timezoneOffset: number // new Date().getTimezoneOffset()
  * }
  *
- * ANTI-DETECTION IMPROVEMENTS (v5.3):
- * - Real FPJS Pro requestIds via fpjsService (Puppeteer stealth browser)
- * - Synthetic fgRequestId used ONLY as fallback when FPJS service unavailable
- * - generateProfile() accepts optional realFgRequestId parameter
- * - regenerateDcr() accepts optional realFgRequestId parameter
+ * ANTI-DETECTION IMPROVEMENTS (v5.4):
+ * - Real FPJS Pro requestIds are now generated PER RPC CALL inside rpc.ts
+ *   (previously a single ID was reused across all calls, causing "user is blocked")
+ * - regenerateDcr() accepts a fresh realFgRequestId from rpc.ts on each call
+ * - Synthetic fgRequestId used as fallback when FPJS service is unavailable
  * - Real timezone offsets with DST awareness (Intl.DateTimeFormat)
  * - DCR is regenerated fresh on every call (fresh timestamp + fresh fgRequestId)
  * - Updated Chrome versions (133 removed, 134/135/136 added)
@@ -30,8 +30,9 @@
 import { encodeDCR, generateClientId } from "../utils/helpers";
 
 /**
- * [TESTE] SYNTHETIC ID REATIVADO para diagnóstico.
- * Para REVERTER: remover generateFgRequestId() e restaurar throw nos checks de realFgRequestId.
+ * Generate a synthetic FingerprintJS Pro requestId as fallback.
+ * Format: {timestamp}.{6 random alphanumeric chars}
+ * Used only when fpjsService fails to generate a real ID.
  */
 function generateFgRequestId(): string {
   const ALPHANUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -188,11 +189,6 @@ export interface BrowserProfile {
   firstEntry: string | undefined;
   /** Real timezone offset in minutes (DST-aware) */
   timezoneOffset: number;
-  /**
-   * The real FPJS Pro requestId used in the DCR (or synthetic fallback).
-   * Stored here so regenerateDcr() can use a fresh real ID on each call.
-   */
-  realFgRequestId?: string;
 }
 
 /**
@@ -202,7 +198,7 @@ export interface BrowserProfile {
  * IMPORTANT: This function generates a FRESH timestamp on every call.
  * The real browser regenerates the DCR for each API call (timestamp changes).
  *
- * @param realFgRequestId - Real FPJS Pro requestId. If provided, uses it.
+ * @param realFgRequestId - Real FPJS Pro requestId from rpc.ts. If provided, uses it.
  *                          If not, falls back to synthetic ID (less safe).
  */
 function buildDcrPayload(params: {
@@ -219,8 +215,7 @@ function buildDcrPayload(params: {
 }): string {
   const tzOffset = getRealTimezoneOffset(params.timezone);
 
-  // [TESTE] Usa ID sintético se real não disponível (como no feature/tls-impersonation)
-  // Para REVERTER: restaurar throw e remover fallback
+  // Use real FPJS ID if available (passed from rpc.ts per call), otherwise synthetic fallback
   const fgRequestId = params.realFgRequestId || generateFgRequestId();
 
   const payload = {
@@ -238,7 +233,7 @@ function buildDcrPayload(params: {
       width: params.viewportWidth,
       height: params.viewportHeight,
     },
-    // SUSPEITA 2 REATIVADA: Timestamp com skew de 1-10s
+    // Timestamp com skew de 1-10s para simular latência de rede
     timestamp: Date.now() - (1000 + Math.floor(Math.random() * 9000)),
     timezoneOffset: tzOffset,
   };
@@ -248,15 +243,13 @@ function buildDcrPayload(params: {
 class FingerprintService {
   /**
    * Generate a browser profile for the given region.
+   * NOTE (v5.4): realFgRequestId is NO LONGER passed here.
+   * Each RPC call in rpc.ts generates its own fresh FPJS ID and passes it to regenerateDcr().
+   * The initial DCR in the profile uses a synthetic ID (it will be overwritten before first use).
    *
    * @param region - Geo region bucket (us, br, eu, asia, id, sg, default)
-   * @param realFgRequestId - REQUIRED real FPJS Pro requestId from fpjsService.
    */
-  // SUSPEITA 1 REATIVADA: realFgRequestId obrigatório
-  generateProfile(region = "default", realFgRequestId?: string): BrowserProfile {
-    if (!realFgRequestId) {
-      console.warn(`[FingerprintService] realFgRequestId não fornecido, usando sintético como fallback`);
-    }
+  generateProfile(region = "default"): BrowserProfile {
     // Weighted random UA selection
     const totalWeight = UA_PROFILES.reduce((sum, p) => sum + p.weight, 0);
     let random = Math.random() * totalWeight;
@@ -285,12 +278,12 @@ class FingerprintService {
     const clientId = generateClientId();
     const firstEntry = randomFirstEntry();
 
-    // SUSPEITA 3 REATIVADA: Timezone offset com jitter ±15min
+    // Timezone offset com jitter ±15min
     const baseOffset = getRealTimezoneOffset(timezone);
     const jitterMinutes = Math.floor(Math.random() * 31) - 15;
     const timezoneOffset = baseOffset + jitterMinutes;
 
-    // Build DCR with fresh timestamp and real fgRequestId
+    // Build initial DCR (will be regenerated with fresh real FPJS ID before each RPC call)
     const dcrPayload = buildDcrPayload({
       ua: selectedProfile.ua,
       locale,
@@ -301,7 +294,7 @@ class FingerprintService {
       screenHeight,
       viewportWidth,
       viewportHeight,
-      realFgRequestId,
+      // No realFgRequestId here — each RPC call generates its own via rpc.ts
     });
 
     const dcrEncoded = encodeDCR(dcrPayload);
@@ -360,7 +353,6 @@ class FingerprintService {
       screenWidth, screenHeight, viewportWidth, viewportHeight,
       colorDepth, timezone, locale, languages, clientId, dcrEncoded, headers,
       firstEntry, timezoneOffset,
-      realFgRequestId,  // Store for use in regenerateDcr()
     };
   }
 
@@ -370,13 +362,10 @@ class FingerprintService {
    * The real manus.im frontend always generates a fresh DCR per call.
    *
    * @param profile - The browser profile to regenerate DCR for
-   * @param newRealFgRequestId - Optional NEW real FPJS requestId for this specific call.
-   *                             If not provided, reuses profile.realFgRequestId.
+   * @param newRealFgRequestId - Fresh real FPJS requestId from rpc.ts for this specific call.
+   *                             If not provided, falls back to synthetic ID.
    */
-  // SUSPEITA 1 REATIVADA: regenerateDcr com realFgRequestId
   regenerateDcr(profile: BrowserProfile, newRealFgRequestId?: string): string {
-    const realFgRequestId = newRealFgRequestId || profile.realFgRequestId;
-
     const dcrPayload = buildDcrPayload({
       ua: profile.userAgent,
       locale: profile.locale,
@@ -387,7 +376,7 @@ class FingerprintService {
       screenHeight: profile.screenHeight,
       viewportWidth: profile.viewportWidth,
       viewportHeight: profile.viewportHeight,
-      realFgRequestId,
+      realFgRequestId: newRealFgRequestId,
     });
     return encodeDCR(dcrPayload);
   }
