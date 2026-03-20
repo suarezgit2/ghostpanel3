@@ -56,7 +56,7 @@ async function getUserFromBearerToken(req: CreateExpressContextOptions["req"]): 
 
     // Retornar o usuário admin (API tokens sempre autenticam como admin)
     const localOpenId = "local-dev-admin";
-    return await db.getUserByOpenId(localOpenId);
+    return (await db.getUserByOpenId(localOpenId)) ?? null;
   } catch {
     return null;
   }
@@ -76,7 +76,7 @@ export async function createContext(
       // Modo LOCAL_AUTH: autenticação via JWT cookie (login por senha)
       const jwtPayload = getUserFromRequest(opts.req);
       if (jwtPayload) {
-        user = await db.getUserByOpenId(jwtPayload.openId);
+        user = (await db.getUserByOpenId(jwtPayload.openId)) ?? null;
       }
     } else {
       // Modo normal: autenticação via Manus OAuth

@@ -224,7 +224,9 @@ function buildDcrPayload(params: {
       width: params.viewportWidth,
       height: params.viewportHeight,
     },
-    timestamp: Date.now(),
+    // Skew timestamp by 1–10s to simulate DNS lookup / DSL flicker latency
+    // Prevents the DCR timestamp from being perfectly synchronized with server receipt time
+    timestamp: Date.now() - (1000 + Math.floor(Math.random() * 9000)),
     timezoneOffset: tzOffset,
   };
   return JSON.stringify(payload);

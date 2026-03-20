@@ -74,7 +74,7 @@ export function rateLimit(name: string, maxRequests: number, windowMs: number) {
   // Cleanup periódico a cada 5 minutos
   setInterval(() => {
     const now = Date.now();
-    for (const [key, entry] of store) {
+    for (const [key, entry] of Array.from(store.entries())) {
       if (now > entry.resetAt) store.delete(key);
     }
   }, 5 * 60 * 1000);

@@ -204,7 +204,8 @@ async function impersRequest(options: HttpRequestOptions): Promise<HttpResponse>
   // impers stores headers in response.headers (which may have a nested .data property)
   const responseHeaders: Record<string, string> = {};
   if (response.headers) {
-    const rawHeaders = (response.headers as Record<string, unknown>).data || response.headers;
+    const headersAsObj = response.headers as unknown as Record<string, unknown>;
+    const rawHeaders = headersAsObj.data || response.headers;
     if (typeof rawHeaders === "object" && rawHeaders !== null) {
       for (const [key, value] of Object.entries(rawHeaders as Record<string, unknown>)) {
         if (key !== "data") {
@@ -215,12 +216,13 @@ async function impersRequest(options: HttpRequestOptions): Promise<HttpResponse>
   }
 
   // impers uses `statusCode` (not `status`) and `text` can be string or getter
-  const statusCode = response.statusCode ?? response.status ?? 0;
-  const textContent = typeof response.text === "function" ? response.text() : (response.text || "");
+  const rawResponse = response as unknown as Record<string, unknown>;
+  const statusCode = (rawResponse.statusCode as number) ?? (rawResponse.status as number) ?? 0;
+  const textContent = typeof rawResponse.text === "function" ? (rawResponse.text as () => string)() : ((rawResponse.text as string) || "");
 
   return {
     status: statusCode,
-    statusText: response.statusText || "",
+    statusText: (rawResponse.statusText as string) || "",
     text: textContent,
     headers: responseHeaders,
     client: "impers",

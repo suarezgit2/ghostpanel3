@@ -138,6 +138,8 @@ export const keysRouter = router({
       return {
         valid: true,
         credits: key.credits,
+        label: key.label ?? null,
+        expiresAt: key.expiresAt ? key.expiresAt.toISOString() : null,
       };
     }),
 
