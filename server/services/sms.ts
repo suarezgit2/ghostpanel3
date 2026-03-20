@@ -184,8 +184,8 @@ class ProviderHealthTracker {
   // Cooldown progressivo para falhas de SMS: 60s, 120s, 300s, 600s (máx 10min)
   private static COOLDOWN_STEPS = [60_000, 120_000, 300_000, 600_000];
 
-  // Cooldown para target rejections: 300s, 600s, 1800s (mais agressivo para evitar bloqueios)
-  private static TARGET_REJECTION_COOLDOWN_STEPS = [300_000, 600_000, 1800_000];
+  // Cooldown para target rejections: 600s, 1800s, 3600s (muito mais agressivo para evitar bloqueios do Manus)
+  private static TARGET_REJECTION_COOLDOWN_STEPS = [600_000, 1800_000, 3600_000];
 
   // Threshold para blacklist automática
   private static BLACKLIST_CONSECUTIVE_FAILURES = 8;
@@ -193,7 +193,7 @@ class ProviderHealthTracker {
   private static BLACKLIST_MAX_SUCCESS_RATE = 0.15; // < 15% de sucesso
 
   // Threshold para cooldown por target rejection (reduzido para punir mais rápido)
-  private static TARGET_REJECTION_CONSECUTIVE_THRESHOLD = 3;
+  private static TARGET_REJECTION_CONSECUTIVE_THRESHOLD = 2; // Punir após apenas 2 rejeições consecutivas
 
   private getOrCreate(providerId: number): ProviderHealth {
     if (!this.health.has(providerId)) {

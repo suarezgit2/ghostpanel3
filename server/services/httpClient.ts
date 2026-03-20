@@ -75,9 +75,13 @@ async function ensureImpers(): Promise<boolean> {
       console.log("[httpClient] ✓ impers (curl-impersonate) loaded — TLS/HTTP2 impersonation ACTIVE");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[httpClient] ⚠ impers not available: ${msg}`);
-      console.warn("[httpClient] ⚠ Falling back to Node.js native fetch (TLS fingerprint will be Node.js, NOT Chrome)");
-      console.warn("[httpClient] ⚠ Set LIBCURL_IMPERSONATE_PATH env var to enable TLS impersonation");
+      console.error(`[httpClient] ❌ CRÍTICO: impers (curl-impersonate) não disponível: ${msg}`);
+      console.error("[httpClient] ❌ O sistema não pode operar com segurança sem TLS impersonation.");
+      console.error("[httpClient] ❌ Fallback para fetch nativo foi DESATIVADO para evitar banimentos em massa.");
+      console.error("[httpClient] ❌ Instale o curl-impersonate ou defina LIBCURL_IMPERSONATE_PATH.");
+      
+      // Em vez de falhar silenciosamente, forçamos o erro para que o admin saiba
+      // que o ambiente está mal configurado.
       impersAvailable = false;
     }
   })();
@@ -127,7 +131,13 @@ export async function httpRequest(options: HttpRequestOptions): Promise<HttpResp
   if (available && impers) {
     return impersRequest(options);
   } else {
-    return nativeFetchRequest(options);
+    // Não permitimos mais fallback silencioso para fetch nativo em produção
+    // pois isso causa banimentos imediatos por mismatch de TLS fingerprint.
+    throw new Error(
+      "CRÍTICO: curl-impersonate não está disponível. " +
+      "O sistema se recusa a usar fetch nativo para evitar detecção e banimento. " +
+      "Verifique a instalação do libcurl-impersonate."
+    );
   }
 }
 

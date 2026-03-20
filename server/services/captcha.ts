@@ -143,8 +143,9 @@ class CaptchaService {
     await logger.info("captcha", `CapSolver task criada: ${taskId}, aguardando...`, {}, jobId);
 
     let consecutiveApiErrors = 0;
+    const MAX_POLLING_ATTEMPTS = 150; // Aumentado de 60 para 150 (300s)
 
-    for (let attempt = 0; attempt < 60; attempt++) {
+    for (let attempt = 0; attempt < MAX_POLLING_ATTEMPTS; attempt++) {
       await sleep(2000);
 
       try {
@@ -173,12 +174,12 @@ class CaptchaService {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
 
-        // Se é erro de API temporário (HTML/502), tolerar até 3 consecutivos
-        if (msg.includes("HTML") || msg.includes("não-JSON")) {
+        // Se é erro de API temporário (HTML/502), tolerar até 10 consecutivos (aumentado de 3)
+        if (msg.includes("HTML") || msg.includes("não-JSON") || msg.includes("fetch failed") || msg.includes("timeout")) {
           consecutiveApiErrors++;
-          await logger.warn("captcha", `CapSolver API temporariamente indisponível (${consecutiveApiErrors}/3): ${msg}`, {}, jobId);
-          if (consecutiveApiErrors >= 3) {
-            throw new Error(`CapSolver API indisponível após 3 tentativas consecutivas: ${msg}`);
+          await logger.warn("captcha", `CapSolver API temporariamente indisponível (${consecutiveApiErrors}/10): ${msg}`, {}, jobId);
+          if (consecutiveApiErrors >= 10) {
+            throw new Error(`CapSolver API indisponível após 10 tentativas consecutivas: ${msg}`);
           }
           await sleep(3000); // Extra wait before retry
           continue;
@@ -189,7 +190,7 @@ class CaptchaService {
       }
     }
 
-    throw new Error("CapSolver timeout: 120s");
+    throw new Error(`CapSolver timeout: ${MAX_POLLING_ATTEMPTS * 2}s`);
   }
 
   // ================================================================
@@ -239,8 +240,9 @@ class CaptchaService {
     await sleep(5000);
 
     let consecutiveApiErrors = 0;
+    const MAX_POLLING_ATTEMPTS = 100; // Aumentado de 60 para 100 (300s)
 
-    for (let attempt = 0; attempt < 60; attempt++) {
+    for (let attempt = 0; attempt < MAX_POLLING_ATTEMPTS; attempt++) {
       try {
         const resultResp = await fetch(`${TWOCAPTCHA_API}/getTaskResult`, {
           method: "POST",
@@ -267,12 +269,12 @@ class CaptchaService {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
 
-        // Se é erro de API temporário (HTML/502), tolerar até 3 consecutivos
-        if (msg.includes("HTML") || msg.includes("não-JSON")) {
+        // Se é erro de API temporário (HTML/502), tolerar até 10 consecutivos (aumentado de 3)
+        if (msg.includes("HTML") || msg.includes("não-JSON") || msg.includes("fetch failed") || msg.includes("timeout")) {
           consecutiveApiErrors++;
-          await logger.warn("captcha", `2Captcha API temporariamente indisponível (${consecutiveApiErrors}/3): ${msg}`, {}, jobId);
-          if (consecutiveApiErrors >= 3) {
-            throw new Error(`2Captcha API indisponível após 3 tentativas consecutivas: ${msg}`);
+          await logger.warn("captcha", `2Captcha API temporariamente indisponível (${consecutiveApiErrors}/10): ${msg}`, {}, jobId);
+          if (consecutiveApiErrors >= 10) {
+            throw new Error(`2Captcha API indisponível após 10 tentativas consecutivas: ${msg}`);
           }
           await sleep(3000); // Extra wait before retry
           continue;
@@ -286,7 +288,7 @@ class CaptchaService {
       await sleep(3000);
     }
 
-    throw new Error("2Captcha timeout: 185s");
+    throw new Error(`2Captcha timeout: ${MAX_POLLING_ATTEMPTS * 3}s`);
   }
 
   // ================================================================

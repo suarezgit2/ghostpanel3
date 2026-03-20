@@ -153,7 +153,9 @@ function formatPhoneForManus(phoneNumber: string, countryPrefix: string): string
  * This prevents IP mismatch detection (Turnstile token bound to solver IP ≠ request IP).
  */
 async function solveTurnstileWithRetry(proxy: ProxyInfo | null, jobId?: number): Promise<string> {
-  let retries = 0;
+  let attempt = 1;
+  const MAX_RETRIES = 10; // Aumentado de 3 para 10
+  
   while (true) {
     try {
       const token = await captchaService.solveTurnstile(
@@ -164,11 +166,18 @@ async function solveTurnstileWithRetry(proxy: ProxyInfo | null, jobId?: number):
       );
       return token;
     } catch (err) {
-      retries++;
-      if (retries >= MANUS_CONFIG.maxRetries) {
-        throw new Error(`Turnstile falhou após ${retries} tentativas: ${err}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      
+      if (attempt >= MAX_RETRIES) {
+        throw new Error(`Turnstile falhou após ${MAX_RETRIES} tentativas: ${msg}`);
       }
-      await logger.warn("turnstile", `Tentativa ${retries} falhou, retentando...`, {}, jobId);
+      
+      // Backoff exponencial: 2s, 4s, 8s, 16s...
+      const backoff = Math.min(2000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 30000);
+      await logger.warn("turnstile", `Tentativa ${attempt}/${MAX_RETRIES} falhou: ${msg}. Retentando em ${Math.round(backoff/1000)}s...`, {}, jobId);
+      
+      await sleep(backoff);
+      attempt++;
     }
   }
 }
@@ -223,34 +232,46 @@ export class ManusProvider {
 
       // STEP 0: Proxy health check — verifica conectividade antes de gastar recursos
       // Testa se o proxy consegue alcançar manus.im (timeout: 8s).
-      // Se falhar, troca o proxy e retesta (até MAX_PROXY_RETRIES vezes).
-      // Isso evita desperdiçar captcha, email e números SMS em proxies mortos.
-      for (let proxyAttempt = 1; proxyAttempt <= MAX_PROXY_RETRIES; proxyAttempt++) {
+      // Se falhar, troca o proxy e retesta. Agora com retry infinito (com limite de tempo/tentativas alto)
+      // para evitar falhar o job por instabilidade temporária da rede.
+      const MAX_PROXY_ATTEMPTS = 15;
+      let proxyOk = false;
+      
+      for (let proxyAttempt = 1; proxyAttempt <= MAX_PROXY_ATTEMPTS; proxyAttempt++) {
         const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : "sem proxy";
         await logger.info("step_0_proxy",
-          `Verificando proxy ${proxyLabel} (tentativa ${proxyAttempt}/${MAX_PROXY_RETRIES})...`,
+          `Verificando proxy ${proxyLabel} (tentativa ${proxyAttempt}/${MAX_PROXY_ATTEMPTS})...`,
           {}, jobId
         );
-        const proxyOk = await checkProxyHealth(proxy, jobId);
+        
+        proxyOk = await checkProxyHealth(proxy, jobId);
         if (proxyOk) {
           await logger.info("step_0_proxy", `Proxy ${proxyLabel} OK — prosseguindo`, {}, jobId);
           break;
         }
+        
         // Proxy morto: tenta obter um novo
         await logger.warn("step_0_proxy",
-          `Proxy ${proxyLabel} inacessível. ${proxyAttempt < MAX_PROXY_RETRIES ? "Trocando proxy..." : "Nenhum proxy funcional disponível."}`,
+          `Proxy ${proxyLabel} inacessível. Trocando proxy...`,
           {}, jobId
         );
-        if (proxyAttempt === MAX_PROXY_RETRIES) {
-          return { email, password, status: "failed", error: "Proxy inacessível após 3 tentativas", metadata: {} };
+        
+        if (proxyAttempt === MAX_PROXY_ATTEMPTS) {
+          return { email, password, status: "failed", error: `Proxy inacessível após ${MAX_PROXY_ATTEMPTS} tentativas`, metadata: {} };
         }
+        
         try {
+          // Backoff leve antes de pedir novo proxy para não martelar o banco
+          await sleep(2000);
           proxy = await proxyService.getProxy(jobId);
         } catch (proxyErr) {
-          return { email, password, status: "failed",
-            error: `Não foi possível obter proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}`,
-            metadata: {} };
+          await logger.warn("step_0_proxy", `Falha ao obter novo proxy: ${proxyErr}. Retentando...`, {}, jobId);
+          await sleep(5000);
         }
+      }
+      
+      if (!proxyOk) {
+        return { email, password, status: "failed", error: "Falha crítica na resolução de proxy", metadata: {} };
       }
 
       // STEP 1: Solve Cloudflare Turnstile (WITH proxy — same IP as API calls)
@@ -271,7 +292,7 @@ export class ManusProvider {
       let rpcOptions = { fingerprint, proxy, authCommandCmd };
       let step2Platforms: unknown[] = [];
       let tempToken = "";
-      const MAX_STEP2_RETRIES = 2;
+      const MAX_STEP2_RETRIES = 5; // Aumentado de 2 para 5
 
       for (let step2Attempt = 1; step2Attempt <= MAX_STEP2_RETRIES; step2Attempt++) {
         try {
@@ -281,23 +302,23 @@ export class ManusProvider {
           break; // success
         } catch (step2Err) {
           const step2ErrMsg = step2Err instanceof Error ? step2Err.message : String(step2Err);
-          const isNetworkErr =
-            step2ErrMsg.includes("Transfer failed with code 28") ||
-            step2ErrMsg.includes("Transfer failed with code 56") ||
-            step2ErrMsg.includes("Transfer failed with code 7") ||
-            step2ErrMsg.includes("ECONNRESET") ||
-            step2ErrMsg.includes("ETIMEDOUT");
-
-          if (isNetworkErr && step2Attempt < MAX_STEP2_RETRIES) {
+          
+          // O rpcCall agora já faz retry interno para erros transitórios.
+          // Se chegou aqui, ou é erro permanente ou esgotou os retries do RPC.
+          // Vamos tentar trocar o proxy como última esperança.
+          
+          if (step2Attempt < MAX_STEP2_RETRIES) {
             await logger.warn("step_2_check_email",
-              `Erro de rede na tentativa ${step2Attempt} (${step2ErrMsg}). Trocando proxy e retentando...`,
+              `Falha na tentativa ${step2Attempt}/${MAX_STEP2_RETRIES} (${step2ErrMsg}). Trocando proxy e retentando...`,
               {}, jobId
             );
-            // Rotate proxy: get a fresh one from the pool
+            
             try {
               const newProxy = await proxyService.getProxy(jobId);
               proxy = newProxy;
               rpcOptions = { fingerprint, proxy, authCommandCmd };
+              // Pequeno backoff antes de tentar de novo
+              await sleep(3000);
             } catch (proxyErr) {
               await logger.warn("step_2_check_email",
                 `Não foi possível obter novo proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}. Continuando sem proxy.`,
@@ -305,7 +326,7 @@ export class ManusProvider {
               );
             }
           } else {
-            throw step2Err; // Re-throw on non-network error or last attempt
+            throw step2Err; // Re-throw on last attempt
           }
         }
       }
@@ -332,24 +353,38 @@ export class ManusProvider {
       await logger.info("step_4_read_email", "Aguardando email de verificação...", { email }, jobId);
 
       let emailCode: string;
-      let retries = 0;
+      let attempt = 1;
+      const MAX_EMAIL_RETRIES = 10; // Aumentado de 3 para 10
 
       while (true) {
         try {
+          // Aumenta o timeout a cada tentativa (90s -> 120s -> 150s...)
+          const dynamicTimeout = MANUS_CONFIG.emailTimeout + (attempt - 1) * 30000;
+          
           emailCode = await emailService.waitForVerificationCode(
-            email, MANUS_CONFIG.emailFromDomain, MANUS_CONFIG.emailTimeout, jobId
+            email, MANUS_CONFIG.emailFromDomain, dynamicTimeout, jobId
           );
           break;
         } catch (err) {
-          retries++;
-          if (retries >= MANUS_CONFIG.maxRetries) {
-            throw new Error(`Email não recebido após ${retries} tentativas: ${err}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          
+          if (attempt >= MAX_EMAIL_RETRIES) {
+            throw new Error(`Email não recebido após ${MAX_EMAIL_RETRIES} tentativas: ${msg}`);
           }
-          await logger.warn("step_4_read_email", `Tentativa ${retries} falhou, reenviando...`, {}, jobId);
-          const newTurnstileToken = await solveTurnstileWithRetry(proxy, jobId);
-          const { tempToken: newTempToken } = await rpc.getUserPlatforms(email, newTurnstileToken, rpcOptions);
-          await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, newTempToken, rpcOptions);
-          await STEP_DELAYS.afterEmailCodeSent();
+          
+          await logger.warn("step_4_read_email", `Tentativa ${attempt}/${MAX_EMAIL_RETRIES} falhou (${msg}). Reenviando código...`, {}, jobId);
+          
+          try {
+            const newTurnstileToken = await solveTurnstileWithRetry(proxy, jobId);
+            const { tempToken: newTempToken } = await rpc.getUserPlatforms(email, newTurnstileToken, rpcOptions);
+            await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, newTempToken, rpcOptions);
+            await STEP_DELAYS.afterEmailCodeSent();
+          } catch (resendErr) {
+            await logger.warn("step_4_read_email", `Falha ao reenviar código: ${resendErr}. Retentando no próximo ciclo...`, {}, jobId);
+            await sleep(5000);
+          }
+          
+          attempt++;
         }
       }
 

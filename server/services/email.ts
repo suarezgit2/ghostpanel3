@@ -218,7 +218,12 @@ class EmailService {
     const pollInterval = 3000;
     let consecutiveErrors = 0;
 
-    while (Date.now() - startTime < timeoutMs) {
+    // Aumentamos o limite de tempo internamente para ser mais resiliente
+    // O timeoutMs passado pelo caller é respeitado, mas adicionamos uma margem
+    // para compensar atrasos na rede ou no Zoho.
+    const effectiveTimeoutMs = timeoutMs + 30000; // +30s de margem de tolerância
+    
+    while (Date.now() - startTime < effectiveTimeoutMs) {
       try {
         const emails = await this.getRecentEmails(20, jobId);
         consecutiveErrors = 0; // Reset on success
@@ -272,7 +277,7 @@ class EmailService {
       await sleep(pollInterval);
     }
 
-    throw new Error(`Timeout: email não recebido em ${timeoutMs / 1000}s`);
+    throw new Error(`Timeout: email não recebido em ${effectiveTimeoutMs / 1000}s`);
   }
 }
 
