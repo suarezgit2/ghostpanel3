@@ -14,7 +14,7 @@
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { jobs, accounts, providers, jobFolders } from "../../drizzle/schema";
-import { proxyService } from "../services/proxy";
+import { proxyService, getProxyRegion } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
 import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode } from "../utils/helpers";
 import { getSetting } from "../utils/settings";
@@ -301,7 +301,9 @@ class Orchestrator {
 
       try {
         const proxy = await proxyService.getProxy(jobId);
-        const fingerprint = fingerprintService.generateProfile(region);
+        // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
+        const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
+        const fingerprint = fingerprintService.generateProfile(proxyRegion);
 
         await logger.info("orchestrator",
           `Tentativa ${totalAttempts}/${maxAttempts} (sucesso: ${successCount}/${options.quantity}): ${email}`,

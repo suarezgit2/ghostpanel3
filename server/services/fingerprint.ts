@@ -115,15 +115,19 @@ const TIMEZONES: Record<string, string[]> = {
   us: ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
   br: ["America/Sao_Paulo", "America/Fortaleza", "America/Manaus"],
   eu: ["Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Madrid"],
-  asia: ["Asia/Tokyo", "Asia/Shanghai", "Asia/Singapore", "Asia/Kolkata"],
+  asia: ["Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata"],
+  id: ["Asia/Jakarta"],
+  sg: ["Asia/Singapore"],
   default: ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "America/Sao_Paulo"],
 };
 
 const LOCALES: Record<string, string[]> = {
   us: ["en-US"],
-  br: ["pt-BR", "en-US"],
+  br: ["pt-BR"],
   eu: ["en-GB", "de-DE", "fr-FR", "es-ES"],
   asia: ["ja-JP", "zh-CN", "en-SG"],
+  id: ["en-ID", "id-ID"],
+  sg: ["en-SG"],
   default: ["en-US", "pt-BR", "en-GB"],
 };
 
@@ -256,8 +260,12 @@ class FingerprintService {
     const clientId = generateClientId();
     const firstEntry = randomFirstEntry();
 
-    // Get DST-aware timezone offset
-    const timezoneOffset = getRealTimezoneOffset(timezone);
+    // Get DST-aware timezone offset with ±15min residential jitter
+    // Real users may have slight clock drift or be near a timezone boundary.
+    // This prevents the offset from being a static fingerprint.
+    const baseOffset = getRealTimezoneOffset(timezone);
+    const jitterMinutes = Math.floor(Math.random() * 31) - 15; // -15 to +15
+    const timezoneOffset = baseOffset + jitterMinutes;
 
     // Build DCR with fresh timestamp and fgRequestId
     const dcrPayload = buildDcrPayload({

@@ -617,3 +617,66 @@ class ProxyService {
 }
 
 export const proxyService = new ProxyService();
+
+// ============================================================
+// Geo-coherent fingerprint region lookup
+// ============================================================
+
+export type ProxyRegion = "us" | "br" | "id" | "sg" | "eu" | "asia";
+
+// Country code → region bucket mapping
+const COUNTRY_TO_REGION: Record<string, ProxyRegion> = {
+  // Indonesia
+  ID: "id",
+  // Brazil
+  BR: "br",
+  // USA / Canada
+  US: "us", CA: "us",
+  // Singapore / Malaysia
+  SG: "sg", MY: "sg",
+  // Europe
+  DE: "eu", FR: "eu", NL: "eu", GB: "eu", ES: "eu", IT: "eu",
+  PL: "eu", SE: "eu", NO: "eu", FI: "eu", DK: "eu", CH: "eu",
+  AT: "eu", BE: "eu", PT: "eu", CZ: "eu", RO: "eu", HU: "eu",
+  // Asia
+  JP: "asia", CN: "asia", KR: "asia", IN: "asia", TH: "asia",
+  VN: "asia", PH: "asia", TW: "asia", HK: "asia",
+};
+
+// 24h in-memory cache: ip → { region, expiresAt }
+const geoCache = new Map<string, { region: ProxyRegion; expiresAt: number }>();
+const GEO_CACHE_TTL_MS = 24 * 60 * 60_000;
+
+/**
+ * Resolve the geographic region of a proxy IP via ipinfo.io.
+ * Uses a 24h in-memory cache to avoid repeated lookups.
+ * Falls back to "us" if lookup fails or country is unknown.
+ *
+ * The region is used to generate a geo-coherent fingerprint:
+ * locale, timezone, and tzOffset will match the proxy's country.
+ */
+export async function getProxyRegion(host: string): Promise<ProxyRegion> {
+  const cached = geoCache.get(host);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.region;
+  }
+
+  try {
+    const res = await fetch(`https://ipinfo.io/${host}/json`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) {
+      const data = await res.json() as { country?: string };
+      const country = (data.country || "").toUpperCase();
+      const region: ProxyRegion = COUNTRY_TO_REGION[country] ?? "us";
+      geoCache.set(host, { region, expiresAt: Date.now() + GEO_CACHE_TTL_MS });
+      return region;
+    }
+  } catch {
+    // Lookup failed — use fallback silently
+  }
+
+  // Fallback: cache as "us" for 1h to avoid hammering on failures
+  geoCache.set(host, { region: "us", expiresAt: Date.now() + 60 * 60_000 });
+  return "us";
+}

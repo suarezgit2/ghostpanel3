@@ -30,7 +30,7 @@ import { smsService } from "../../services/sms";
 import { httpRequest } from "../../services/httpClient";
 import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
 import type { BrowserProfile } from "../../services/fingerprint";
-import { proxyService } from "../../services/proxy";
+import { proxyService, getProxyRegion } from "../../services/proxy";
 import type { ProxyInfo } from "../../services/proxy";
 
 // Fixed Manus configuration (SMS settings come from DB via SmsService)
