@@ -307,7 +307,8 @@ class ProviderHealthTracker {
     
     // NÃO aplicar cooldown para rejeições do alvo.
     // O provedor continua disponível para próximas tentativas.
-    // Monitorar via logs/dashboard, mas não penalizar.
+    // Se estava em cooldown por target rejections anteriores, remove agora.
+    h.cooldownUntil = 0;
   }
 
   /**
