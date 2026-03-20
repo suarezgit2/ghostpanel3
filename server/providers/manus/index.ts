@@ -29,6 +29,7 @@ import { emailService } from "../../services/email";
 import { smsService } from "../../services/sms";
 import { logger, STEP_DELAYS, sleep, randomDelay, extractInviteCode } from "../../utils/helpers";
 import type { BrowserProfile } from "../../services/fingerprint";
+import { proxyService } from "../../services/proxy";
 import type { ProxyInfo } from "../../services/proxy";
 
 // Fixed Manus configuration (SMS settings come from DB via SmsService)
@@ -176,7 +177,8 @@ export class ManusProvider {
   name = "Manus.im";
 
   async createAccount(options: CreateAccountOptions): Promise<CreateAccountResult> {
-    const { email, password, fingerprint, proxy, jobId } = options;
+    const { email, password, fingerprint, jobId } = options;
+    let proxy = options.proxy;
 
     try {
       // Build authCommandCmd from fingerprint (locale, timezone, tzOffset DST-aware, firstEntry randomized, fbp)
@@ -193,10 +195,53 @@ export class ManusProvider {
       await STEP_DELAYS.afterTurnstile();
 
       // STEP 2: Check if email is new → returns tempToken
+      // Retry on proxy/network errors (code 28/56) without re-solving Turnstile.
+      // The Turnstile token is valid for ~2 minutes, so we can reuse it on network retry.
       await logger.info("step_2_check_email", "Verificando se email é novo...", { email }, jobId);
 
-      const rpcOptions = { fingerprint, proxy, authCommandCmd };
-      const { platforms, tempToken } = await rpc.getUserPlatforms(email, turnstileToken, rpcOptions);
+      let rpcOptions = { fingerprint, proxy, authCommandCmd };
+      let step2Platforms: unknown[] = [];
+      let tempToken = "";
+      const MAX_STEP2_RETRIES = 2;
+
+      for (let step2Attempt = 1; step2Attempt <= MAX_STEP2_RETRIES; step2Attempt++) {
+        try {
+          const result = await rpc.getUserPlatforms(email, turnstileToken, rpcOptions);
+          step2Platforms = result.platforms || [];
+          tempToken = result.tempToken || "";
+          break; // success
+        } catch (step2Err) {
+          const step2ErrMsg = step2Err instanceof Error ? step2Err.message : String(step2Err);
+          const isNetworkErr =
+            step2ErrMsg.includes("Transfer failed with code 28") ||
+            step2ErrMsg.includes("Transfer failed with code 56") ||
+            step2ErrMsg.includes("Transfer failed with code 7") ||
+            step2ErrMsg.includes("ECONNRESET") ||
+            step2ErrMsg.includes("ETIMEDOUT");
+
+          if (isNetworkErr && step2Attempt < MAX_STEP2_RETRIES) {
+            await logger.warn("step_2_check_email",
+              `Erro de rede na tentativa ${step2Attempt} (${step2ErrMsg}). Trocando proxy e retentando...`,
+              {}, jobId
+            );
+            // Rotate proxy: get a fresh one from the pool
+            try {
+              const newProxy = await proxyService.getProxy(jobId);
+              proxy = newProxy;
+              rpcOptions = { fingerprint, proxy, authCommandCmd };
+            } catch (proxyErr) {
+              await logger.warn("step_2_check_email",
+                `Não foi possível obter novo proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}. Continuando sem proxy.`,
+                {}, jobId
+              );
+            }
+          } else {
+            throw step2Err; // Re-throw on non-network error or last attempt
+          }
+        }
+      }
+
+      const platforms = step2Platforms;
 
       if (platforms && platforms.length > 0) {
         await logger.error("step_2_check_email", "Email já cadastrado!", { platforms }, jobId);

@@ -90,7 +90,7 @@ async function rpcCall(
     body: JSON.stringify(payload),
     proxy: options.proxy,
     userAgent: options.fingerprint.userAgent,
-    timeout: 30,
+    timeout: 45,
   });
 
   const text = response.text;

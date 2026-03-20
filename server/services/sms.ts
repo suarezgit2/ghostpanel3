@@ -304,21 +304,22 @@ class ProviderHealthTracker {
     if (!h || (h.successes + h.failures) === 0) return 50;
 
     const total = h.successes + h.failures;
-    const successRate = h.successes / total;
+    const successRate = h.successes / total; // 0.0 - 1.0
     const avgResponseTime = h.successes > 0 ? h.totalResponseTimeMs / h.successes : 120_000;
 
-    // Score de velocidade: 0-100 (120s+ = 0, 10s = 100)
-    const speedScore = Math.max(0, Math.min(100, (120_000 - avgResponseTime) / 1100));
+    // Score de velocidade: 0-1 (120s+ = 0, 10s = 1)
+    const speedScore = Math.max(0, Math.min(1, (120_000 - avgResponseTime) / 110_000));
 
-    // Score de recência: bonus se teve sucesso recente (últimos 10min)
-    const recencyScore = h.lastSuccessAt > 0 && (Date.now() - h.lastSuccessAt) < 600_000 ? 100 : 0;
+    // Score de recência: 0 ou 1 (sucesso nos últimos 10min = 1)
+    const recencyScore = h.lastSuccessAt > 0 && (Date.now() - h.lastSuccessAt) < 600_000 ? 1 : 0;
 
-    // Penalidade por target rejections: reduz score se muitos números foram rejeitados pelo alvo
+    // Penalidade por target rejections: 0.0 - 1.0
     const totalAttempts = total + h.targetRejections;
     const targetRejectionRate = totalAttempts > 0 ? h.targetRejections / totalAttempts : 0;
-    const targetPenalty = targetRejectionRate * 100; // 0-100
 
-    return Math.max(0, (successRate * 50) + (speedScore * 0.2) + (recencyScore * 0.2) - (targetPenalty * 0.1));
+    // Pesos: sucesso=60%, velocidade=20%, recência=20%, penalidade target=-20% máx
+    const raw = (successRate * 0.60) + (speedScore * 0.20) + (recencyScore * 0.20) - (targetRejectionRate * 0.20);
+    return Math.round(Math.max(0, Math.min(1, raw)) * 100);
   }
 
   /**

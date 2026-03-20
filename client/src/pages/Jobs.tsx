@@ -219,7 +219,7 @@ function FolderRow({
   deletePending: boolean;
   deleteFolderPending: boolean;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const folderStatus = getFolderStatus(folder.jobs);
   const totalAccounts = folder.jobs.reduce((s, j) => s + j.totalAccounts, 0);
   const completedAccounts = folder.jobs.reduce((s, j) => s + j.completedAccounts, 0);
