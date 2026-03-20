@@ -641,9 +641,12 @@ class SmsService {
     if (countriesRaw && countriesRaw.trim() !== "") {
       try {
         countries = JSON.parse(countriesRaw) as CountryConfig[];
-      } catch {
-        console.warn("[SmsService] sms_countries JSON inválido, ignorando");
+        console.log("[SmsService] Países carregados do banco:", countries);
+      } catch (err) {
+        console.warn("[SmsService] sms_countries JSON inválido, ignorando:", err, "Raw:", countriesRaw);
       }
+    } else {
+      console.log("[SmsService] Nenhum país configurado no banco (sms_countries vazio ou não existe)");
     }
 
     this.config = {
@@ -708,8 +711,11 @@ class SmsService {
    * Salva a lista de países no banco e recarrega a config.
    */
   async saveCountries(countries: CountryConfig[]): Promise<void> {
-    await setSetting("sms_countries", JSON.stringify(countries), "Configuração multi-país para SMS");
+    const json = JSON.stringify(countries);
+    await logger.info("sms", `Salvando ${countries.length} país(es): ${json}`, {}, undefined);
+    await setSetting("sms_countries", json, "Configuração multi-país para SMS");
     await this.reloadConfig();
+    await logger.info("sms", `Países salvos e config recarregada`, {}, undefined);
   }
 
   // ============================================================
