@@ -256,16 +256,33 @@ class ProxyService {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
 
+    // Obter a blacklist de países bloqueados (ex: "ID,BR,US")
+    const blockedCountriesStr = await getSetting("proxy_blocked_countries") || "";
+    const blockedCountries = blockedCountriesStr
+      .split(",")
+      .map(c => c.trim().toUpperCase())
+      .filter(c => c.length > 0);
+
     // Only get proxies that are enabled AND have never been used
+    // AND are not from blocked countries
+    let conditions = and(
+      eq(proxies.enabled, true),
+      isNull(proxies.lastUsedAt)
+    );
+
+    if (blockedCountries.length > 0) {
+      // Drizzle não tem um "notInArray" nativo simples, então construímos a query com sql
+      const blockedList = blockedCountries.map(c => `'${c}'`).join(",");
+      conditions = and(
+        conditions,
+        sql`${proxies.country} IS NULL OR ${proxies.country} NOT IN (${sql.raw(blockedList)})`
+      );
+    }
+
     const result = await db
       .select()
       .from(proxies)
-      .where(
-        and(
-          eq(proxies.enabled, true),
-          isNull(proxies.lastUsedAt)
-        )
-      )
+      .where(conditions)
       .orderBy(asc(proxies.failCount), asc(proxies.id))
       .limit(1);
 

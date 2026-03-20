@@ -284,6 +284,7 @@ export const settingsRouter = router({
       { key: "sms_auto_discover", value: "false", description: "Auto-descobrir provedores via getPricesV3" },
       { key: "invite_code", value: "", description: "Código de convite para novas contas (+500 créditos)" },
       { key: "proxy_auto_replace", value: "false", description: "Substituir proxies automaticamente via Webshare quando todos forem usados" },
+      { key: "proxy_blocked_countries", value: "", description: "Lista de países bloqueados para proxy (ex: ID,BR,US)" },
     ];
 
     for (const s of defaultSettings) {
