@@ -115,9 +115,10 @@ async function rpcCall(
         const details = data.details as Array<{ debug?: { message?: string } }> | undefined;
         const debugMsg = details?.[0]?.debug?.message || (data.message as string) || "";
         
-        // Erros permanentes (não adianta tentar de novo)
-        // NOTA: permission_denied foi removido porque "user is blocked" é transitório (pode ser resolvido trocando proxy/fingerprint)
-        const permanentErrors = ["invalid_argument", "unauthenticated", "not_found", "already_exists"];
+        // Erros permanentes (não adianta tentar de novo com o mesmo proxy/fingerprint)
+        // permission_denied ("user is blocked") deve falhar rápido para que o SMS Service
+        // tente o próximo provedor/número em vez de retentar 5x com o mesmo proxy
+        const permanentErrors = ["invalid_argument", "unauthenticated", "not_found", "already_exists", "permission_denied"];
         if (permanentErrors.includes(data.code as string)) {
           const err = new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
           err.name = "PermanentRpcError";
