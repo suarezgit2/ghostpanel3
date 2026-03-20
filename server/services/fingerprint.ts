@@ -30,9 +30,20 @@
 import { encodeDCR, generateClientId } from "../utils/helpers";
 
 /**
- * SYNTHETIC FALLBACK REMOVED.
- * The system MUST use real FPJS Pro requestIds to avoid detection.
+ * [TESTE] SYNTHETIC ID REATIVADO para diagnóstico.
+ * Para REVERTER: remover generateFgRequestId() e restaurar throw nos checks de realFgRequestId.
  */
+function generateFgRequestId(): string {
+  const ALPHANUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  // Simulate page loaded 20-40 seconds ago
+  const pageLoadDelay = 20000 + Math.floor(Math.random() * 20000);
+  const ts = Date.now() - pageLoadDelay;
+  let rand = '';
+  for (let i = 0; i < 6; i++) {
+    rand += ALPHANUM[Math.floor(Math.random() * ALPHANUM.length)];
+  }
+  return `${ts}.${rand}`;
+}
 
 /**
  * Get the REAL timezone offset in minutes for a given IANA timezone.
@@ -208,11 +219,9 @@ function buildDcrPayload(params: {
 }): string {
   const tzOffset = getRealTimezoneOffset(params.timezone);
 
-  // MUST use real FPJS requestId. Synthetic fallback is strictly forbidden.
-  if (!params.realFgRequestId) {
-    throw new Error("CRÍTICO: realFgRequestId é obrigatório para gerar o DCR. Fallback sintético desativado.");
-  }
-  const fgRequestId = params.realFgRequestId;
+  // [TESTE] Usa ID sintético se real não disponível (como no feature/tls-impersonation)
+  // Para REVERTER: restaurar throw e remover fallback
+  const fgRequestId = params.realFgRequestId || generateFgRequestId();
 
   const payload = {
     ua: params.ua,
@@ -229,9 +238,9 @@ function buildDcrPayload(params: {
       width: params.viewportWidth,
       height: params.viewportHeight,
     },
-    // Skew timestamp by 1–10s to simulate DNS lookup / DSL flicker latency
-    // Prevents the DCR timestamp from being perfectly synchronized with server receipt time
-    timestamp: Date.now() - (1000 + Math.floor(Math.random() * 9000)),
+    // [TESTE] Timestamp direto sem skew (como no feature/tls-impersonation)
+    // Para REVERTER: restaurar Date.now() - (1000 + Math.floor(Math.random() * 9000))
+    timestamp: Date.now(),
     timezoneOffset: tzOffset,
   };
   return JSON.stringify(payload);
@@ -244,10 +253,9 @@ class FingerprintService {
    * @param region - Geo region bucket (us, br, eu, asia, id, sg, default)
    * @param realFgRequestId - REQUIRED real FPJS Pro requestId from fpjsService.
    */
-  generateProfile(region = "default", realFgRequestId: string): BrowserProfile {
-    if (!realFgRequestId) {
-      throw new Error("CRÍTICO: realFgRequestId é obrigatório para gerar o perfil. Fallback sintético desativado.");
-    }
+  // [TESTE] realFgRequestId agora é opcional (como no feature/tls-impersonation)
+  // Para REVERTER: tornar realFgRequestId obrigatório e restaurar throw
+  generateProfile(region = "default", realFgRequestId?: string): BrowserProfile {
     // Weighted random UA selection
     const totalWeight = UA_PROFILES.reduce((sum, p) => sum + p.weight, 0);
     let random = Math.random() * totalWeight;
@@ -276,12 +284,9 @@ class FingerprintService {
     const clientId = generateClientId();
     const firstEntry = randomFirstEntry();
 
-    // Get DST-aware timezone offset with ±15min residential jitter
-    // Real users may have slight clock drift or be near a timezone boundary.
-    // This prevents the offset from being a static fingerprint.
-    const baseOffset = getRealTimezoneOffset(timezone);
-    const jitterMinutes = Math.floor(Math.random() * 31) - 15; // -15 to +15
-    const timezoneOffset = baseOffset + jitterMinutes;
+    // [TESTE] Timezone offset sem jitter (como no feature/tls-impersonation)
+    // Para REVERTER: restaurar jitter de ±15min
+    const timezoneOffset = getRealTimezoneOffset(timezone);
 
     // Build DCR with fresh timestamp and real fgRequestId
     const dcrPayload = buildDcrPayload({
@@ -366,11 +371,10 @@ class FingerprintService {
    * @param newRealFgRequestId - Optional NEW real FPJS requestId for this specific call.
    *                             If not provided, reuses profile.realFgRequestId.
    */
+  // [TESTE] regenerateDcr sem exigir realFgRequestId (como no feature/tls-impersonation)
+  // Para REVERTER: restaurar throw quando realFgRequestId é vazio
   regenerateDcr(profile: BrowserProfile, newRealFgRequestId?: string): string {
     const realFgRequestId = newRealFgRequestId || profile.realFgRequestId;
-    if (!realFgRequestId) {
-      throw new Error("CRÍTICO: realFgRequestId é obrigatório para regenerar o DCR.");
-    }
 
     const dcrPayload = buildDcrPayload({
       ua: profile.userAgent,

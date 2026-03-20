@@ -230,49 +230,10 @@ export class ManusProvider {
       // Build authCommandCmd from fingerprint (locale, timezone, tzOffset DST-aware, firstEntry randomized, fbp)
       const authCommandCmd = buildAuthCommandCmd(fingerprint);
 
-      // STEP 0: Proxy health check — verifica conectividade antes de gastar recursos
-      // Testa se o proxy consegue alcançar manus.im (timeout: 8s).
-      // Se falhar, troca o proxy e retesta. Agora com retry infinito (com limite de tempo/tentativas alto)
-      // para evitar falhar o job por instabilidade temporária da rede.
-      const MAX_PROXY_ATTEMPTS = 15;
-      let proxyOk = false;
-      
-      for (let proxyAttempt = 1; proxyAttempt <= MAX_PROXY_ATTEMPTS; proxyAttempt++) {
-        const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : "sem proxy";
-        await logger.info("step_0_proxy",
-          `Verificando proxy ${proxyLabel} (tentativa ${proxyAttempt}/${MAX_PROXY_ATTEMPTS})...`,
-          {}, jobId
-        );
-        
-        proxyOk = await checkProxyHealth(proxy, jobId);
-        if (proxyOk) {
-          await logger.info("step_0_proxy", `Proxy ${proxyLabel} OK — prosseguindo`, {}, jobId);
-          break;
-        }
-        
-        // Proxy morto: tenta obter um novo
-        await logger.warn("step_0_proxy",
-          `Proxy ${proxyLabel} inacessível. Trocando proxy...`,
-          {}, jobId
-        );
-        
-        if (proxyAttempt === MAX_PROXY_ATTEMPTS) {
-          return { email, password, status: "failed", error: `Proxy inacessível após ${MAX_PROXY_ATTEMPTS} tentativas`, metadata: {} };
-        }
-        
-        try {
-          // Backoff leve antes de pedir novo proxy para não martelar o banco
-          await sleep(2000);
-          proxy = await proxyService.getProxy(jobId);
-        } catch (proxyErr) {
-          await logger.warn("step_0_proxy", `Falha ao obter novo proxy: ${proxyErr}. Retentando...`, {}, jobId);
-          await sleep(5000);
-        }
-      }
-      
-      if (!proxyOk) {
-        return { email, password, status: "failed", error: "Falha crítica na resolução de proxy", metadata: {} };
-      }
+      // [TESTE] STEP 0 DESATIVADO: Proxy health check removido (não existe no feature/tls-impersonation)
+      // O GET para manus.im/login com UA genérico "Mozilla/5.0" pode estar "queimando" o proxy.
+      // Para REVERTER: restaurar o bloco completo de proxy health check (15 tentativas, checkProxyHealth, etc.)
+      await logger.info("step_0_proxy", `[TESTE] Proxy health check DESATIVADO — usando proxy diretamente`, {}, jobId);
 
       // STEP 1: Solve Cloudflare Turnstile (WITH proxy — same IP as API calls)
       await logger.info("step_1_turnstile", "Resolvendo Turnstile...", {
@@ -284,54 +245,12 @@ export class ManusProvider {
       const turnstileToken = await solveTurnstileWithRetry(proxy, jobId);
       await STEP_DELAYS.afterTurnstile();
 
-      // STEP 2: Check if email is new → returns tempToken
-      // Retry on proxy/network errors (code 28/56) without re-solving Turnstile.
-      // The Turnstile token is valid for ~2 minutes, so we can reuse it on network retry.
+      // [TESTE] STEP 2 SIMPLIFICADO: Sem retry com troca de proxy (como no feature/tls-impersonation)
+      // Para REVERTER: restaurar o loop de 5 tentativas com troca de proxy
       await logger.info("step_2_check_email", "Verificando se email é novo...", { email }, jobId);
 
-      let rpcOptions = { fingerprint, proxy, authCommandCmd };
-      let step2Platforms: unknown[] = [];
-      let tempToken = "";
-      const MAX_STEP2_RETRIES = 5; // Aumentado de 2 para 5
-
-      for (let step2Attempt = 1; step2Attempt <= MAX_STEP2_RETRIES; step2Attempt++) {
-        try {
-          const result = await rpc.getUserPlatforms(email, turnstileToken, rpcOptions);
-          step2Platforms = result.platforms || [];
-          tempToken = result.tempToken || "";
-          break; // success
-        } catch (step2Err) {
-          const step2ErrMsg = step2Err instanceof Error ? step2Err.message : String(step2Err);
-          
-          // O rpcCall agora já faz retry interno para erros transitórios.
-          // Se chegou aqui, ou é erro permanente ou esgotou os retries do RPC.
-          // Vamos tentar trocar o proxy como última esperança.
-          
-          if (step2Attempt < MAX_STEP2_RETRIES) {
-            await logger.warn("step_2_check_email",
-              `Falha na tentativa ${step2Attempt}/${MAX_STEP2_RETRIES} (${step2ErrMsg}). Trocando proxy e retentando...`,
-              {}, jobId
-            );
-            
-            try {
-              const newProxy = await proxyService.getProxy(jobId);
-              proxy = newProxy;
-              rpcOptions = { fingerprint, proxy, authCommandCmd };
-              // Pequeno backoff antes de tentar de novo
-              await sleep(3000);
-            } catch (proxyErr) {
-              await logger.warn("step_2_check_email",
-                `Não foi possível obter novo proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}. Continuando sem proxy.`,
-                {}, jobId
-              );
-            }
-          } else {
-            throw step2Err; // Re-throw on last attempt
-          }
-        }
-      }
-
-      const platforms = step2Platforms;
+      const rpcOptions = { fingerprint, proxy, authCommandCmd };
+      const { platforms, tempToken } = await rpc.getUserPlatforms(email, turnstileToken, rpcOptions);
 
       if (platforms && platforms.length > 0) {
         await logger.error("step_2_check_email", "Email já cadastrado!", { platforms }, jobId);
@@ -352,39 +271,27 @@ export class ManusProvider {
       // STEP 4: Read code from email (Zoho polling)
       await logger.info("step_4_read_email", "Aguardando email de verificação...", { email }, jobId);
 
+      // [TESTE] EMAIL RETRY SIMPLIFICADO (como no feature/tls-impersonation)
+      // Para REVERTER: restaurar loop com 10 tentativas, dynamic timeout, e try/catch no reenvio
       let emailCode: string;
-      let attempt = 1;
-      const MAX_EMAIL_RETRIES = 10; // Aumentado de 3 para 10
+      let retries = 0;
 
       while (true) {
         try {
-          // Aumenta o timeout a cada tentativa (90s -> 120s -> 150s...)
-          const dynamicTimeout = MANUS_CONFIG.emailTimeout + (attempt - 1) * 30000;
-          
           emailCode = await emailService.waitForVerificationCode(
-            email, MANUS_CONFIG.emailFromDomain, dynamicTimeout, jobId
+            email, MANUS_CONFIG.emailFromDomain, MANUS_CONFIG.emailTimeout, jobId
           );
           break;
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          
-          if (attempt >= MAX_EMAIL_RETRIES) {
-            throw new Error(`Email não recebido após ${MAX_EMAIL_RETRIES} tentativas: ${msg}`);
+          retries++;
+          if (retries >= MANUS_CONFIG.maxRetries) {
+            throw new Error(`Email não recebido após ${retries} tentativas: ${err}`);
           }
-          
-          await logger.warn("step_4_read_email", `Tentativa ${attempt}/${MAX_EMAIL_RETRIES} falhou (${msg}). Reenviando código...`, {}, jobId);
-          
-          try {
-            const newTurnstileToken = await solveTurnstileWithRetry(proxy, jobId);
-            const { tempToken: newTempToken } = await rpc.getUserPlatforms(email, newTurnstileToken, rpcOptions);
-            await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, newTempToken, rpcOptions);
-            await STEP_DELAYS.afterEmailCodeSent();
-          } catch (resendErr) {
-            await logger.warn("step_4_read_email", `Falha ao reenviar código: ${resendErr}. Retentando no próximo ciclo...`, {}, jobId);
-            await sleep(5000);
-          }
-          
-          attempt++;
+          await logger.warn("step_4_read_email", `Tentativa ${retries} falhou, reenviando...`, {}, jobId);
+          const newTurnstileToken = await solveTurnstileWithRetry(proxy, jobId);
+          const { tempToken: newTempToken } = await rpc.getUserPlatforms(email, newTurnstileToken, rpcOptions);
+          await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, newTempToken, rpcOptions);
+          await STEP_DELAYS.afterEmailCodeSent();
         }
       }
 

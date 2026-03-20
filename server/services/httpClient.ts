@@ -131,13 +131,10 @@ export async function httpRequest(options: HttpRequestOptions): Promise<HttpResp
   if (available && impers) {
     return impersRequest(options);
   } else {
-    // Não permitimos mais fallback silencioso para fetch nativo em produção
-    // pois isso causa banimentos imediatos por mismatch de TLS fingerprint.
-    throw new Error(
-      "CRÍTICO: curl-impersonate não está disponível. " +
-      "O sistema se recusa a usar fetch nativo para evitar detecção e banimento. " +
-      "Verifique a instalação do libcurl-impersonate."
-    );
+    // [TESTE] Fallback para fetch nativo reativado (como no feature/tls-impersonation)
+    // Para REVERTER: restaurar throw com "CRÍTICO: curl-impersonate não está disponível..."
+    console.warn(`[httpClient] ⚠️ curl-impersonate não disponível, usando fetch nativo (TLS detectável!)`);
+    return nativeFetchRequest(options);
   }
 }
 

@@ -314,14 +314,11 @@ class Orchestrator {
         // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
         const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
 
-        // Get a real FPJS Pro requestId for the DCR.
-        // CRITICAL: synthetic IDs are detected by Manus via server-side FPJS Pro validation,
-        // causing batch bans. We NEVER use synthetic IDs.
-        // The fpjsService now has infinite retry with backoff built-in, so it will block
-        // here until it successfully gets a real ID (or throws if Chromium is missing).
-        const realFgRequestId = await fpjsService.getRequestId(jobId);
-
-        const fingerprint = fingerprintService.generateProfile(proxyRegion, realFgRequestId);
+        // [TESTE] FPJS desativado - usando ID sintético (como no feature/tls-impersonation)
+        // Para REVERTER: descomentar as 2 linhas abaixo e remover a linha com generateProfile(proxyRegion)
+        // const realFgRequestId = await fpjsService.getRequestId(jobId);
+        // const fingerprint = fingerprintService.generateProfile(proxyRegion, realFgRequestId);
+        const fingerprint = fingerprintService.generateProfile(proxyRegion);
 
         await logger.info("orchestrator",
           `Tentativa ${totalAttempts}/${maxAttempts} (sucesso: ${successCount}/${options.quantity}): ${email}`,
@@ -330,7 +327,7 @@ class Orchestrator {
             clientId: fingerprint.clientId,
             locale: fingerprint.locale,
             timezone: fingerprint.timezone,
-            fpjsReal: !!realFgRequestId,
+            fpjsReal: false, // [TESTE] FPJS desativado
           }, jobId
         );
 
