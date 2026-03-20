@@ -238,9 +238,8 @@ function buildDcrPayload(params: {
       width: params.viewportWidth,
       height: params.viewportHeight,
     },
-    // [TESTE] Timestamp direto sem skew (como no feature/tls-impersonation)
-    // Para REVERTER: restaurar Date.now() - (1000 + Math.floor(Math.random() * 9000))
-    timestamp: Date.now(),
+    // SUSPEITA 2 REATIVADA: Timestamp com skew de 1-10s
+    timestamp: Date.now() - (1000 + Math.floor(Math.random() * 9000)),
     timezoneOffset: tzOffset,
   };
   return JSON.stringify(payload);
@@ -284,9 +283,10 @@ class FingerprintService {
     const clientId = generateClientId();
     const firstEntry = randomFirstEntry();
 
-    // [TESTE] Timezone offset sem jitter (como no feature/tls-impersonation)
-    // Para REVERTER: restaurar jitter de ±15min
-    const timezoneOffset = getRealTimezoneOffset(timezone);
+    // SUSPEITA 3 REATIVADA: Timezone offset com jitter ±15min
+    const baseOffset = getRealTimezoneOffset(timezone);
+    const jitterMinutes = Math.floor(Math.random() * 31) - 15;
+    const timezoneOffset = baseOffset + jitterMinutes;
 
     // Build DCR with fresh timestamp and real fgRequestId
     const dcrPayload = buildDcrPayload({
