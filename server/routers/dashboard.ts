@@ -62,7 +62,7 @@ export const dashboardRouter = router({
     const db = await getDb();
     if (!db) return [];
 
-    return await db.select().from(logs).orderBy(desc(logs.createdAt)).limit(50);
+    return await db.select().from(logs).orderBy(desc(logs.id)).limit(50);
   }),
 
   recentJobs: protectedProcedure.query(async () => {

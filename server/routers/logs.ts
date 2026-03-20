@@ -43,7 +43,7 @@ export const logsRouter = router({
         .select()
         .from(logs)
         .where(whereClause)
-        .orderBy(desc(logs.createdAt))
+        .orderBy(desc(logs.id))
         .limit(limit)
         .offset(offset);
 
