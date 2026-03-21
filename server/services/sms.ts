@@ -1286,13 +1286,9 @@ class SmsService {
           jobId: opts.jobId,
         });
         
-        // Verifica se o número já foi rejeitado antes
-        if (this.numberQuality.isNumberRejected(numberData.phoneNumber)) {
-          await logger.warn("sms", `Número ${numberData.phoneNumber} já foi rejeitado anteriormente. Cancelando e tentando outro...`, {}, opts.jobId);
-          this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
-          attempts++;
-          continue;
-        }
+        // DISABLED: isNumberRejected check removed — recordRejection() is never called
+        // in the current codebase, so the cache only contains stale data from DB persistence.
+        // This caused valid numbers (with SMS already sent) to be wrongly cancelled.
         
         // Número é bom, sai do loop
         break;
