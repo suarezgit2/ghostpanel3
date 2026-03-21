@@ -1,5 +1,5 @@
 /**
- * FPJS Pro Direct Client — HTTP POST without Puppeteer (v6.1)
+ * FPJS Pro Direct Client — HTTP POST without Puppeteer (v6.2)
  *
  * Generates a REAL FPJS Pro requestId by:
  * 1. Building the fingerprint payload JSON (144 signals)
@@ -8,7 +8,9 @@
  * 4. Sending via HTTP POST to metrics.manus.im
  * 5. Decrypting the response to extract requestId
  *
- * v6.1 CHANGES:
+ * v6.2 CHANGES:
+ * - NEVER falls back to synthetic ID. Retries with exponential backoff on 400/429.
+ * - Serialized via semaphore (max 1 concurrent FPJS request) to avoid rate limiting.
  * - mo: ["id"] only — no bot detection (bd) or extras (ex) modules.
  *   This means FPJS Server API returns the requestId WITHOUT Smart Signals
  *   (tampering, proxy, vpn, botd). When Manus queries our requestId, it gets
@@ -717,16 +719,49 @@ function setCachedRequestId(proxy: ProxyInfo | null | undefined, requestId: stri
 }
 
 // ============================================================
+// Semaphore — serializes FPJS requests to avoid 429 rate limiting
+// ============================================================
+
+class FpjsSemaphore {
+  private queue: Array<() => void> = [];
+  private running = 0;
+  constructor(private maxConcurrency: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.running < this.maxConcurrency) {
+      this.running++;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => { this.running++; resolve(); });
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+// Only 1 FPJS request at a time to avoid 429 rate limiting in batch
+const fpjsSemaphore = new FpjsSemaphore(1);
+
+// ============================================================
 // Public API
 // ============================================================
+
+const FPJS_MAX_RETRIES = 4;
+const FPJS_BASE_DELAY_MS = 3000; // 3s base, doubles each retry (3s, 6s, 12s, 24s)
 
 /**
  * Generate a REAL FPJS Pro requestId via HTTP POST.
  * No Puppeteer, no browser — just a direct HTTP request.
  *
- * Uses a 5-minute cache per proxy to avoid the ~60s proxy tunnel delay
- * on every RPC call. The requestId only needs to exist in FPJS DB —
- * it doesn't need to be unique per RPC call.
+ * v6.2 CHANGES:
+ * - NEVER falls back to synthetic ID. Retries with exponential backoff on 400/429.
+ * - Serialized via semaphore (max 1 concurrent FPJS request) to avoid rate limiting.
+ * - 5-minute cache per proxy to avoid repeated 60s tunnel delays.
  *
  * @param profile - BrowserProfile from fingerprintService.generateProfile()
  * @param proxy - Proxy to route through (same as RPC calls for IP consistency)
@@ -744,49 +779,108 @@ export async function getRequestIdDirect(
     console.log(`[FPJS-Direct] ✓ Using cached RequestId: ${cached} ${proxy ? `for proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
     return cached;
   }
-  // 1. Build the fingerprint payload (144 signals)
-  const payload = buildFpjsPayload(profile);
 
-  // 2. Serialize to JSON bytes
-  const jsonStr = JSON.stringify(payload);
-  const jsonBytes = Buffer.from(jsonStr, "utf-8");
-
-  // 3. Compress with deflate-raw (payload is always > 1024 bytes)
-  const compressed = deflateRawSync(jsonBytes);
-
-  // 4. Apply XOR obfuscation with compressed markers [3, 14]
-  const encrypted = fpjsEncrypt(compressed, true);
-
-  // 5. Send via HTTP POST
-  const response = await sendBinaryPost(FPJS_URL, encrypted, proxy, profile.userAgent);
-
-  if (response.status !== 200) {
-    throw new Error(`FPJS Direct POST failed: status ${response.status}`);
-  }
-
-  // 6. Decrypt the response (uses uncompressed markers [3, 13])
-  let responseJson: string;
+  // Serialize: only 1 FPJS request at a time across all jobs
+  await fpjsSemaphore.acquire();
   try {
-    const decrypted = fpjsDecrypt(response.body, MARKERS_UNCOMPRESSED);
-    responseJson = decrypted.toString("utf-8");
-  } catch {
-    // Fallback: try as plain text
-    responseJson = response.body.toString("utf-8");
+    // Double-check cache after acquiring semaphore (another job may have populated it)
+    const cachedAfterWait = getCachedRequestId(proxy);
+    if (cachedAfterWait) {
+      console.log(`[FPJS-Direct] ✓ Using cached RequestId (post-semaphore): ${cachedAfterWait} ${proxy ? `for proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
+      return cachedAfterWait;
+    }
+
+    return await _generateRequestIdWithRetry(profile, proxy, jobId);
+  } finally {
+    fpjsSemaphore.release();
+  }
+}
+
+/**
+ * Internal: generate requestId with retry + exponential backoff.
+ * NEVER falls back to synthetic ID — keeps retrying until success or max retries.
+ */
+async function _generateRequestIdWithRetry(
+  profile: BrowserProfile,
+  proxy?: ProxyInfo | null,
+  jobId?: number,
+): Promise<string> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= FPJS_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delayMs = FPJS_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      console.log(`[FPJS-Direct] Retry ${attempt}/${FPJS_MAX_RETRIES} após ${delayMs / 1000}s... ${jobId ? `[job ${jobId}]` : ""}`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+
+    try {
+      // 1. Build the fingerprint payload (144 signals)
+      const payload = buildFpjsPayload(profile);
+
+      // 2. Serialize to JSON bytes
+      const jsonStr = JSON.stringify(payload);
+      const jsonBytes = Buffer.from(jsonStr, "utf-8");
+
+      // 3. Compress with deflate-raw (payload is always > 1024 bytes)
+      const compressed = deflateRawSync(jsonBytes);
+
+      // 4. Apply XOR obfuscation with compressed markers [3, 14]
+      const encrypted = fpjsEncrypt(compressed, true);
+
+      // 5. Send via HTTP POST
+      const response = await sendBinaryPost(FPJS_URL, encrypted, proxy, profile.userAgent);
+
+      if (response.status === 429 || response.status === 400) {
+        lastError = new Error(`FPJS Direct POST: status ${response.status}`);
+        console.warn(`[FPJS-Direct] Rate limited (${response.status}), will retry... ${jobId ? `[job ${jobId}]` : ""}`);
+        continue; // retry with backoff
+      }
+
+      if (response.status !== 200) {
+        throw new Error(`FPJS Direct POST failed: status ${response.status}`);
+      }
+
+      // 6. Decrypt the response (uses uncompressed markers [3, 13])
+      let responseJson: string;
+      try {
+        const decrypted = fpjsDecrypt(response.body, MARKERS_UNCOMPRESSED);
+        responseJson = decrypted.toString("utf-8");
+      } catch {
+        // Fallback: try as plain text
+        responseJson = response.body.toString("utf-8");
+      }
+
+      // 7. Parse and extract requestId
+      const data = JSON.parse(responseJson);
+
+      if (data.requestId) {
+        console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) ${proxy ? `via proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
+        // Cache the requestId to avoid repeated 60s proxy tunnel delays
+        setCachedRequestId(proxy, data.requestId);
+        return data.requestId;
+      }
+
+      if (data.products?.identification?.error) {
+        throw new Error(`FPJS error: ${JSON.stringify(data.products.identification.error)}`);
+      }
+
+      throw new Error(`FPJS response sem requestId: ${responseJson.substring(0, 200)}`);
+
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // Network errors (socket disconnect, code 56) are also retryable
+      if (lastError.message.includes("socket disconnected") || lastError.message.includes("code 56")) {
+        console.warn(`[FPJS-Direct] Network error, will retry... ${jobId ? `[job ${jobId}]` : ""}: ${lastError.message}`);
+        continue;
+      }
+      // Non-retryable errors: throw immediately
+      if (!lastError.message.includes("status 400") && !lastError.message.includes("status 429")) {
+        throw lastError;
+      }
+    }
   }
 
-  // 7. Parse and extract requestId
-  const data = JSON.parse(responseJson);
-
-  if (data.requestId) {
-    console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) ${proxy ? `via proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
-    // Cache the requestId to avoid repeated 60s proxy tunnel delays
-    setCachedRequestId(proxy, data.requestId);
-    return data.requestId;
-  }
-
-  if (data.products?.identification?.error) {
-    throw new Error(`FPJS error: ${JSON.stringify(data.products.identification.error)}`);
-  }
-
-  throw new Error(`FPJS response sem requestId: ${responseJson.substring(0, 200)}`);
+  // All retries exhausted — throw (NEVER fall back to synthetic)
+  throw lastError || new Error("FPJS Direct: all retries exhausted");
 }

@@ -5,17 +5,18 @@
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
  *
- * ANTI-DETECTION (v6.1 — FPJS Direct POST + Cache + mo:["id"]):
+ * ANTI-DETECTION (v6.2 — FPJS Direct POST + Cache + Semaphore + Retry):
  * - Uses impers (curl-impersonate) for Chrome-identical TLS/HTTP2 fingerprints
  * - JA3/JA4 TLS fingerprint matches real Chrome (not Node.js)
  * - HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order match real Chrome
  * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fresh fgRequestId)
  * - FPJS requestId is cached for 5min per proxy (avoids 60s tunnel delay per call)
+ * - FPJS requests serialized via semaphore (max 1 concurrent) to avoid 429 rate limiting
+ * - FPJS retries with exponential backoff on 400/429 (NEVER falls back to synthetic ID)
  * - FPJS payload uses mo:["id"] only — no bot detection or extras — so Server API
  *   returns the requestId WITHOUT Smart Signals (tampering, proxy, vpn, botd)
  * - FPJS POST is routed through the SAME proxy as RPC calls (IP consistency)
  * - No browser process, no bot detection, no webdriver flag
- * - Falls back to native fetch if curl-impersonate is not available
  */
 
 import { httpRequest } from "../../services/httpClient";
@@ -56,15 +57,17 @@ async function rpcCall(
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}/${servicePath}`;
 
-  // v6.1: Get a real FPJS Pro requestId (cached for 5min per proxy to avoid 60s tunnel delay).
+  // v6.2: Get a real FPJS Pro requestId (serialized + cached + retry with backoff).
+  // NEVER falls back to synthetic ID — if FPJS fails after all retries, the RPC call
+  // proceeds without a fresh fgRequestId (regenerateDcr uses the previous one from profile).
   // Only requests mo:["id"] — no bot detection or extras — so Smart Signals won't flag us.
-  // Uses the SAME proxy as RPC calls for IP consistency.
   let freshFgRequestId: string | undefined;
   try {
     freshFgRequestId = await getRequestIdDirect(options.fingerprint, options.proxy);
   } catch (err) {
-    // If FPJS Direct fails, regenerateDcr will fall back to synthetic ID via generateFgRequestId()
-    console.warn(`[RPC] Falha ao gerar FPJS Direct ID para ${servicePath}: ${err instanceof Error ? err.message : err}`);
+    // FPJS failed even after retries — log but DO NOT use synthetic ID.
+    // regenerateDcr without a fresh ID will reuse whatever was in the profile before.
+    console.error(`[RPC] FPJS Direct falhou após retries para ${servicePath}: ${err instanceof Error ? err.message : err}`);
   }
 
   // ANTI-DETECTION: Regenerate DCR fresh on EVERY call (fresh timestamp + fresh fgRequestId)

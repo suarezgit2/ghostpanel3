@@ -158,7 +158,13 @@ class Orchestrator {
         allFolderIds.push(folderId);
 
         const instanceJobIds: number[] = [];
+        // Stagger delay between instances to avoid batch correlation and FPJS rate limiting
+        const STAGGER_DELAY_MS = 15_000; // 15s between each job start
         for (let i = 0; i < jobCount; i++) {
+          if (i > 0) {
+            await logger.info("orchestrator", `Aguardando ${STAGGER_DELAY_MS / 1000}s antes de iniciar instância ${i + 1}/${jobCount}...`);
+            await sleep(STAGGER_DELAY_MS);
+          }
           const label = `${clientName} — Instância ${i + 1}/${jobCount}`;
           const jobId = await this.createJob({
             provider: "manus",
