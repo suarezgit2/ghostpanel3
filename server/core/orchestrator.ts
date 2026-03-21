@@ -27,9 +27,12 @@ const PROVIDERS: Record<string, ProviderInstance> = {
 };
 
 // Backoff config for consecutive failures (possible rate limiting)
+// v9.0: Lowered threshold from 3 to 2 consecutive failures, increased initial backoff
+// from 30s to 45s. This gives the FPJS rate limiter more time to cool down between
+// orchestrator-level retries, working in tandem with the new FPJS cooldown system.
 const BACKOFF_CONFIG = {
-  maxConsecutiveFailures: 3,   // After 3 consecutive failures, start backing off
-  initialBackoffMs: 30_000,    // 30 seconds
+  maxConsecutiveFailures: 2,   // After 2 consecutive failures, start backing off
+  initialBackoffMs: 45_000,    // 45 seconds
   maxBackoffMs: 300_000,       // 5 minutes max
   multiplier: 2,               // Double each time
 };
@@ -63,6 +66,39 @@ export interface QuickJobRecipient {
   /** Quantidade de jobs a criar para este destinatário (padrão: 1) */
   jobCount?: number;
 }
+
+// v9.1: Global job concurrency limiter.
+// With a pool of 20 proxies and single-use policy, running more than 3-4 jobs
+// simultaneously causes proxy exhaustion within minutes. This semaphore ensures
+// at most MAX_CONCURRENT_JOBS jobs are actively running at any time.
+// Additional jobs wait in a FIFO queue until a slot opens.
+const MAX_CONCURRENT_JOBS = 3;
+
+class JobSemaphore {
+  private running = 0;
+  private queue: Array<() => void> = [];
+
+  async acquire(): Promise<void> {
+    if (this.running < MAX_CONCURRENT_JOBS) {
+      this.running++;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => { this.running++; resolve(); });
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+
+  get activeCount(): number { return this.running; }
+  get queuedCount(): number { return this.queue.length; }
+}
+
+const jobSemaphore = new JobSemaphore();
 
 class Orchestrator {
   /** Maps jobId -> AbortController for immediate cancellation signaling */
@@ -111,7 +147,26 @@ class Orchestrator {
     // Execute in background with AbortController for immediate cancellation
     const abortController = new AbortController();
     this.activeJobs.set(jobId, abortController);
-    this.executeJob(jobId, provider, providerId, options, abortController.signal).catch(async (err) => {
+
+    // v9.1: Wrap execution in job semaphore to limit concurrency
+    const wrappedExecution = async () => {
+      await logger.info("orchestrator",
+        `Job ${jobId}: aguardando slot (${jobSemaphore.activeCount}/${MAX_CONCURRENT_JOBS} ativos, ${jobSemaphore.queuedCount} na fila)`,
+        {}, jobId
+      );
+      await jobSemaphore.acquire();
+      await logger.info("orchestrator",
+        `Job ${jobId}: slot adquirido (${jobSemaphore.activeCount}/${MAX_CONCURRENT_JOBS} ativos)`,
+        {}, jobId
+      );
+      try {
+        await this.executeJob(jobId, provider, providerId, options, abortController.signal);
+      } finally {
+        jobSemaphore.release();
+      }
+    };
+
+    wrappedExecution().catch(async (err) => {
       if (err instanceof Error && err.name === "AbortError") {
         // Job was aborted — status already set by cancelJob/deleteJob
         return;
@@ -158,8 +213,10 @@ class Orchestrator {
         allFolderIds.push(folderId);
 
         const instanceJobIds: number[] = [];
-        // Stagger delay between instances to avoid batch correlation and FPJS rate limiting
-        const STAGGER_DELAY_MS = 15_000; // 15s between each job start
+        // v9.0: Increased stagger from 15s to 30s to avoid FPJS rate limiting.
+        // With 10 jobs, the old 15s stagger meant all jobs were active within 2.5min,
+        // causing cascading 429s. 30s gives FPJS more breathing room.
+        const STAGGER_DELAY_MS = 30_000; // 30s between each job start
         for (let i = 0; i < jobCount; i++) {
           if (i > 0) {
             await logger.info("orchestrator", `Aguardando ${STAGGER_DELAY_MS / 1000}s antes de iniciar instância ${i + 1}/${jobCount}...`);
@@ -308,9 +365,12 @@ class Orchestrator {
 
       const accountId = accountResult[0].insertId;
 
+      // v9.1: Moved proxy/proxyReleased outside try block so the catch block can access them.
+      // Before: catch referenced proxy/proxyReleased which were scoped inside try → ReferenceError crash.
+      let proxy: Awaited<ReturnType<typeof proxyService.getProxy>> | null = null;
+      let proxyReleased = false;
       try {
-        const proxy = await proxyService.getProxy(jobId);
-        let proxyReleased = false;
+        proxy = await proxyService.getProxy(jobId);
         // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
         const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
 
@@ -382,7 +442,8 @@ class Orchestrator {
         if (err instanceof DOMException && err.name === "AbortError") {
           await logger.info("orchestrator", `Job ${jobId} abortado durante createAccount`, {}, jobId);
           await db.update(accounts).set({ status: "failed", metadata: { error: "Job cancelado" } }).where(eq(accounts.id, accountId));
-          if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+          // v9.1: Safe proxy release — proxy may be null if getProxy() itself threw
+          if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);
@@ -399,8 +460,8 @@ class Orchestrator {
           `ERRO na tentativa ${totalAttempts}: ${msg} (sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
           { email }, jobId
         );
-        // Release proxy for replacement now that the attempt is done
-        if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+        // v9.1: Safe proxy release — proxy may be null if getProxy() itself threw
+        if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
         consecutiveFailures++;
       }
 

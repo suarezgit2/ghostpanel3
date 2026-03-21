@@ -293,7 +293,10 @@ export class ManusProvider {
       let rpcOptions = { fingerprint, proxy, authCommandCmd };
       let step2Platforms: unknown[] = [];
       let tempToken = "";
-      const MAX_STEP2_RETRIES = 5;
+      // v9.0: Reduced from 5 to 2 retries. CAPTCHA errors (code_1015, code_1715) are now
+      // treated as permanent in rpc.ts, so they fail fast. The only reason to retry here
+      // is if the proxy itself is bad (network error). 2 retries = 2 fresh proxies.
+      const MAX_STEP2_RETRIES = 2;
 
       for (let step2Attempt = 1; step2Attempt <= MAX_STEP2_RETRIES; step2Attempt++) {
         try {
@@ -314,13 +317,18 @@ export class ManusProvider {
               const newProxy = await proxyService.getProxy(jobId);
               proxy = newProxy;
               rpcOptions = { fingerprint, proxy, authCommandCmd };
-              await sleep(3000, signal);
+              // v9.0: Wait longer between proxy swaps to let FPJS cooldown expire
+              await sleep(5000, signal);
             } catch (proxyErr) {
               if (proxyErr instanceof DOMException && proxyErr.name === "AbortError") throw proxyErr;
-              await logger.warn("step_2_check_email",
-                `Não foi possível obter novo proxy: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}. Continuando sem proxy.`,
+              // v9.1: NEVER continue without proxy. Running without proxy pollutes the server IP
+              // with FPJS requests, causing cascading 429s for ALL jobs.
+              // Instead, fail this attempt and let the orchestrator retry later when proxies are available.
+              await logger.error("step_2_check_email",
+                `Sem proxy disponível: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}. Abortando tentativa (não é seguro continuar sem proxy).`,
                 {}, jobId
               );
+              throw new Error(`Proxy esgotado: ${proxyErr instanceof Error ? proxyErr.message : proxyErr}`);
             }
           } else {
             throw step2Err;
