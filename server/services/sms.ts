@@ -1,15 +1,20 @@
 /**
- * SmsService - SMSBower Integration (v3.1 — Multi-Country Support)
+ * SmsService - SMSBower Integration (v3.2 — Multi-Country Priority Fix)
+ *
+ * v9.6 Fix:
+ *   - Multi-país (sms_countries) agora tem PRIORIDADE sobre sms_provider_ids legado.
+ *   - Antes, sms_provider_ids no banco (mesmo vindo do autoSeed ou de outro branch)
+ *     forçava modo legado, ignorando a configuração multi-país.
+ *   - Agora: se sms_countries tem países habilitados, usa multi-país.
+ *   - sms_provider_ids legado só é usado quando sms_countries está vazio.
+ *   - discoverAndUpdateProviderList não sobrescreve mais sms_provider_ids
+ *     quando multi-país está configurado.
  *
  * Melhorias v3.1:
  *   - Suporte a múltiplos países: cada país tem seu próprio countryCode (SMSBower),
  *     regionCode (ex: +55), maxPrice, providerIds e enabled.
  *   - Setting sms_countries: JSON array com a configuração de cada país.
  *   - O sistema tenta os países habilitados em ordem, rotacionando quando um falha.
- *   - onNumberRented recebe regionCode do país para enviar ao Manus corretamente.
- *   - RetryResult inclui regionCode para o provider usar no sendPhoneVerificationCode.
- *   - Compatibilidade retroativa: se sms_countries não estiver configurado,
- *     usa as settings legadas (sms_country, sms_provider_ids, etc.).
  *
  * Melhorias v3.0 (mantidas):
  *   1. Blacklist persistente (sms_blacklisted_providers)
@@ -23,8 +28,8 @@
  *   smsbower_api_key, sms_service, sms_max_retries, sms_wait_time, sms_poll_interval,
  *   sms_retry_delay_min, sms_retry_delay_max, sms_cancel_wait, sms_auto_discover,
  *   sms_blacklisted_providers, sms_provider_health,
- *   sms_countries (novo — JSON array de CountryConfig)
- *   Legado (ainda suportado): sms_country, sms_max_price, sms_provider_ids
+ *   sms_countries (PRIORIDADE — JSON array de CountryConfig)
+ *   Legado (fallback): sms_country, sms_max_price, sms_provider_ids
  */
 
 import { getSetting, setSetting, clearSettingsCache } from "../utils/settings";
@@ -948,8 +953,11 @@ class SmsService {
     );
 
     if (discovered.length > 0) {
-      // Se for o país padrão (legado), atualiza sms_provider_ids
-      if (!countryCodeOverride || countryCodeOverride === this.config!.country) {
+      // v9.6: Só atualiza sms_provider_ids (legado) se NÃO houver multi-país configurado.
+      // Quando multi-país está ativo, os providerIds são gerenciados por país
+      // dentro de sms_countries, não pela setting legada.
+      const hasMultiCountry = this.config!.countries.filter(c => c.enabled).length > 0;
+      if (!hasMultiCountry && (!countryCodeOverride || countryCodeOverride === this.config!.country)) {
         await setSetting("sms_provider_ids", discovered.join(","), "IDs dos provedores SMS (atualizado via Auto-Discover)");
         await this.reloadConfig();
       }
@@ -965,15 +973,17 @@ class SmsService {
   // ============================================================
 
   /**
-   * getCodeWithRetry v3.1 — Multi-Country + Smart Provider Management
+   * getCodeWithRetry v3.2 — Multi-Country + Smart Provider Management
    *
-   * Estratégia:
-   *   1. Se sms_countries configurado: tenta cada país habilitado em ordem.
+   * Estratégia (v9.6):
+   *   1. Se sms_countries configurado com países habilitados: usa MULTI-PAÍS.
+   *      Multi-país tem PRIORIDADE sobre sms_provider_ids legado.
    *      Cada país tem sua própria lista de provedores, maxPrice e regionCode.
    *   2. Dentro de cada país: mesma lógica v3.0 (blacklist, cooldown, health).
    *   3. Se um país falha completamente, passa para o próximo.
    *   4. RetryResult inclui regionCode para o provider usar no sendPhoneVerificationCode.
    *   5. Compatibilidade retroativa: se sms_countries vazio, usa config legada.
+   *   6. sms_provider_ids legado só é usado quando sms_countries NÃO está configurado.
    */
   async getCodeWithRetry(options: RetryOptions = {}): Promise<RetryResult> {
     if (!this.initialized) await this.init();
@@ -992,12 +1002,16 @@ class SmsService {
     const service = options.service || configSnapshot.service;
 
     // Determina a lista de países a tentar
-    // Prioridade: se o legado tiver provider IDs definidos, usa legado (override manual)
+    // v9.6: Multi-país tem PRIORIDADE quando sms_countries está configurado.
+    // Antes, sms_provider_ids (legado) no banco forçava modo legado mesmo com
+    // multi-país configurado. Agora: se sms_countries tem países habilitados,
+    // usa multi-país (cada país já tem seus próprios providerIds).
+    // O legado só é usado quando sms_countries está vazio/não configurado.
     const enabledCountries = configSnapshot.countries.filter(c => c.enabled);
     const legacyHasProviders = configSnapshot.providerIds.length > 0;
-    const useMultiCountry = enabledCountries.length > 0 && !options.country && !options.providerIds && !legacyHasProviders;
+    const useMultiCountry = enabledCountries.length > 0 && !options.country && !options.providerIds;
 
-    // v9.4: Diagnostic log for mode decision
+    // v9.6: Diagnostic log for mode decision
     await logger.info("sms",
       `Decisão de modo: enabledCountries=${enabledCountries.length}, legacyProviders=${configSnapshot.providerIds.length}, ` +
       `optionsCountry=${!!options.country}, optionsProviders=${!!options.providerIds} => ${useMultiCountry ? "MULTI-PAÍS" : "LEGADO"}`,
@@ -1051,11 +1065,11 @@ class SmsService {
     }
 
     // ============================================================
-    // MODO LEGADO: um único país (prioridade quando provider IDs estão definidos)
+    // MODO LEGADO: um único país (usado quando sms_countries não está configurado)
     // ============================================================
-    if (legacyHasProviders && enabledCountries.length > 0) {
+    if (legacyHasProviders) {
       await logger.info("sms",
-        `Modo legado com prioridade: providers [${configSnapshot.providerIds.join(",")}] definidos manualmente (multi-país ignorado)`,
+        `Modo legado: providers [${configSnapshot.providerIds.join(",")}] (sms_countries não configurado)`,
         {}, jobId
       );
     }

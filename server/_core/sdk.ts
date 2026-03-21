@@ -31,7 +31,9 @@ const GET_USER_INFO_WITH_JWT_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserI
 class OAuthService {
   constructor(private client: ReturnType<typeof axios.create>) {
     console.log("[OAuth] Initialized with baseURL:", ENV.oAuthServerUrl);
-    if (!ENV.oAuthServerUrl) {
+    // v9.6: Only warn about missing OAuth URL when NOT using local auth.
+    // In LOCAL_AUTH=true mode, OAuth is not used and this error is misleading.
+    if (!ENV.oAuthServerUrl && !ENV.localAuth) {
       console.error(
         "[OAuth] ERROR: OAUTH_SERVER_URL is not configured! Set OAUTH_SERVER_URL environment variable."
       );
