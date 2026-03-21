@@ -400,7 +400,6 @@ export default function SettingsPage() {
     "sms_provider_health",
     "sms_number_quality",
     "sms_countries",
-    "sms_provider_ids",
   ]);
 
   const saveSettings = async () => {
