@@ -90,6 +90,8 @@ export const KNOWN_COUNTRIES: Record<string, { regionCode: string; name: string 
   "86": { regionCode: "+84",  name: "Vietnam" },
   "95": { regionCode: "+234", name: "Nigeria" },
   "33": { regionCode: "+57", name: "Colombia" },
+  "46": { regionCode: "+46", name: "Sweden" },
+  "48": { regionCode: "+31", name: "Netherlands" },
 };
 
 interface SmsConfig {

@@ -46,7 +46,7 @@ export async function autoSeedDefaults(): Promise<void> {
     { key: "sms_country", value: "6", description: "Código do país SMS (6=Indonesia)" },
     { key: "sms_service", value: "ot", description: "Código do serviço SMS (ot=Other)" },
     { key: "sms_max_price", value: "0.01", description: "Preço máximo por número SMS ($)" },
-    { key: "sms_provider_ids", value: "2295,3291,2482,1507,3250,3027,2413", description: "IDs dos provedores SMS (Gold $0.01)" },
+    { key: "sms_provider_ids", value: "", description: "IDs dos provedores SMS legado (vazio quando multi-país ativo)" },
     { key: "sms_max_retries", value: "3", description: "Máximo de tentativas SMS" },
     { key: "sms_wait_time", value: "120", description: "Tempo de espera por SMS (segundos)" },
     { key: "sms_poll_interval", value: "5", description: "Intervalo de polling SMS (segundos)" },
@@ -54,6 +54,13 @@ export async function autoSeedDefaults(): Promise<void> {
     { key: "sms_retry_delay_max", value: "8", description: "Delay máximo entre retries (segundos)" },
     { key: "sms_cancel_wait", value: "125", description: "Tempo mínimo antes de cancelar (segundos)" },
     { key: "sms_auto_discover", value: "false", description: "Auto-descobrir provedores via getPricesV3" },
+    { key: "sms_countries", value: JSON.stringify([
+      { countryCode: "6",  regionCode: "+62", name: "Indonesia",   maxPrice: "0.022", providerIds: [], enabled: true },
+      { countryCode: "73", regionCode: "+55", name: "Brazil",      maxPrice: "0.02",  providerIds: [], enabled: true },
+      { countryCode: "33", regionCode: "+57", name: "Colombia",    maxPrice: "0.02",  providerIds: [], enabled: true },
+      { countryCode: "46", regionCode: "+46", name: "Sweden",      maxPrice: "0.02",  providerIds: [], enabled: true },
+      { countryCode: "48", regionCode: "+31", name: "Netherlands", maxPrice: "0.02",  providerIds: [], enabled: true },
+    ]), description: "Configuração multi-país SMS (JSON)" },
   ];
 
   for (const s of defaultSettings) {
