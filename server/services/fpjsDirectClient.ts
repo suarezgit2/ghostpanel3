@@ -1,5 +1,5 @@
 /**
- * FPJS Pro Direct Client — HTTP POST without Puppeteer (v6.0)
+ * FPJS Pro Direct Client — HTTP POST without Puppeteer (v6.1)
  *
  * Generates a REAL FPJS Pro requestId by:
  * 1. Building the fingerprint payload JSON (144 signals)
@@ -8,8 +8,13 @@
  * 4. Sending via HTTP POST to metrics.manus.im
  * 5. Decrypting the response to extract requestId
  *
- * This eliminates the need for Puppeteer/Chromium entirely.
- * Each requestId generation takes ~100-500ms instead of 5-10s.
+ * v6.1 CHANGES:
+ * - mo: ["id"] only — no bot detection (bd) or extras (ex) modules.
+ *   This means FPJS Server API returns the requestId WITHOUT Smart Signals
+ *   (tampering, proxy, vpn, botd). When Manus queries our requestId, it gets
+ *   a valid 200 response but no negative signals to block us.
+ * - RequestId cache (5min TTL per proxy) — avoids the ~60s proxy tunnel delay
+ *   on every RPC call. First call generates, subsequent calls reuse.
  *
  * ADVANTAGES over Puppeteer approach:
  * - No browser process = no memory overhead, no bot detection via webdriver
@@ -17,6 +22,7 @@
  * - Uses the SAME proxy as RPC calls (IP consistency guaranteed)
  * - No cookies to leak between accounts (_iidt, _vid_t)
  * - requestId is REAL (exists in FPJS DB, won't return 404 on Server API lookup)
+ * - Smart Signals disabled via mo:["id"] — no tampering/proxy/vpn flags
  *
  * Reverse-engineered from FPJS Pro loader v3.11.8 (Hi/Yi/Xi functions).
  * Encryption is XOR obfuscation with a 9-byte random key embedded in the payload.
@@ -253,7 +259,7 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     c: "nG226lNwQWNTTWzOzKbF",
     m: "l",
     l: "jsl/3.11.8",
-    mo: ["id", "bd", "ex"],
+    mo: ["id"],  // ONLY identification — no bot detection (bd) or extras (ex) to avoid Smart Signals flagging (tampering, proxy, vpn)
     sc: { u: "https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js" },
     gt: 1,
     ab: { noop: "b", CTRb3vV: "ctrl" },
@@ -671,12 +677,56 @@ function parseChunkedBody(data: Buffer): Buffer {
 }
 
 // ============================================================
+// RequestId Cache (avoids 60s proxy tunnel delay per RPC call)
+// ============================================================
+
+interface CachedRequestId {
+  requestId: string;
+  createdAt: number;
+}
+
+// Cache keyed by proxy IP (or "direct" for no-proxy)
+// Each entry is reused for up to 5 minutes to avoid repeated slow proxy tunneling
+const requestIdCache = new Map<string, CachedRequestId>();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCacheKey(proxy?: ProxyInfo | null): string {
+  return proxy ? `${proxy.host}:${proxy.port}` : "direct";
+}
+
+/**
+ * Get a cached requestId if still valid, or null if expired/missing.
+ */
+function getCachedRequestId(proxy?: ProxyInfo | null): string | null {
+  const key = getCacheKey(proxy);
+  const cached = requestIdCache.get(key);
+  if (cached && (Date.now() - cached.createdAt) < CACHE_TTL_MS) {
+    return cached.requestId;
+  }
+  // Expired or missing — clean up
+  if (cached) requestIdCache.delete(key);
+  return null;
+}
+
+/**
+ * Store a requestId in cache.
+ */
+function setCachedRequestId(proxy: ProxyInfo | null | undefined, requestId: string): void {
+  const key = getCacheKey(proxy);
+  requestIdCache.set(key, { requestId, createdAt: Date.now() });
+}
+
+// ============================================================
 // Public API
 // ============================================================
 
 /**
  * Generate a REAL FPJS Pro requestId via HTTP POST.
  * No Puppeteer, no browser — just a direct HTTP request.
+ *
+ * Uses a 5-minute cache per proxy to avoid the ~60s proxy tunnel delay
+ * on every RPC call. The requestId only needs to exist in FPJS DB —
+ * it doesn't need to be unique per RPC call.
  *
  * @param profile - BrowserProfile from fingerprintService.generateProfile()
  * @param proxy - Proxy to route through (same as RPC calls for IP consistency)
@@ -688,6 +738,12 @@ export async function getRequestIdDirect(
   proxy?: ProxyInfo | null,
   jobId?: number,
 ): Promise<string> {
+  // Check cache first — avoids 60s proxy tunnel delay
+  const cached = getCachedRequestId(proxy);
+  if (cached) {
+    console.log(`[FPJS-Direct] ✓ Using cached RequestId: ${cached} ${proxy ? `for proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
+    return cached;
+  }
   // 1. Build the fingerprint payload (144 signals)
   const payload = buildFpjsPayload(profile);
 
@@ -723,6 +779,8 @@ export async function getRequestIdDirect(
 
   if (data.requestId) {
     console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) ${proxy ? `via proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
+    // Cache the requestId to avoid repeated 60s proxy tunnel delays
+    setCachedRequestId(proxy, data.requestId);
     return data.requestId;
   }
 

@@ -5,16 +5,16 @@
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
  *
- * ANTI-DETECTION (v6.0 — FPJS Direct POST):
+ * ANTI-DETECTION (v6.1 — FPJS Direct POST + Cache + mo:["id"]):
  * - Uses impers (curl-impersonate) for Chrome-identical TLS/HTTP2 fingerprints
  * - JA3/JA4 TLS fingerprint matches real Chrome (not Node.js)
  * - HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order match real Chrome
  * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fresh fgRequestId)
- * - Each RPC call generates a FRESH real FPJS Pro requestId via HTTP POST direto
- *   (reverse-engineered FPJS XOR obfuscation — NO Puppeteer needed)
+ * - FPJS requestId is cached for 5min per proxy (avoids 60s tunnel delay per call)
+ * - FPJS payload uses mo:["id"] only — no bot detection or extras — so Server API
+ *   returns the requestId WITHOUT Smart Signals (tampering, proxy, vpn, botd)
  * - FPJS POST is routed through the SAME proxy as RPC calls (IP consistency)
  * - No browser process, no bot detection, no webdriver flag
- * - ~100-500ms per requestId instead of 5-10s with Puppeteer
  * - Falls back to native fetch if curl-impersonate is not available
  */
 
@@ -56,10 +56,9 @@ async function rpcCall(
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}/${servicePath}`;
 
-  // v6.0: Generate a FRESH real FPJS Pro requestId via HTTP POST direto.
-  // Reverse-engineered FPJS XOR obfuscation — NO Puppeteer/browser needed.
+  // v6.1: Get a real FPJS Pro requestId (cached for 5min per proxy to avoid 60s tunnel delay).
+  // Only requests mo:["id"] — no bot detection or extras — so Smart Signals won't flag us.
   // Uses the SAME proxy as RPC calls for IP consistency.
-  // ~100-500ms per call vs 5-10s with Puppeteer.
   let freshFgRequestId: string | undefined;
   try {
     freshFgRequestId = await getRequestIdDirect(options.fingerprint, options.proxy);
