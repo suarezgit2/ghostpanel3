@@ -195,7 +195,7 @@ const MAX_PROXY_RETRIES = 3;             // Máximo de proxies a tentar antes de
  * Usa cache de 60s para não pingar em toda tentativa quando o proxy está saudável.
  * Retorna true se OK, false se morto.
  */
-async function checkProxyHealth(proxy: ProxyInfo | null, jobId?: number): Promise<boolean> {
+async function checkProxyHealth(proxy: ProxyInfo | null, jobId?: number, profileUA?: string): Promise<boolean> {
   if (!proxy) return true; // Sem proxy = conexão direta, sempre OK
 
   const key = `${proxy.host}:${proxy.port}`;
@@ -205,10 +205,12 @@ async function checkProxyHealth(proxy: ProxyInfo | null, jobId?: number): Promis
   }
 
   try {
+    // v8.0: Use the SAME User-Agent as the profile to avoid WAF detecting
+    // two different UAs from the same IP in quick succession
     await httpRequest({
       method: "GET",
       url: "https://manus.im/login",
-      headers: { "User-Agent": "Mozilla/5.0" },
+      headers: { "User-Agent": profileUA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" },
       proxy,
       timeout: PROXY_CHECK_TIMEOUT_S,
     });
@@ -244,7 +246,7 @@ export class ManusProvider {
           {}, jobId
         );
         
-        proxyOk = await checkProxyHealth(proxy, jobId);
+        proxyOk = await checkProxyHealth(proxy, jobId, fingerprint.userAgent);
         if (proxyOk) {
           await logger.info("step_0_proxy", `Proxy ${proxyLabel} OK — prosseguindo`, {}, jobId);
           break;

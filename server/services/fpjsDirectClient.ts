@@ -1,5 +1,5 @@
 /**
- * FPJS Pro Direct Client — HTTP POST without Puppeteer (v7.0 — Apify Integration)
+ * FPJS Pro Direct Client — HTTP POST without Puppeteer (v8.0 — Anti-Detection Hardening)
  *
  * Generates a REAL FPJS Pro requestId by:
  * 1. Building the fingerprint payload JSON (144 signals)
@@ -8,27 +8,23 @@
  * 4. Sending via HTTP POST to metrics.manus.im
  * 5. Decrypting the response to extract requestId
  *
- * v7.0 CHANGES:
- * - Now uses Apify-sourced fields from BrowserProfile for GPU, deviceMemory,
- *   hardwareConcurrency, maxTouchPoints, fonts, devicePixelRatio.
- *   All signals are internally consistent (Bayesian Network trained on real browsers).
- * - Removed hardcoded GPU pool — GPU comes from profile.webglVendor/webglRenderer.
- * - deviceMemory and hardwareConcurrency from profile instead of fixed 8.
- * v6.4 CHANGES:
- * - First attempt uses proxy, retries go DIRECT (no proxy).
- * v6.2/6.3 CHANGES:
- * - NEVER falls back to synthetic ID. Retries with exponential backoff on 400/429.
- * - Serialized via semaphore (max 1 concurrent FPJS request).
- * - mo: ["id"] only — no bot detection (bd) or extras (ex) modules.
- * - RequestId cache (5min TTL per proxy).
- *
- * ADVANTAGES over Puppeteer approach:
- * - No browser process = no memory overhead, no bot detection via webdriver
- * - No TLS fingerprint mismatch (Puppeteer's Chromium vs real Chrome)
- * - Uses the SAME proxy as RPC calls (IP consistency guaranteed)
- * - No cookies to leak between accounts (_iidt, _vid_t)
- * - requestId is REAL (exists in FPJS DB, won't return 404 on Server API lookup)
- * - Smart Signals disabled via mo:["id"] — no tampering/proxy/vpn flags
+ * v8.0 CHANGES (Anti-Bot Audit Fixes):
+ * - s58 (UA Client Hints): Now uses correct GREASE brand + build number from profile
+ *   (was hardcoded "Not.A/Brand" v8 + build 7103 for ALL versions)
+ * - s56 (TLS fingerprint): Deterministic per-profile instead of static for all
+ * - s119 (Error stack): Varied per Chrome version instead of identical for all
+ * - s49 (WebGL precision): OS-aware values (Windows ≠ macOS ≠ Linux)
+ * - s50 (WebGL hash): Deterministic per GPU renderer instead of static
+ * - s87 (CSS system colors): OS-aware (Windows light ≠ macOS ≠ Linux)
+ * - s6 (Screen available): Realistic values based on screen size and OS
+ * - s55 (Canvas/WebGL hash): Deterministic per clientId (was random per call)
+ * - s94 (WebRTC): Realistic candidate format with varied ports and ufrags
+ * - s79 (Fonts): OS-aware font list instead of Windows-only "default.ini"
+ * - exp_s1003: OS-aware drive letter (Windows "c:" vs macOS/Linux empty)
+ * - s22/s24 (Color depth): Correct values per OS
+ * - s29 (GPU memory): Derived from GPU renderer instead of static 10GB
+ * - s51 (Font metrics): OS-aware base values (Windows ≠ macOS ≠ Linux)
+ * - s145 (Navigator features): OS-aware API list
  *
  * Reverse-engineered from FPJS Pro loader v3.11.8 (Hi/Yi/Xi functions).
  * Encryption is XOR obfuscation with a 9-byte random key embedded in the payload.
@@ -151,13 +147,250 @@ function generateHexHash(): string {
   return randomBytes(16).toString("hex");
 }
 
-function generateRandomIP(): string {
-  return `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 254) + 1}`;
-}
-
 function generateUUID(): string {
   const hex = randomBytes(16).toString("hex");
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+}
+
+// ============================================================
+// OS-Aware Signal Generators
+// ============================================================
+
+/**
+ * Generate realistic WebRTC ICE candidate.
+ * Real Chrome generates random ports (49152-65535) and 4-char alphanumeric ufrags.
+ */
+function generateWebRTCCandidate(clientId: string): { u: string; e: string[] } {
+  const h = hashCode(clientId + "webrtc");
+  const port = 49152 + (h % 16383); // ephemeral port range
+  // Generate deterministic but varied ufrag (4 alphanumeric chars)
+  const ufragChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let ufrag = "";
+  let seed = hashCode(clientId + "ufrag");
+  for (let i = 0; i < 4; i++) {
+    ufrag += ufragChars[seed % ufragChars.length];
+    seed = ((seed * 1103515245) + 12345) & 0x7fffffff;
+  }
+  // Generate a private IP that looks realistic
+  const octet3 = (hashCode(clientId + "ip3") % 254) + 1;
+  const octet4 = (hashCode(clientId + "ip4") % 254) + 1;
+  const ip = `192.168.${octet3}.${octet4}`;
+
+  return {
+    u: generateUUID(),
+    e: [`candidate:1 1 udp 2113937151 ${ip} ${port} typ host generation 0 ufrag ${ufrag} network-cost 999`],
+  };
+}
+
+/**
+ * Generate OS-aware CSS system colors.
+ * Windows, macOS, and Linux have distinctly different system color schemes.
+ */
+function getSystemColors(os: "windows" | "macos" | "linux"): Record<string, string> {
+  switch (os) {
+    case "windows":
+      return {
+        ac: "rgb(0, 0, 0)", act: "rgb(0, 0, 0)", at: "rgb(255, 255, 255)",
+        bg: "rgb(255, 255, 255)", bf: "rgb(0, 0, 0)", bt: "rgb(255, 255, 255)",
+        cv: "rgb(255, 255, 255)", cvt: "rgb(0, 0, 0)", ft: "rgb(0, 0, 0)",
+        ht: "rgb(0, 0, 238)", htb: "rgb(0, 0, 0)", hta: "rgb(85, 26, 139)",
+        mk: "rgb(0, 0, 0)", mkb: "rgb(255, 255, 0)",
+      };
+    case "macos":
+      return {
+        ac: "rgb(0, 122, 255)", act: "rgb(255, 255, 255)", at: "rgb(255, 255, 255)",
+        bg: "rgb(255, 255, 255)", bf: "rgb(0, 0, 0)", bt: "rgb(255, 255, 255)",
+        cv: "rgb(255, 255, 255)", cvt: "rgb(0, 0, 0)", ft: "rgb(0, 0, 0)",
+        ht: "rgb(0, 0, 238)", htb: "rgb(0, 0, 0)", hta: "rgb(85, 26, 139)",
+        mk: "rgb(0, 0, 0)", mkb: "rgb(255, 255, 0)",
+      };
+    case "linux":
+      return {
+        ac: "rgb(53, 132, 228)", act: "rgb(255, 255, 255)", at: "rgb(255, 255, 255)",
+        bg: "rgb(255, 255, 255)", bf: "rgb(0, 0, 0)", bt: "rgb(255, 255, 255)",
+        cv: "rgb(255, 255, 255)", cvt: "rgb(0, 0, 0)", ft: "rgb(0, 0, 0)",
+        ht: "rgb(0, 0, 238)", htb: "rgb(0, 0, 0)", hta: "rgb(85, 26, 139)",
+        mk: "rgb(0, 0, 0)", mkb: "rgb(255, 255, 0)",
+      };
+  }
+}
+
+/**
+ * Generate OS-aware font metrics base values.
+ * Windows, macOS, and Linux render text with different metrics due to
+ * different font engines (DirectWrite, CoreText, FreeType).
+ */
+function getFontMetrics(os: "windows" | "macos" | "linux", clientId: string): Record<string, number> {
+  const jitter = (seed: string) => ((hashCode(clientId + seed) % 100) - 50) / 100; // ±0.5
+
+  switch (os) {
+    case "windows":
+      return {
+        default: 149.3125 + jitter("f_def"),
+        apple: 149.3125 + jitter("f_apl"),
+        serif: 149.3125 + jitter("f_ser"),
+        sans: 144.015625 + jitter("f_san"),
+        mono: 132.609375 + jitter("f_mon"),
+        min: 9.34375 + jitter("f_min"),
+        system: 144.640625 + jitter("f_sys"),
+      };
+    case "macos":
+      return {
+        default: 150.4375 + jitter("f_def"),
+        apple: 150.4375 + jitter("f_apl"),
+        serif: 150.4375 + jitter("f_ser"),
+        sans: 144.859375 + jitter("f_san"),
+        mono: 131.203125 + jitter("f_mon"),
+        min: 9.34375 + jitter("f_min"),
+        system: 144.859375 + jitter("f_sys"),
+      };
+    case "linux":
+      return {
+        default: 150.078125 + jitter("f_def"),
+        apple: 150.078125 + jitter("f_apl"),
+        serif: 150.078125 + jitter("f_ser"),
+        sans: 143.953125 + jitter("f_san"),
+        mono: 130.40625 + jitter("f_mon"),
+        min: 8.890625 + jitter("f_min"),
+        system: 143.953125 + jitter("f_sys"),
+      };
+  }
+}
+
+/**
+ * Generate OS-aware screen available rect.
+ * Windows: taskbar at bottom (40px default), macOS: menu bar at top (25px),
+ * Linux: varies but typically top panel (28px).
+ */
+function getScreenAvailable(os: "windows" | "macos" | "linux", screenWidth: number, screenHeight: number): number[] {
+  switch (os) {
+    case "windows": {
+      const taskbarHeight = 40 + (hashCode(screenWidth + "tb") % 8); // 40-48px
+      return [0, 0, screenWidth, screenHeight - taskbarHeight];
+    }
+    case "macos": {
+      const menuBarHeight = 25;
+      return [0, menuBarHeight, screenWidth, screenHeight - menuBarHeight];
+    }
+    case "linux": {
+      const panelHeight = 28 + (hashCode(screenWidth + "pn") % 6); // 28-34px
+      return [0, panelHeight, screenWidth, screenHeight - panelHeight];
+    }
+  }
+}
+
+/**
+ * Generate OS-aware WebGL float precision values.
+ * Different GPU drivers report different precision ranges.
+ */
+function getWebGLPrecision(os: "windows" | "macos" | "linux", gpuRenderer: string): [number, number] {
+  // Intel GPUs on Windows
+  if (os === "windows" && gpuRenderer.includes("Intel")) {
+    return [0.09999999403953552, 0.10000000149011612];
+  }
+  // NVIDIA on Windows
+  if (os === "windows" && (gpuRenderer.includes("NVIDIA") || gpuRenderer.includes("GeForce"))) {
+    return [0.0009765625, 0.0009765625];
+  }
+  // AMD on Windows
+  if (os === "windows" && (gpuRenderer.includes("AMD") || gpuRenderer.includes("Radeon"))) {
+    return [0.0009765625, 0.0009765625];
+  }
+  // macOS (Apple GPU or Intel)
+  if (os === "macos") {
+    if (gpuRenderer.includes("Apple")) {
+      return [0.0009765625, 0.0009765625];
+    }
+    return [0.09999999403953552, 0.10000000149011612];
+  }
+  // Linux (Mesa/Intel/NVIDIA)
+  if (os === "linux") {
+    return [0.09999999403953552, 0.10000000149011612];
+  }
+  // Default fallback
+  return [0.09999999403953552, 0.10000000149011612];
+}
+
+/**
+ * Estimate GPU memory from renderer string.
+ * Real Chrome reports this via WebGL extension WEBGL_memory_info.
+ */
+function estimateGPUMemory(gpuRenderer: string): number {
+  if (gpuRenderer.includes("RTX 4090") || gpuRenderer.includes("RTX 4080")) return 17179869184;
+  if (gpuRenderer.includes("RTX 3090")) return 12884901888;
+  if (gpuRenderer.includes("RTX 3080") || gpuRenderer.includes("RTX 3070")) return 10737418240;
+  if (gpuRenderer.includes("RTX 3060") || gpuRenderer.includes("RTX 2080")) return 8589934592;
+  if (gpuRenderer.includes("RTX 2070") || gpuRenderer.includes("RTX 2060")) return 6442450944;
+  if (gpuRenderer.includes("GTX 1660") || gpuRenderer.includes("GTX 1650")) return 4294967296;
+  if (gpuRenderer.includes("GTX 1080") || gpuRenderer.includes("GTX 1070")) return 8589934592;
+  if (gpuRenderer.includes("Radeon RX 7") || gpuRenderer.includes("Radeon RX 6")) return 8589934592;
+  if (gpuRenderer.includes("Apple M")) return 8589934592;
+  if (gpuRenderer.includes("Apple GPU")) return 8589934592;
+  if (gpuRenderer.includes("Iris Xe") || gpuRenderer.includes("Iris Plus")) return 4294967296;
+  if (gpuRenderer.includes("UHD Graphics")) return 2147483648;
+  if (gpuRenderer.includes("Intel")) return 2147483648;
+  // Default: 4GB
+  return 4294967296;
+}
+
+/**
+ * Generate a deterministic TLS fingerprint hash per profile.
+ * In real FPJS, this is collected at the CDN edge from the TLS handshake.
+ * We generate a plausible base64 value that varies per profile to avoid
+ * all accounts sharing the same static hash.
+ */
+function generateTLSFingerprint(clientId: string): string {
+  // Generate 64 deterministic bytes and encode as base64
+  const bytes = Buffer.alloc(64);
+  let seed = hashCode(clientId + "tls_fp");
+  for (let i = 0; i < 64; i++) {
+    seed = ((seed * 1103515245) + 12345) & 0x7fffffff;
+    bytes[i] = seed & 0xFF;
+  }
+  return bytes.toString("base64");
+}
+
+/**
+ * Generate OS-aware error stack trace for s119.
+ * The line/column numbers vary subtly by Chrome version.
+ */
+function generateErrorStack(chromeMajorVersion: string): string {
+  const h = hashCode(chromeMajorVersion + "err_stack");
+  const col = 1 + (h % 3); // column 1-3
+  return `TypeError: Cannot read properties of null (reading '0')\n    at https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js:1:${col}`;
+}
+
+/**
+ * Generate OS-aware navigator feature list for s145.
+ * macOS and Linux Chrome have slightly different navigator properties.
+ */
+function getNavigatorFeatures(os: "windows" | "macos" | "linux"): string[] {
+  const base = [
+    "getGamepads", "javaEnabled", "sendBeacon", "vibrate",
+    "NavigatorUAData", "bluetooth", "clipboard", "credentials",
+    "keyboard", "managed", "mediaDevices", "storage",
+    "serviceWorker", "virtualKeyboard", "wakeLock", "xr",
+  ];
+  if (os === "linux") {
+    // Linux Chrome doesn't expose bluetooth or xr in many configurations
+    return base.filter(f => f !== "bluetooth" && f !== "xr");
+  }
+  return base;
+}
+
+/**
+ * Generate OS-aware font config path for s79.
+ * Windows: "default.ini", macOS: null (not supported), Linux: "fonts.conf"
+ */
+function getFontConfig(os: "windows" | "macos" | "linux"): { value: unknown; status: number } {
+  switch (os) {
+    case "windows":
+      return { value: [{ n: "default.ini", l: -1 }], status: TIMEOUT };
+    case "macos":
+      return { value: null, status: NOT_SUPPORTED };
+    case "linux":
+      return { value: [{ n: "fonts.conf", l: -1 }], status: TIMEOUT };
+  }
 }
 
 // ============================================================
@@ -167,40 +400,43 @@ function generateUUID(): string {
 /**
  * Build the complete FPJS payload matching real browser output.
  * Uses data from the BrowserProfile to ensure consistency with RPC headers.
+ *
+ * v8.0: All signals are now OS-aware and version-consistent.
  */
 function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
   const now = Date.now();
-  const isWindows = profile.platform.includes("Win");
+  const os = profile.detectedOS;
+  const isWindows = os === "windows";
+  const isMacOS = os === "macos";
   const isChrome = profile.userAgent.includes("Chrome") && !profile.userAgent.includes("Firefox");
-  const chromeVersionMatch = profile.userAgent.match(/Chrome\/(\d+)/);
-  const chromeVersion = chromeVersionMatch ? chromeVersionMatch[1] : "136";
+  const chromeVersion = profile.chromeMajorVersion;
 
-  // Build User-Agent Client Hints data (only for Chrome-based browsers)
+  // v8.0: Build User-Agent Client Hints with CORRECT GREASE brand + build number
   const uaData = isChrome ? {
     b: [
       { brand: "Chromium", version: chromeVersion },
       { brand: "Google Chrome", version: chromeVersion },
-      { brand: "Not.A/Brand", version: "8" },
+      { brand: profile.greaseBrand, version: profile.greaseVersion },
     ],
     m: false,
-    p: isWindows ? "Windows" : (profile.platform === "MacIntel" ? "macOS" : "Linux"),
+    p: isWindows ? "Windows" : (isMacOS ? "macOS" : "Linux"),
     h: {
       brands: JSON.stringify([
         { brand: "Chromium", version: chromeVersion },
         { brand: "Google Chrome", version: chromeVersion },
-        { brand: "Not.A/Brand", version: "8" },
+        { brand: profile.greaseBrand, version: profile.greaseVersion },
       ]),
       mobile: "false",
-      platform: isWindows ? "Windows" : (profile.platform === "MacIntel" ? "macOS" : "Linux"),
-      platformVersion: isWindows ? "15.0.0" : (profile.platform === "MacIntel" ? "14.7.1" : "6.8.0"),
+      platform: isWindows ? "Windows" : (isMacOS ? "macOS" : "Linux"),
+      platformVersion: isWindows ? "15.0.0" : (isMacOS ? "14.7.1" : "6.8.0"),
       architecture: "x86",
       bitness: "64",
       model: "",
-      uaFullVersion: `${chromeVersion}.0.7103.116`,
+      uaFullVersion: profile.chromeFullVersion,
       fullVersionList: JSON.stringify([
-        { brand: "Chromium", version: `${chromeVersion}.0.7103.116` },
-        { brand: "Google Chrome", version: `${chromeVersion}.0.7103.116` },
-        { brand: "Not.A/Brand", version: "8.0.0.0" },
+        { brand: "Chromium", version: profile.chromeFullVersion },
+        { brand: "Google Chrome", version: profile.chromeFullVersion },
+        { brand: profile.greaseBrand, version: `${profile.greaseVersion}.0.0.0` },
       ]),
     },
     nah: [],
@@ -222,29 +458,47 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
   const mathHash = deterministicHash(profile.clientId + "math");
   const webglHash = deterministicHash(profile.clientId + "webgl");
 
-  // Font metrics — slight deterministic variation per profile (Windows base values)
-  // Real Chrome on Windows shows subtle differences due to DPI, font rendering, etc.
-  const fontJitter = (seed: string) => ((hashCode(profile.clientId + seed) % 100) - 50) / 100; // ±0.5
-  const fontBase = {
-    default: 149.3125 + fontJitter("f_def"),
-    apple: 149.3125 + fontJitter("f_apl"),
-    serif: 149.3125 + fontJitter("f_ser"),
-    sans: 144.015625 + fontJitter("f_san"),
-    mono: 132.609375 + fontJitter("f_mon"),
-    min: 9.34375 + fontJitter("f_min"),
-    system: 144.640625 + fontJitter("f_sys"),
-  };
+  // v8.0: OS-aware font metrics
+  const fontBase = getFontMetrics(os, profile.clientId);
 
-  // WebGL vendor/renderer — now sourced from Apify (consistent with OS/device)
+  // WebGL vendor/renderer — sourced from Apify (consistent with OS/device)
   const webglVendor = profile.webglVendor;
   const webglRenderer = profile.webglRenderer;
+
+  // v8.0: OS-aware WebGL precision and GPU memory
+  const webglPrecision = getWebGLPrecision(os, webglRenderer);
+  const gpuMemory = estimateGPUMemory(webglRenderer);
+
+  // v8.0: OS-aware screen available rect
+  const screenAvail = getScreenAvailable(os, profile.screenWidth, profile.screenHeight);
+
+  // v8.0: OS-aware CSS system colors
+  const systemColors = getSystemColors(os);
+
+  // v8.0: OS-aware font config
+  const fontConfig = getFontConfig(os);
+
+  // v8.0: Deterministic canvas/webgl hash (NOT random per call)
+  const canvasWebglHash = deterministicHash(profile.clientId + "s55_canvas_webgl");
+
+  // v8.0: Deterministic TLS fingerprint per profile
+  const tlsFingerprint = generateTLSFingerprint(profile.clientId);
+
+  // v8.0: Version-aware error stack
+  const errorStack = generateErrorStack(chromeVersion);
+
+  // v8.0: OS-aware WebRTC candidate
+  const webrtcCandidate = generateWebRTCCandidate(profile.clientId);
+
+  // v8.0: OS-aware navigator features
+  const navigatorFeatures = getNavigatorFeatures(os);
 
   return {
     // Metadata
     c: "nG226lNwQWNTTWzOzKbF",
     m: "l",
     l: "jsl/3.11.8",
-    mo: ["id"],  // ONLY identification — no bot detection (bd) or extras (ex) to avoid Smart Signals flagging (tampering, proxy, vpn)
+    mo: ["id"],  // ONLY identification — no bot detection (bd) or extras (ex)
     sc: { u: "https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js" },
     gt: 1,
     ab: { noop: "b", CTRb3vV: "ctrl" },
@@ -252,22 +506,22 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     epv: "e683a40",
     lr: [{ r: null }],
 
-    // TLS fingerprint (collected by FPJS CDN, not by browser — we send a plausible value)
-    s56: sig("ycAz3DWQ0bGY10Y+hHGxnMAgP+qKWIqrfqR9mclysW1Ak7T5CW7GIp2x2a+uhoxZveSYx3ATPZY7ZAMNmjWY90MvmAwwNQ=="),
+    // v8.0: TLS fingerprint — deterministic per profile (was static for all)
+    s56: sig(tlsFingerprint),
     s67: sig(null, NOT_SUPPORTED),
 
     // Browser signals
-    s1: sig(isWindows ? null : (profile.platform === "Linux x86_64" ? "Linux x86_64" : null), isWindows ? NOT_SUPPORTED : OK),
+    s1: sig(isWindows ? null : (os === "linux" ? "Linux x86_64" : null), isWindows ? NOT_SUPPORTED : OK),
     s2: sig([profile.languages]),
     s3: sig(profile.colorDepth),
-    s4: sig(profile.deviceMemory), // deviceMemory (from Apify — consistent with hardware)
+    s4: sig(profile.deviceMemory),
     s5: sig([profile.screenWidth, profile.screenHeight]),
-    s6: sig([0, 0, 0, 0]),
-    s7: sig(profile.hardwareConcurrency), // hardwareConcurrency (from Apify — consistent with CPU)
+    // v8.0: OS-aware screen available rect (was [0,0,0,0])
+    s6: sig(screenAvail),
+    s7: sig(profile.hardwareConcurrency),
     s9: sig(profile.timezone),
     s10: sig(true),
     s11: sig(true),
-    s12: sig(true),
     s13: sig(false),
     s14: sig(null, NOT_SUPPORTED),
     s15: sig(profile.platform),
@@ -282,12 +536,14 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s19: sig({ maxTouchPoints: profile.maxTouchPoints, touchEvent: profile.maxTouchPoints > 0, touchStart: profile.maxTouchPoints > 0 }),
     s20: sig([]),
     s21: sig(audioFp),
-    s22: sig(23),
+    // v8.0: Color depth values — macOS uses 30-bit color on some displays
+    s22: sig(isMacOS && profile.colorDepth === 30 ? 30 : 23),
     s23: sig(null, TIMEOUT),
-    s24: sig(33),
+    s24: sig(isMacOS && profile.colorDepth === 30 ? 30 : 33),
     s27: sig(webglVendor),
     s28: sig(["chrome"]),
-    s29: sig(10737418240),
+    // v8.0: GPU memory — derived from renderer string (was static 10GB)
+    s29: sig(gpuMemory),
     s30: sig(null, NOT_SUPPORTED),
     s32: sig(true),
     s33: sig(false),
@@ -303,12 +559,16 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s45: sig([now, now - Math.abs(profile.timezoneOffset) * 60000]),
     s46: sig(mathHash),
     s48: sig(generateS48Array(profile.clientId)),
-    s49: sig([0.09999999403953552, 0.10000000149011612]),
-    s50: sig(2167144448),
+    // v8.0: WebGL precision — OS and GPU aware (was static Intel values)
+    s49: sig(webglPrecision),
+    // v8.0: WebGL hash — deterministic per GPU (was static 2167144448)
+    s50: sig(deterministicInt32(profile.clientId + webglRenderer + "s50")),
     s51: sig(fontBase),
     s52: sig(null, ERROR),
-    s55: sig(randomBytes(64).toString("base64")),
+    // v8.0: Canvas/WebGL hash — deterministic per profile (was random per call!)
+    s55: sig(canvasWebglHash),
     s57: sig(1),
+    // v8.0: UA Client Hints — correct GREASE brand + full version
     s58: sig(uaData),
     s59: sig(false),
     s60: sig(false),
@@ -338,7 +598,8 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
       shaderPrecisions: deterministicHash(profile.clientId + "webgl_shader"),
     }),
     s76: sig(webglHash),
-    s79: sig([{ n: "default.ini", l: -1 }], TIMEOUT),
+    // v8.0: Font config — OS-aware (was Windows-only "default.ini")
+    s79: sig(fontConfig.value, fontConfig.status),
     s80: sig(true),
     s81: sig(255),
     s82: sig(profile.locale),
@@ -346,18 +607,14 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s84: sig({ w: profile.screenWidth, h: profile.screenHeight }),
     s85: sig(null, NOT_SUPPORTED),
     s86: sig(null, NOT_SUPPORTED),
-    s87: sig({
-      ac: "rgb(0, 0, 0)", act: "rgb(0, 0, 0)", at: "rgb(255, 255, 255)",
-      bg: "rgb(255, 255, 255)", bf: "rgb(0, 0, 0)", bt: "rgb(255, 255, 255)",
-      cv: "rgb(255, 255, 255)", cvt: "rgb(0, 0, 0)", ft: "rgb(0, 0, 0)",
-      ht: "rgb(0, 0, 238)", htb: "rgb(0, 0, 0)", hta: "rgb(85, 26, 139)",
-      mk: "rgb(0, 0, 0)", mkb: "rgb(255, 255, 0)",
-    }),
+    // v8.0: CSS system colors — OS-aware (was Windows-only)
+    s87: sig(systemColors),
     s89: sig(""),
     s91: sig(false),
     s92: sig(generateDomRect(profile.clientId, "s92", profile.viewportWidth)),
     s93: sig(generateDomRect(profile.clientId, "s93", profile.viewportWidth)),
-    s94: sig({ u: generateUUID(), e: ["candidate:1 1 udp 2113937151 " + generateRandomIP() + " 54321 typ host generation 0 ufrag xxxx network-cost 999"] }),
+    // v8.0: WebRTC — realistic candidate format (was static port 54321 + ufrag xxxx)
+    s94: sig(webrtcCandidate),
     s95: sig(null, NOT_SUPPORTED),
     s96: sig(null, ERROR),
     s97: sig(null, TIMEOUT),
@@ -368,9 +625,10 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s103: sig(profile.userAgent.replace("Mozilla/", "")),
     s104: sig(0),
     s106: sig(false), // webdriver = false (CRITICAL!)
-    s117: sig(profile.deviceMemory), // deviceMemory repeated (from Apify)
+    s117: sig(profile.deviceMemory),
     s118: sig(true),
-    s119: sig("TypeError: Cannot read properties of null (reading '0')\n    at https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js:1:1"),
+    // v8.0: Error stack — varies per Chrome version (was identical for all)
+    s119: sig(errorStack),
     s120: sig(false),
     s123: sig("20030107"),
     s130: sig(["function", "function"]),
@@ -382,7 +640,8 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s139: sig(true),
     s142: sig(false),
     s144: sig(null, ERROR),
-    s145: sig(["getGamepads", "javaEnabled", "sendBeacon", "vibrate", "NavigatorUAData", "bluetooth", "clipboard", "credentials", "keyboard", "managed", "mediaDevices", "storage", "serviceWorker", "virtualKeyboard", "wakeLock", "xr"]),
+    // v8.0: Navigator features — OS-aware
+    s145: sig(navigatorFeatures),
     s146: sig(false),
     s148: sig("function bind() { [native code] }"),
     s149: sig(null, NOT_SUPPORTED),
@@ -412,7 +671,8 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s202: sig(profile.locale),
     exp_s1001: sig("calc(0.207912px)"),
     exp_s1002: sig(true),
-    exp_s1003: sig("c:"),
+    // v8.0: Drive letter — OS-aware (Windows "c:" vs macOS/Linux empty)
+    exp_s1003: sig(isWindows ? "c:" : ""),
     exp_s1004: sig(null, NOT_SUPPORTED),
     exp_s1005: sig(false),
     exp_s1006: sig(2),
@@ -432,9 +692,7 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
 function generateS48Array(clientId: string): number[] {
   const result: number[] = [];
   for (let i = 0; i < 10; i++) {
-    // Generate deterministic int32 per position
     let h = hashCode(clientId + "s48_" + i);
-    // Spread across full int32 range (positive and negative)
     h = ((h * 1103515245) + 12345) | 0;
     result.push(h);
   }
@@ -443,16 +701,13 @@ function generateS48Array(clientId: string): number[] {
 
 /**
  * Generate deterministic DOM rect measurements that vary per profile.
- * s92 = small element rect (like a span), s93 = wide element rect (like a div).
- * Values vary subtly based on viewport width and profile to avoid correlation.
  */
 function generateDomRect(clientId: string, signal: string, viewportWidth: number): Record<string, number> {
-  const jitter = (seed: string) => ((hashCode(clientId + signal + seed) % 200) - 100) / 100; // ±1.0
-  
+  const jitter = (seed: string) => ((hashCode(clientId + signal + seed) % 200) - 100) / 100;
+
   if (signal === "s92") {
-    // Small element: width ~250-280, height ~15-17
-    const baseWidth = 265.734375 + jitter("w") * 5; // ±5px
-    const baseHeight = 16 + jitter("h") * 0.5; // ±0.5px
+    const baseWidth = 265.734375 + jitter("w") * 5;
+    const baseHeight = 16 + jitter("h") * 0.5;
     const x = 8;
     const y = 11 + jitter("y") * 0.5;
     return {
@@ -464,8 +719,7 @@ function generateDomRect(clientId: string, signal: string, viewportWidth: number
       height: baseHeight,
     };
   } else {
-    // Wide element: width scales with viewport, height ~17-19
-    const baseWidth = viewportWidth - (22 + jitter("margin") * 3); // viewport minus margins
+    const baseWidth = viewportWidth - (22 + jitter("margin") * 3);
     const baseHeight = 18 + jitter("h") * 0.5;
     const x = 8;
     const y = 9 + jitter("y") * 0.5;
@@ -485,14 +739,12 @@ function hashCode(str: string): number {
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
     hash = ((hash << 5) - hash) + char;
-    hash |= 0; // Convert to 32-bit integer
+    hash |= 0;
   }
   return Math.abs(hash);
 }
 
 function deterministicHash(seed: string): string {
-  // Generate a deterministic 32-char hex hash from a seed string
-  // This ensures the same profile always produces the same canvas/webgl hashes
   let h = hashCode(seed);
   let result = "";
   for (let i = 0; i < 32; i++) {
@@ -500,6 +752,17 @@ function deterministicHash(seed: string): string {
     result += "0123456789abcdef"[h % 16];
   }
   return result;
+}
+
+/**
+ * Generate a deterministic int32 from a seed string.
+ * Used for s50 (WebGL hash) to produce a unique but consistent value per GPU.
+ */
+function deterministicInt32(seed: string): number {
+  let h = hashCode(seed);
+  h = ((h * 1103515245) + 12345) | 0;
+  // Ensure positive and in plausible range for WebGL parameter hash
+  return (h >>> 0);
 }
 
 // ============================================================
@@ -511,8 +774,6 @@ const FPJS_URL = "https://metrics.manus.im/?ci=js/3.11.8&q=nG226lNwQWNTTWzOzKbF&
 /**
  * Send binary POST to FPJS endpoint, optionally through a proxy.
  * Uses Node.js native https/http modules for binary body support.
- * Does NOT need TLS impersonation — this is a request to FPJS's own CDN,
- * not to Manus's API. FPJS doesn't check TLS fingerprints on their metrics endpoint.
  */
 function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, userAgent?: string): Promise<{ status: number; body: Buffer }> {
   return new Promise((resolve, reject) => {
@@ -525,11 +786,10 @@ function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, use
       "Accept": "*/*",
       "Origin": "https://manus.im",
       "Referer": "https://manus.im/",
-      "User-Agent": userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+      "User-Agent": userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
     };
 
     if (proxy) {
-      // Use HTTP CONNECT tunnel through proxy
       const proxyAuth = Buffer.from(`${proxy.username}:${proxy.password}`).toString("base64");
 
       const connectReq = http.request({
@@ -545,13 +805,11 @@ function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, use
       });
 
       connectReq.on("connect", (_res, socket) => {
-        // Now create TLS connection through the tunnel
         const tlsSocket = tls.connect({
           host: urlObj.hostname,
           socket,
           servername: urlObj.hostname,
         }, () => {
-          // Send HTTP request through TLS tunnel
           const requestLine = `POST ${urlObj.pathname}${urlObj.search} HTTP/1.1\r\n`;
           const headerLines = Object.entries({ ...headers, Host: urlObj.hostname })
             .map(([k, v]) => `${k}: ${v}`)
@@ -561,14 +819,12 @@ function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, use
           tlsSocket.write(httpRequest);
           tlsSocket.write(body);
 
-          // Read response
           const chunks: Buffer[] = [];
           tlsSocket.on("data", (chunk: Buffer) => chunks.push(chunk));
           tlsSocket.on("end", () => {
             const raw = Buffer.concat(chunks);
             const rawStr = raw.toString("binary");
 
-            // Parse HTTP response
             const headerEnd = rawStr.indexOf("\r\n\r\n");
             if (headerEnd === -1) {
               reject(new Error("FPJS POST: malformed response"));
@@ -579,13 +835,11 @@ function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, use
             const statusMatch = statusLine.match(/HTTP\/\d\.\d (\d+)/);
             const status = statusMatch ? parseInt(statusMatch[1]) : 0;
 
-            // Check for chunked transfer encoding
             const headerSection = rawStr.substring(0, headerEnd).toLowerCase();
             const bodyStart = headerEnd + 4;
 
             let responseBody: Buffer;
             if (headerSection.includes("transfer-encoding: chunked")) {
-              // Parse chunked encoding
               responseBody = parseChunkedBody(raw.slice(bodyStart));
             } else {
               responseBody = raw.slice(bodyStart);
@@ -605,7 +859,6 @@ function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, use
       });
       connectReq.end();
     } else {
-      // Direct HTTPS request (no proxy)
       const options = {
         hostname: urlObj.hostname,
         port: 443,
@@ -642,7 +895,6 @@ function parseChunkedBody(data: Buffer): Buffer {
   let offset = 0;
 
   while (offset < data.length) {
-    // Find chunk size line
     const lineEnd = data.indexOf(Buffer.from("\r\n"), offset);
     if (lineEnd === -1) break;
 
@@ -655,7 +907,7 @@ function parseChunkedBody(data: Buffer): Buffer {
     if (chunkEnd > data.length) break;
 
     chunks.push(data.slice(chunkStart, chunkEnd));
-    offset = chunkEnd + 2; // Skip trailing \r\n
+    offset = chunkEnd + 2;
   }
 
   return Buffer.concat(chunks);
@@ -670,32 +922,23 @@ interface CachedRequestId {
   createdAt: number;
 }
 
-// Cache keyed by proxy IP (or "direct" for no-proxy)
-// Each entry is reused for up to 5 minutes to avoid repeated slow proxy tunneling
 const requestIdCache = new Map<string, CachedRequestId>();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 function getCacheKey(proxy?: ProxyInfo | null): string {
   return proxy ? `${proxy.host}:${proxy.port}` : "direct";
 }
 
-/**
- * Get a cached requestId if still valid, or null if expired/missing.
- */
 function getCachedRequestId(proxy?: ProxyInfo | null): string | null {
   const key = getCacheKey(proxy);
   const cached = requestIdCache.get(key);
   if (cached && (Date.now() - cached.createdAt) < CACHE_TTL_MS) {
     return cached.requestId;
   }
-  // Expired or missing — clean up
   if (cached) requestIdCache.delete(key);
   return null;
 }
 
-/**
- * Store a requestId in cache.
- */
 function setCachedRequestId(proxy: ProxyInfo | null | undefined, requestId: string): void {
   const key = getCacheKey(proxy);
   requestIdCache.set(key, { requestId, createdAt: Date.now() });
@@ -727,7 +970,6 @@ class FpjsSemaphore {
   }
 }
 
-// Only 1 FPJS request at a time to avoid 429 rate limiting in batch
 const fpjsSemaphore = new FpjsSemaphore(1);
 
 // ============================================================
@@ -735,38 +977,25 @@ const fpjsSemaphore = new FpjsSemaphore(1);
 // ============================================================
 
 const FPJS_MAX_RETRIES = 4;
-const FPJS_BASE_DELAY_MS = 3000; // 3s base, doubles each retry (3s, 6s, 12s, 24s)
+const FPJS_BASE_DELAY_MS = 3000;
 
 /**
  * Generate a REAL FPJS Pro requestId via HTTP POST.
  * No Puppeteer, no browser — just a direct HTTP request.
- *
- * v6.2 CHANGES:
- * - NEVER falls back to synthetic ID. Retries with exponential backoff on 400/429.
- * - Serialized via semaphore (max 1 concurrent FPJS request) to avoid rate limiting.
- * - 5-minute cache per proxy to avoid repeated 60s tunnel delays.
- *
- * @param profile - BrowserProfile from fingerprintService.generateProfile()
- * @param proxy - Proxy to route through (same as RPC calls for IP consistency)
- * @param jobId - Optional job ID for logging
- * @returns Real FPJS Pro requestId (format: "{timestamp}.{6chars}")
  */
 export async function getRequestIdDirect(
   profile: BrowserProfile,
   proxy?: ProxyInfo | null,
   jobId?: number,
 ): Promise<string> {
-  // Check cache first — avoids 60s proxy tunnel delay
   const cached = getCachedRequestId(proxy);
   if (cached) {
     console.log(`[FPJS-Direct] ✓ Using cached RequestId: ${cached} ${proxy ? `for proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
     return cached;
   }
 
-  // Serialize: only 1 FPJS request at a time across all jobs
   await fpjsSemaphore.acquire();
   try {
-    // Double-check cache after acquiring semaphore (another job may have populated it)
     const cachedAfterWait = getCachedRequestId(proxy);
     if (cachedAfterWait) {
       console.log(`[FPJS-Direct] ✓ Using cached RequestId (post-semaphore): ${cachedAfterWait} ${proxy ? `for proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
@@ -781,11 +1010,6 @@ export async function getRequestIdDirect(
 
 /**
  * Internal: generate requestId with retry + exponential backoff.
- * NEVER falls back to synthetic ID — keeps retrying until success or max retries.
- *
- * v6.4: First attempt uses proxy. On failure (429/network), retries go DIRECT
- * (no proxy). The 429 typically comes from the proxy, not from FPJS itself.
- * FPJS validates by API key, not source IP, so direct requests work fine.
  */
 async function _generateRequestIdWithRetry(
   profile: BrowserProfile,
@@ -795,7 +1019,6 @@ async function _generateRequestIdWithRetry(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= FPJS_MAX_RETRIES; attempt++) {
-    // First attempt: use proxy. Retries: go direct (no proxy) to avoid proxy 429/tunnel issues.
     const useProxy = attempt === 0 ? proxy : null;
 
     if (attempt > 0) {
@@ -805,48 +1028,35 @@ async function _generateRequestIdWithRetry(
     }
 
     try {
-      // 1. Build the fingerprint payload (144 signals)
       const payload = buildFpjsPayload(profile);
-
-      // 2. Serialize to JSON bytes
       const jsonStr = JSON.stringify(payload);
       const jsonBytes = Buffer.from(jsonStr, "utf-8");
-
-      // 3. Compress with deflate-raw (payload is always > 1024 bytes)
       const compressed = deflateRawSync(jsonBytes);
-
-      // 4. Apply XOR obfuscation with compressed markers [3, 14]
       const encrypted = fpjsEncrypt(compressed, true);
-
-      // 5. Send via HTTP POST (proxy on attempt 0, direct on retries)
       const response = await sendBinaryPost(FPJS_URL, encrypted, useProxy, profile.userAgent);
 
       if (response.status === 429 || response.status === 400) {
         lastError = new Error(`FPJS Direct POST: status ${response.status}`);
         console.warn(`[FPJS-Direct] ${response.status} ${useProxy ? "via proxy " + useProxy.host : "direct"}, will retry... ${jobId ? `[job ${jobId}]` : ""}`);
-        continue; // retry with backoff (next attempt goes direct)
+        continue;
       }
 
       if (response.status !== 200) {
         throw new Error(`FPJS Direct POST failed: status ${response.status}`);
       }
 
-      // 6. Decrypt the response (uses uncompressed markers [3, 13])
       let responseJson: string;
       try {
         const decrypted = fpjsDecrypt(response.body, MARKERS_UNCOMPRESSED);
         responseJson = decrypted.toString("utf-8");
       } catch {
-        // Fallback: try as plain text
         responseJson = response.body.toString("utf-8");
       }
 
-      // 7. Parse and extract requestId
       const data = JSON.parse(responseJson);
 
       if (data.requestId) {
         console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) ${useProxy ? `via proxy ${useProxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
-        // Cache the requestId keyed by the original proxy (even if generated direct)
         setCachedRequestId(proxy, data.requestId);
         return data.requestId;
       }
@@ -859,18 +1069,15 @@ async function _generateRequestIdWithRetry(
 
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      // Network errors (socket disconnect, code 56) are also retryable
       if (lastError.message.includes("socket disconnected") || lastError.message.includes("code 56")) {
         console.warn(`[FPJS-Direct] Network error ${useProxy ? "via proxy" : "direct"}, will retry... ${jobId ? `[job ${jobId}]` : ""}: ${lastError.message}`);
         continue;
       }
-      // Non-retryable errors: throw immediately
       if (!lastError.message.includes("status 400") && !lastError.message.includes("status 429")) {
         throw lastError;
       }
     }
   }
 
-  // All retries exhausted — throw (NEVER fall back to synthetic)
   throw lastError || new Error("FPJS Direct: all retries exhausted");
 }

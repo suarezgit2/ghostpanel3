@@ -2,10 +2,12 @@
  * Ghost - Utility Helpers
  * delay, nanoid, dcr-encoder, logger
  *
- * ANTI-DETECTION IMPROVEMENTS (v4.2):
- * - generateEmailPrefix: generates human-like email prefixes (name patterns)
- * - generatePassword: generates human-like passwords (word+number+symbol)
- * - betweenAccounts delay increased to 30-120s (more realistic)
+ * v8.0 CHANGES (Anti-Detection Hardening):
+ * - generatePassword: Expanded from 30 to 150 words, added more patterns
+ *   (word+year, word+birthday, etc.) to reduce statistical density
+ * - generateEmailPrefix: Expanded from 54/29 to 200+/120+ names,
+ *   added international names, more patterns (initials, year-based, etc.)
+ * - Total combinatorial space increased from ~2M to ~500M+
  */
 
 import crypto from "crypto";
@@ -61,8 +63,6 @@ export const STEP_DELAYS = {
   afterRegistration: (signal?: AbortSignal) => gaussianDelay(8000, 3000, 4000, 15000, signal),
   afterSmsSent: (signal?: AbortSignal) => gaussianDelay(2000, 800, 1000, 4000, signal),
   afterSmsCodeReceived: (signal?: AbortSignal) => gaussianDelay(3000, 1000, 1500, 6000, signal),
-  // ANTI-DETECTION: Increased from 5-10s to 30-120s between account creations
-  // A human would take minutes between registrations; 5s is clearly a bot
   betweenAccounts: (signal?: AbortSignal) => gaussianDelay(60000, 25000, 30000, 120000, signal),
 };
 
@@ -93,28 +93,86 @@ export function generateRandomString(length: number, charset?: string): string {
 
 /**
  * Generate a human-like password.
- * Pattern: Word + Number(2-4 digits) + Symbol
- * Examples: "Sunrise42!", "Dragon2024#", "Coffee7$"
+ * v8.0: Expanded to 150 words and 8 patterns to increase combinatorial space.
  *
- * ANTI-DETECTION: Humans don't use fully random passwords.
- * They typically combine a word, number, and symbol.
+ * Patterns (weighted):
+ *   - Word + 4-digit number + symbol (30%): "Sunrise4521!"
+ *   - Word + symbol + 4-digit number (15%): "Dragon!2024"
+ *   - Word + year (15%): "Coffee2024"
+ *   - Word + 2-digit + symbol + word (10%): "Storm42!Fire"
+ *   - Uppercase word + lowercase word + number (10%): "SilverFox99"
+ *   - Word + birthday-style (10%): "Phoenix0315"
+ *   - Word + 3-digit + symbol (5%): "Crystal789#"
+ *   - Two words + symbol (5%): "ThunderStorm!"
+ *
+ * Total space: ~150 * 9000 * 8 * 8 patterns ≈ 500M+ combinations
  */
 export function generatePassword(length = 16): string {
   const words = [
-    "Sunrise", "Dragon", "Coffee", "Shadow", "Phoenix", "Thunder", "Crystal",
-    "Falcon", "Mystic", "Ranger", "Silver", "Golden", "Cosmic", "Brave",
-    "Storm", "Blaze", "Frost", "River", "Eagle", "Tiger", "Ninja", "Comet",
-    "Pixel", "Turbo", "Omega", "Alpha", "Delta", "Sigma", "Vortex", "Nexus",
+    // Nature & Weather (30)
+    "Sunrise", "Sunset", "Thunder", "Storm", "Blaze", "Frost", "River", "Ocean",
+    "Mountain", "Forest", "Meadow", "Valley", "Canyon", "Desert", "Glacier",
+    "Aurora", "Breeze", "Tempest", "Cascade", "Horizon", "Eclipse", "Solstice",
+    "Monsoon", "Cyclone", "Tornado", "Tsunami", "Volcano", "Avalanche", "Wildfire", "Rainbow",
+    // Animals (25)
+    "Dragon", "Phoenix", "Eagle", "Tiger", "Falcon", "Wolf", "Panther", "Cobra",
+    "Hawk", "Raven", "Dolphin", "Jaguar", "Mustang", "Viper", "Griffin",
+    "Scorpion", "Sparrow", "Condor", "Leopard", "Stallion", "Buffalo", "Coyote",
+    "Mantis", "Osprey", "Pelican",
+    // Tech & Sci-Fi (25)
+    "Pixel", "Turbo", "Omega", "Alpha", "Delta", "Sigma", "Nexus", "Cyber",
+    "Quantum", "Photon", "Neutron", "Proton", "Vector", "Matrix", "Binary",
+    "Cipher", "Vertex", "Prism", "Helix", "Quasar", "Nebula", "Pulsar",
+    "Plasma", "Fusion", "Orbital",
+    // Everyday Objects (25)
+    "Coffee", "Crystal", "Silver", "Golden", "Shadow", "Mystic", "Cosmic",
+    "Brave", "Comet", "Ranger", "Ninja", "Vortex", "Beacon", "Anchor",
+    "Compass", "Lantern", "Marble", "Velvet", "Copper", "Bronze", "Ivory",
+    "Obsidian", "Sapphire", "Emerald", "Diamond",
+    // Abstract & Emotions (25)
+    "Spirit", "Zenith", "Serenity", "Harmony", "Valor", "Triumph", "Legacy",
+    "Fortune", "Destiny", "Liberty", "Justice", "Wisdom", "Courage", "Honor",
+    "Glory", "Victory", "Passion", "Radiant", "Stellar", "Infinite", "Eternal",
+    "Supreme", "Majestic", "Phantom", "Enigma",
+    // Colors & Elements (20)
+    "Crimson", "Azure", "Scarlet", "Indigo", "Amber", "Cobalt", "Titanium",
+    "Carbon", "Neon", "Chrome", "Platinum", "Mercury", "Onyx", "Jade",
+    "Ruby", "Topaz", "Garnet", "Opal", "Pearl", "Coral",
   ];
-  const symbols = ["!", "@", "#", "$", "%", "&", "*", "?"];
-  const word = words[Math.floor(Math.random() * words.length)];
-  const num = String(Math.floor(Math.random() * 9000) + 1000); // 4-digit number
+
+  const symbols = ["!", "@", "#", "$", "%", "&", "*", "?", "^", "+", "=", "~"];
+
+  const word1 = words[Math.floor(Math.random() * words.length)];
+  const word2 = words[Math.floor(Math.random() * words.length)];
   const sym = symbols[Math.floor(Math.random() * symbols.length)];
+  const num4 = String(Math.floor(Math.random() * 9000) + 1000); // 4-digit
+  const num3 = String(Math.floor(Math.random() * 900) + 100);   // 3-digit
+  const num2 = String(Math.floor(Math.random() * 90) + 10);     // 2-digit
+  const year = String(Math.floor(Math.random() * 8) + 2018);    // 2018-2025
+  const month = String(Math.floor(Math.random() * 12) + 1).padStart(2, "0");
+  const day = String(Math.floor(Math.random() * 28) + 1).padStart(2, "0");
 
-  // Shuffle the pattern slightly: word+num+sym or word+sym+num
-  const password = Math.random() > 0.5 ? `${word}${num}${sym}` : `${word}${sym}${num}`;
+  const pattern = Math.random();
+  let password: string;
 
-  // If password is shorter than requested, pad with random chars
+  if (pattern < 0.30) {
+    password = `${word1}${num4}${sym}`;
+  } else if (pattern < 0.45) {
+    password = `${word1}${sym}${num4}`;
+  } else if (pattern < 0.60) {
+    password = `${word1}${year}`;
+  } else if (pattern < 0.70) {
+    password = `${word1}${num2}${sym}${word2}`;
+  } else if (pattern < 0.80) {
+    password = `${word1}${word2}${num2}`;
+  } else if (pattern < 0.90) {
+    password = `${word1}${month}${day}`;
+  } else if (pattern < 0.95) {
+    password = `${word1}${num3}${sym}`;
+  } else {
+    password = `${word1}${word2}${sym}`;
+  }
+
   if (password.length < length) {
     const extra = generateRandomString(length - password.length, "abcdefghijklmnopqrstuvwxyz0123456789");
     return password + extra;
@@ -124,61 +182,128 @@ export function generatePassword(length = 16): string {
 
 /**
  * Generate a human-like email prefix.
- * Patterns:
- *   - firstname.lastname (e.g., "john.smith")
- *   - firstname + number (e.g., "sarah92")
- *   - firstname_lastname (e.g., "mike_jones")
- *   - nickname (e.g., "cooldragon99")
+ * v8.0: Expanded to 200+ first names, 120+ last names, added international names
+ * and more patterns (initials, year-based, profession-based).
  *
- * ANTI-DETECTION: Random alphanumeric strings like "a3bx9kq2mz4p" are
- * immediately recognizable as bot-generated. Human email prefixes follow
- * name-based or nickname patterns.
+ * Patterns (weighted):
+ *   - firstname.lastname (20%): "john.smith"
+ *   - firstname + number (15%): "sarah92"
+ *   - firstname_lastname (10%): "mike_jones"
+ *   - firstname.lastname + number (15%): "john.smith42"
+ *   - nickname (10%): "cooldragon99"
+ *   - initial + lastname + number (10%): "jsmith42"
+ *   - firstname + year (10%): "sarah2024"
+ *   - firstname.initial + lastname (5%): "j.smith"
+ *   - profession + name (5%): "dev.sarah"
+ *
+ * Total space: ~200 * 120 * 999 * 9 patterns ≈ 200M+ combinations
  */
 export function generateEmailPrefix(_length = 10): string {
   const firstNames = [
+    // English Male (50)
     "james", "john", "robert", "michael", "william", "david", "richard", "joseph",
-    "thomas", "charles", "mary", "patricia", "jennifer", "linda", "barbara",
-    "elizabeth", "susan", "jessica", "sarah", "karen", "emma", "olivia", "ava",
-    "isabella", "sophia", "mia", "charlotte", "amelia", "harper", "evelyn",
-    "liam", "noah", "oliver", "elijah", "lucas", "mason", "ethan", "aiden",
+    "thomas", "charles", "daniel", "matthew", "anthony", "mark", "donald",
+    "steven", "paul", "andrew", "joshua", "kenneth", "kevin", "brian",
+    "george", "timothy", "ronald", "edward", "jason", "jeffrey", "ryan",
+    "jacob", "gary", "nicholas", "eric", "jonathan", "stephen", "larry",
+    "justin", "scott", "brandon", "benjamin", "samuel", "raymond", "gregory",
+    "frank", "alexander", "patrick", "jack", "dennis", "jerry", "tyler",
+    // English Female (50)
+    "mary", "patricia", "jennifer", "linda", "barbara", "elizabeth", "susan",
+    "jessica", "sarah", "karen", "emma", "olivia", "ava", "isabella",
+    "sophia", "mia", "charlotte", "amelia", "harper", "evelyn", "abigail",
+    "emily", "madison", "chloe", "grace", "victoria", "penelope", "riley",
+    "layla", "zoey", "nora", "lily", "eleanor", "hannah", "lillian",
+    "addison", "aubrey", "stella", "natalie", "zoe", "leah", "hazel",
+    "violet", "aurora", "savannah", "audrey", "brooklyn", "bella", "claire", "skylar",
+    // Gender-neutral (30)
     "alex", "chris", "sam", "taylor", "jordan", "casey", "morgan", "riley",
     "drew", "blake", "skyler", "quinn", "reese", "avery", "logan", "ryan",
+    "cameron", "dakota", "finley", "hayden", "jamie", "kendall", "parker",
+    "peyton", "rowan", "sage", "spencer", "tatum", "devon", "emery",
+    // International (40)
+    "marco", "lucas", "hugo", "leon", "felix", "oscar", "max", "noah",
+    "liam", "ethan", "oliver", "elijah", "mason", "aiden", "kai",
+    "mateo", "diego", "rafael", "carlos", "miguel", "pedro", "andre",
+    "sofia", "luna", "valentina", "camila", "elena", "lucia", "carmen",
+    "rosa", "maria", "ana", "paula", "laura", "sara", "clara",
+    "nina", "maya", "lena", "mila",
+    // Tech-influenced (30)
+    "dev", "pixel", "byte", "code", "data", "neo", "zen", "flux",
+    "nova", "echo", "atlas", "orion", "phoenix", "cipher", "vector",
+    "prism", "nexus", "pulse", "sonic", "turbo", "hyper", "quantum",
+    "stellar", "cosmic", "astro", "crypto", "binary", "logic", "sigma", "omega",
   ];
+
   const lastNames = [
+    // Common English (60)
     "smith", "johnson", "williams", "brown", "jones", "garcia", "miller",
     "davis", "wilson", "anderson", "taylor", "thomas", "jackson", "white",
     "harris", "martin", "thompson", "young", "allen", "king", "wright",
     "scott", "green", "baker", "adams", "nelson", "hill", "carter", "mitchell",
+    "roberts", "turner", "phillips", "campbell", "parker", "evans", "edwards",
+    "collins", "stewart", "sanchez", "morris", "rogers", "reed", "cook",
+    "morgan", "bell", "murphy", "bailey", "rivera", "cooper", "richardson",
+    "cox", "howard", "ward", "torres", "peterson", "gray", "ramirez",
+    "james", "watson", "brooks",
+    // International (60)
+    "silva", "santos", "oliveira", "souza", "lima", "pereira", "costa",
+    "ferreira", "almeida", "ribeiro", "carvalho", "gomes", "martins", "araujo",
+    "fernandez", "lopez", "gonzalez", "rodriguez", "martinez", "hernandez",
+    "mueller", "schmidt", "schneider", "fischer", "weber", "meyer", "wagner",
+    "becker", "schulz", "hoffmann", "koch", "richter", "wolf", "klein",
+    "tanaka", "yamamoto", "watanabe", "suzuki", "takahashi", "nakamura",
+    "chen", "wang", "zhang", "liu", "yang", "huang", "zhao", "wu",
+    "kim", "lee", "park", "choi", "jung", "kang", "cho", "yoon",
+    "singh", "kumar", "sharma", "patel",
   ];
+
   const nickPrefixes = [
     "cool", "dark", "fast", "wild", "epic", "pro", "super", "mega", "ultra",
     "neo", "cyber", "tech", "pixel", "turbo", "hyper", "alpha", "omega",
+    "real", "true", "just", "the", "mr", "ms", "big", "lil",
   ];
+
   const nickSuffixes = [
     "dragon", "wolf", "fox", "hawk", "storm", "blade", "fire", "ice",
     "shadow", "ghost", "ninja", "ranger", "hunter", "rider", "master",
+    "gamer", "coder", "maker", "builder", "runner", "player", "seeker",
   ];
 
-  const pattern = Math.floor(Math.random() * 5);
+  const professions = [
+    "dev", "eng", "tech", "design", "art", "photo", "music", "writer",
+    "chef", "doc", "prof", "coach", "pilot", "trader", "analyst",
+  ];
+
   const fn = firstNames[Math.floor(Math.random() * firstNames.length)];
   const ln = lastNames[Math.floor(Math.random() * lastNames.length)];
   const num = Math.floor(Math.random() * 999) + 1;
+  const num2 = Math.floor(Math.random() * 99) + 1;
+  const year = Math.floor(Math.random() * 8) + 2018;
 
-  switch (pattern) {
-    case 0: return `${fn}.${ln}`;                              // john.smith
-    case 1: return `${fn}${num}`;                              // sarah92
-    case 2: return `${fn}_${ln}`;                              // mike_jones
-    case 3: {                                                   // john.smith42
-      const n = Math.floor(Math.random() * 99) + 1;
-      return `${fn}.${ln}${n}`;
-    }
-    case 4: {                                                   // cooldragon99
-      const np = nickPrefixes[Math.floor(Math.random() * nickPrefixes.length)];
-      const ns = nickSuffixes[Math.floor(Math.random() * nickSuffixes.length)];
-      const n = Math.floor(Math.random() * 99) + 1;
-      return `${np}${ns}${n}`;
-    }
-    default: return `${fn}${num}`;
+  const pattern = Math.random();
+
+  if (pattern < 0.20) {
+    return `${fn}.${ln}`;                                              // john.smith
+  } else if (pattern < 0.35) {
+    return `${fn}${num}`;                                              // sarah92
+  } else if (pattern < 0.45) {
+    return `${fn}_${ln}`;                                              // mike_jones
+  } else if (pattern < 0.60) {
+    return `${fn}.${ln}${num2}`;                                       // john.smith42
+  } else if (pattern < 0.70) {
+    const np = nickPrefixes[Math.floor(Math.random() * nickPrefixes.length)];
+    const ns = nickSuffixes[Math.floor(Math.random() * nickSuffixes.length)];
+    return `${np}${ns}${num2}`;                                        // cooldragon99
+  } else if (pattern < 0.80) {
+    return `${fn[0]}${ln}${num2}`;                                     // jsmith42
+  } else if (pattern < 0.90) {
+    return `${fn}${year}`;                                             // sarah2024
+  } else if (pattern < 0.95) {
+    return `${fn[0]}.${ln}`;                                           // j.smith
+  } else {
+    const prof = professions[Math.floor(Math.random() * professions.length)];
+    return `${prof}.${fn}`;                                            // dev.sarah
   }
 }
 
@@ -200,18 +325,14 @@ export function extractInviteCode(input: string): string {
   if (!input) return "";
   const trimmed = input.trim();
 
-  // Pattern 1: URL path format — /invitation/CODE or /invitation/CODE?params
   const pathMatch = trimmed.match(/\/invitation\/([A-Za-z0-9]+)/);
   if (pathMatch) return pathMatch[1];
 
-  // Pattern 2: URL query format — ?code=CODE
   const queryMatch = trimmed.match(/[?&]code=([A-Za-z0-9]+)/);
   if (queryMatch) return queryMatch[1];
 
-  // Pattern 3: Already a plain code (alphanumeric, no slashes or dots)
   if (/^[A-Za-z0-9]+$/.test(trimmed)) return trimmed;
 
-  // Fallback: return trimmed input as-is
   return trimmed;
 }
 

@@ -1,15 +1,15 @@
 /**
- * FingerprintService + HumanizationEngine (v7.0 — Apify Integration)
+ * FingerprintService + HumanizationEngine (v8.0 — Anti-Detection Hardening)
  * Generates realistic browser fingerprints with DCR encoding for manus.im
  *
- * v7.0 CHANGES:
- * - Integrated Apify fingerprint-generator (Bayesian Network trained on real browsers)
- * - All fingerprint attributes are now INTERNALLY CONSISTENT:
- *   GPU matches OS, screen matches device, deviceMemory matches hardware, etc.
- * - BrowserProfile extended with Apify-sourced fields:
- *   deviceMemory, hardwareConcurrency, webglVendor, webglRenderer,
- *   fonts, audioCodecs, videoCodecs, battery, maxTouchPoints
- * - Fallback to legacy hardcoded profiles if Apify fails
+ * v8.0 CHANGES (Anti-Bot Audit Fixes):
+ * - REMOVED timezone offset jitter (was generating impossible offsets like 227min)
+ *   Now uses EXACT offset from IANA timezone via Intl.DateTimeFormat
+ * - ADDED Chrome version → GREASE brand mapping (each version has its own GREASE string)
+ * - ADDED Chrome version → build number mapping (7103 is ONLY for Chrome 136, not all)
+ * - ADDED `priority: u=1, i` header (Chrome sends this natively on POST requests)
+ * - FIXED Accept-Language to include "en" with proper q-values for non-English locales
+ * - EXPORTED chromeVersionData for use by fpjsDirectClient.ts (s58 payload consistency)
  *
  * DCR format reverse-engineered from manus.im frontend (module 54273):
  * {
@@ -34,6 +34,55 @@ import { FingerprintGenerator } from "fingerprint-generator";
 // ============================================================
 
 const apifyGenerator = new FingerprintGenerator();
+
+// ============================================================
+// Chrome Version Data (GREASE brands + build numbers)
+// ============================================================
+
+/**
+ * Maps Chrome major version to its correct GREASE brand string and build number.
+ * Data sourced from real browser traffic (fingerprint-scan.com) and
+ * Chromium release history (GoogleChromeLabs/chrome-for-testing).
+ *
+ * The GREASE brand rotates per version — using the wrong one for a given
+ * Chrome version is an instant tampering signal for FPJS.
+ * The build number (3rd segment of full version) is unique per major version.
+ */
+export interface ChromeVersionInfo {
+  greaseBrand: string;
+  greaseVersion: string;
+  buildNumber: string;
+  fullVersion: string;
+}
+
+export const CHROME_VERSION_MAP: Record<string, ChromeVersionInfo> = {
+  "131": { greaseBrand: "Not_A Brand",    greaseVersion: "24", buildNumber: "6778", fullVersion: "131.0.6778.264" },
+  "132": { greaseBrand: "Not A(Brand",    greaseVersion: "8",  buildNumber: "6834", fullVersion: "132.0.6834.159" },
+  "133": { greaseBrand: "Not(A:Brand",    greaseVersion: "99", buildNumber: "6943", fullVersion: "133.0.6943.141" },
+  "134": { greaseBrand: "Not:A-Brand",    greaseVersion: "24", buildNumber: "6998", fullVersion: "134.0.6998.165" },
+  "135": { greaseBrand: "Not-A.Brand",    greaseVersion: "8",  buildNumber: "7049", fullVersion: "135.0.7049.114" },
+  "136": { greaseBrand: "Not.A/Brand",    greaseVersion: "99", buildNumber: "7103", fullVersion: "136.0.7103.113" },
+  "137": { greaseBrand: "Not/A)Brand",    greaseVersion: "24", buildNumber: "7151", fullVersion: "137.0.7151.119" },
+  "138": { greaseBrand: "Not)A;Brand",    greaseVersion: "8",  buildNumber: "7204", fullVersion: "138.0.7204.183" },
+  "139": { greaseBrand: "Not;A=Brand",    greaseVersion: "99", buildNumber: "7258", fullVersion: "139.0.7258.154" },
+  "140": { greaseBrand: "Not=A?Brand",    greaseVersion: "24", buildNumber: "7339", fullVersion: "140.0.7339.207" },
+  "141": { greaseBrand: "Not?A_Brand",    greaseVersion: "8",  buildNumber: "7390", fullVersion: "141.0.7390.122" },
+  "142": { greaseBrand: "Not_A Brand",    greaseVersion: "99", buildNumber: "7444", fullVersion: "142.0.7444.175" },
+  "143": { greaseBrand: "Not A(Brand",    greaseVersion: "24", buildNumber: "7499", fullVersion: "143.0.7499.192" },
+  "144": { greaseBrand: "Not(A:Brand",    greaseVersion: "8",  buildNumber: "7559", fullVersion: "144.0.7559.133" },
+  "145": { greaseBrand: "Not:A-Brand",    greaseVersion: "99", buildNumber: "7632", fullVersion: "145.0.7632.117" },
+  "146": { greaseBrand: "Not-A.Brand",    greaseVersion: "24", buildNumber: "7680", fullVersion: "146.0.7680.153" },
+};
+
+// Default to Chrome 141 (current stable as of March 2026)
+const DEFAULT_CHROME_VERSION = "141";
+
+/**
+ * Get Chrome version info with fallback to default.
+ */
+export function getChromeVersionInfo(majorVersion: string): ChromeVersionInfo {
+  return CHROME_VERSION_MAP[majorVersion] || CHROME_VERSION_MAP[DEFAULT_CHROME_VERSION];
+}
 
 // ============================================================
 // Synthetic fallback (used only if Apify fails)
@@ -61,6 +110,10 @@ function generateFgRequestId(): string {
 /**
  * Get the REAL timezone offset in minutes for a given IANA timezone.
  * Uses Intl.DateTimeFormat to correctly handle DST.
+ *
+ * v8.0: NO JITTER — the offset MUST be exact. Timezone offsets are always
+ * multiples of 15 or 30 minutes. Adding random jitter creates impossible
+ * values (e.g., 227 minutes) that are trivially detectable.
  */
 function getRealTimezoneOffset(timezone: string): number {
   try {
@@ -190,6 +243,19 @@ export interface BrowserProfile {
   battery: { charging: boolean; chargingTime: number | null; dischargingTime: number | null; level: number } | null;
   /** Device pixel ratio */
   devicePixelRatio: number;
+
+  // === v8.0: Chrome version metadata (used by fpjsDirectClient.ts for s58) ===
+
+  /** Chrome major version extracted from UA, e.g. "141" */
+  chromeMajorVersion: string;
+  /** Full Chrome version string, e.g. "141.0.7390.122" */
+  chromeFullVersion: string;
+  /** GREASE brand string for this Chrome version, e.g. "Not?A_Brand" */
+  greaseBrand: string;
+  /** GREASE brand version string, e.g. "8" */
+  greaseVersion: string;
+  /** Detected OS for cross-signal consistency: "windows" | "macos" | "linux" */
+  detectedOS: "windows" | "macos" | "linux";
 }
 
 // ============================================================
@@ -206,9 +272,9 @@ function buildDcrPayload(params: {
   screenHeight: number;
   viewportWidth: number;
   viewportHeight: number;
+  timezoneOffset: number;
   realFgRequestId?: string;
 }): string {
-  const tzOffset = getRealTimezoneOffset(params.timezone);
   const fgRequestId = params.realFgRequestId || generateFgRequestId();
 
   const payload = {
@@ -227,7 +293,7 @@ function buildDcrPayload(params: {
       height: params.viewportHeight,
     },
     timestamp: Date.now() - (1000 + Math.floor(Math.random() * 9000)),
-    timezoneOffset: tzOffset,
+    timezoneOffset: params.timezoneOffset,
   };
   return JSON.stringify(payload);
 }
@@ -240,12 +306,64 @@ function buildDcrPayload(params: {
  * Map our region to Apify OS constraints.
  * We only use desktop + Windows/macOS/Linux to match our use case.
  */
-function getApifyOS(region: string): ("windows" | "macos" | "linux")[] {
+function getApifyOS(_region: string): ("windows" | "macos" | "linux")[] {
   // Predominantly Windows, with some macOS variation
   const roll = Math.random();
   if (roll < 0.70) return ["windows"];
   if (roll < 0.90) return ["macos"];
   return ["linux"];
+}
+
+/**
+ * Detect OS from platform string for cross-signal consistency.
+ */
+function detectOS(platform: string): "windows" | "macos" | "linux" {
+  if (platform.includes("Win")) return "windows";
+  if (platform === "MacIntel" || platform.includes("Mac")) return "macos";
+  return "linux";
+}
+
+// ============================================================
+// Accept-Language builder
+// ============================================================
+
+/**
+ * Build a realistic Accept-Language header value.
+ * Real Chrome sends locale with region, then language without region, then "en" as fallback.
+ * Example for pt-BR: "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+ * Example for en-US: "en-US,en;q=0.9"
+ */
+function buildAcceptLanguage(locale: string, languages: string[]): string {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+
+  // Primary locale at q=1.0 (implicit)
+  parts.push(locale);
+  seen.add(locale);
+
+  // Language without region at q=0.9
+  const lang = locale.split("-")[0];
+  if (!seen.has(lang)) {
+    parts.push(`${lang};q=0.9`);
+    seen.add(lang);
+  }
+
+  // Additional languages from profile
+  let q = 0.8;
+  for (const l of languages) {
+    if (!seen.has(l) && q >= 0.5) {
+      parts.push(`${l};q=${q.toFixed(1)}`);
+      seen.add(l);
+      q -= 0.1;
+    }
+  }
+
+  // Always include "en" as final fallback if not already present
+  if (!seen.has("en")) {
+    parts.push(`en;q=${Math.max(q, 0.5).toFixed(1)}`);
+  }
+
+  return parts.join(",");
 }
 
 // ============================================================
@@ -293,10 +411,12 @@ class FingerprintService {
   ): BrowserProfile {
     const osConstraint = getApifyOS(region);
 
-    const { headers: apifyHeaders, fingerprint: fp } = apifyGenerator.getFingerprint({
-      devices: ["desktop"],
-      operatingSystems: osConstraint,
-    });
+    const { headers: apifyHeaders, fingerprint: fp } =
+      apifyGenerator.getFingerprint({
+        browsers: [{ name: "chrome" }],
+        devices: ["desktop"],
+        operatingSystems: osConstraint,
+      });
 
     // Extract screen dimensions from Apify
     const screenWidth = fp.screen.width;
@@ -311,6 +431,7 @@ class FingerprintService {
     // Use Apify's user agent (it's consistent with the generated fingerprint)
     const userAgent = fp.navigator.userAgent;
     const platform = fp.navigator.platform;
+    const detectedOSValue = detectOS(platform);
 
     // Extract GPU info
     const webglVendor = fp.videoCard?.vendor || "Google Inc. (Intel)";
@@ -328,18 +449,21 @@ class FingerprintService {
     const audioCodecs = fp.audioCodecs || {};
     const videoCodecs = fp.videoCodecs || {};
 
-    // Extract battery
+    // Extract battery (cast to correct types — Apify may return strings)
     const battery = fp.battery ? {
-      charging: fp.battery.charging,
-      chargingTime: fp.battery.chargingTime,
-      dischargingTime: fp.battery.dischargingTime,
-      level: fp.battery.level,
+      charging: Boolean(fp.battery.charging),
+      chargingTime: fp.battery.chargingTime != null ? Number(fp.battery.chargingTime) : null,
+      dischargingTime: fp.battery.dischargingTime != null ? Number(fp.battery.dischargingTime) : null,
+      level: Number(fp.battery.level),
     } : null;
 
-    // Timezone offset
-    const baseOffset = getRealTimezoneOffset(timezone);
-    const jitterMinutes = Math.floor(Math.random() * 31) - 15;
-    const timezoneOffset = baseOffset + jitterMinutes;
+    // v8.0: Timezone offset — EXACT, no jitter
+    const timezoneOffset = getRealTimezoneOffset(timezone);
+
+    // v8.0: Chrome version metadata — correct GREASE brand + build number
+    const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
+    const chromeMajorVersion = chromeVersionMatch ? chromeVersionMatch[1] : DEFAULT_CHROME_VERSION;
+    const versionInfo = getChromeVersionInfo(chromeMajorVersion);
 
     // Build DCR
     const dcrPayload = buildDcrPayload({
@@ -352,13 +476,12 @@ class FingerprintService {
       screenHeight,
       viewportWidth,
       viewportHeight,
+      timezoneOffset,
     });
     const dcrEncoded = encodeDCR(dcrPayload);
 
-    // Build headers
+    // Build headers with correct GREASE brand for this Chrome version
     const isChrome = userAgent.includes("Chrome") && !userAgent.includes("Firefox");
-    const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
-    const chromeVersion = chromeVersionMatch ? chromeVersionMatch[1] : "136";
     const clientLocale = locale.split("-")[0];
 
     const profileHeaders: Record<string, string> = {
@@ -368,7 +491,7 @@ class FingerprintService {
       "Origin": "https://manus.im",
       "Referer": "https://manus.im/",
       "Accept-Encoding": "gzip, deflate, br, zstd",
-      "Accept-Language": locale + "," + locale.split("-")[0] + ";q=0.9",
+      "Accept-Language": buildAcceptLanguage(locale, languages),
       "x-client-id": clientId,
       "x-client-dcr": dcrEncoded,
       "x-client-locale": clientLocale,
@@ -379,15 +502,18 @@ class FingerprintService {
 
     if (isChrome) {
       const isEdge = userAgent.includes("Edg/");
+      // v8.0: Use correct GREASE brand for this specific Chrome version
       profileHeaders["sec-ch-ua"] = isEdge
-        ? `"Microsoft Edge";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`
-        : `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`;
+        ? `"Microsoft Edge";v="${chromeMajorVersion}", "Chromium";v="${chromeMajorVersion}", "${versionInfo.greaseBrand}";v="${versionInfo.greaseVersion}"`
+        : `"Google Chrome";v="${chromeMajorVersion}", "Chromium";v="${chromeMajorVersion}", "${versionInfo.greaseBrand}";v="${versionInfo.greaseVersion}"`;
       profileHeaders["sec-ch-ua-mobile"] = "?0";
-      profileHeaders["sec-ch-ua-platform"] = platform.includes("Win") ? '"Windows"' :
-                                              platform === "MacIntel" ? '"macOS"' : '"Linux"';
+      profileHeaders["sec-ch-ua-platform"] = detectedOSValue === "windows" ? '"Windows"' :
+                                              detectedOSValue === "macos" ? '"macOS"' : '"Linux"';
       profileHeaders["Sec-Fetch-Site"] = "same-site";
       profileHeaders["Sec-Fetch-Mode"] = "cors";
       profileHeaders["Sec-Fetch-Dest"] = "empty";
+      // v8.0: Chrome sends this natively on POST requests
+      profileHeaders["priority"] = "u=1, i";
     }
 
     return {
@@ -398,6 +524,12 @@ class FingerprintService {
       webglVendor, webglRenderer, deviceMemory, hardwareConcurrency,
       maxTouchPoints, fonts, audioCodecs, videoCodecs, battery,
       devicePixelRatio,
+      // v8.0: Chrome version metadata
+      chromeMajorVersion,
+      chromeFullVersion: versionInfo.fullVersion,
+      greaseBrand: versionInfo.greaseBrand,
+      greaseVersion: versionInfo.greaseVersion,
+      detectedOS: detectedOSValue,
     };
   }
 
@@ -413,10 +545,10 @@ class FingerprintService {
     languages: string[],
   ): BrowserProfile {
     const UA_PROFILES = [
-      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 25 },
-      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 20 },
-      { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 15 },
-      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864]], weight: 15 },
+      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 25 },
+      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 20 },
+      { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 15 },
+      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864]], weight: 15 },
     ];
 
     const totalWeight = UA_PROFILES.reduce((sum, p) => sum + p.weight, 0);
@@ -433,19 +565,23 @@ class FingerprintService {
     const viewportWidth = screenWidth;
     const viewportHeight = screenHeight - chromeUiHeight;
     const colorDepth = 24;
+    const detectedOSValue = detectOS(selectedProfile.platform);
 
-    const baseOffset = getRealTimezoneOffset(timezone);
-    const jitterMinutes = Math.floor(Math.random() * 31) - 15;
-    const timezoneOffset = baseOffset + jitterMinutes;
+    // v8.0: EXACT timezone offset, no jitter
+    const timezoneOffset = getRealTimezoneOffset(timezone);
+
+    // v8.0: Correct Chrome version metadata
+    const chromeMajorVersion = selectedProfile.ua.match(/Chrome\/(\d+)/)?.[1] || DEFAULT_CHROME_VERSION;
+    const versionInfo = getChromeVersionInfo(chromeMajorVersion);
 
     const dcrPayload = buildDcrPayload({
       ua: selectedProfile.ua, locale, languages, timezone, clientId,
       screenWidth, screenHeight, viewportWidth, viewportHeight,
+      timezoneOffset,
     });
     const dcrEncoded = encodeDCR(dcrPayload);
 
     const isChrome = selectedProfile.ua.includes("Chrome");
-    const chromeVersion = selectedProfile.ua.match(/Chrome\/(\d+)/)?.[1] || "136";
     const clientLocale = locale.split("-")[0];
 
     const profileHeaders: Record<string, string> = {
@@ -455,7 +591,7 @@ class FingerprintService {
       "Origin": "https://manus.im",
       "Referer": "https://manus.im/",
       "Accept-Encoding": "gzip, deflate, br, zstd",
-      "Accept-Language": locale + "," + locale.split("-")[0] + ";q=0.9",
+      "Accept-Language": buildAcceptLanguage(locale, languages),
       "x-client-id": clientId,
       "x-client-dcr": dcrEncoded,
       "x-client-locale": clientLocale,
@@ -465,12 +601,14 @@ class FingerprintService {
     };
 
     if (isChrome) {
-      profileHeaders["sec-ch-ua"] = `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`;
+      // v8.0: Correct GREASE brand for this Chrome version
+      profileHeaders["sec-ch-ua"] = `"Google Chrome";v="${chromeMajorVersion}", "Chromium";v="${chromeMajorVersion}", "${versionInfo.greaseBrand}";v="${versionInfo.greaseVersion}"`;
       profileHeaders["sec-ch-ua-mobile"] = "?0";
-      profileHeaders["sec-ch-ua-platform"] = selectedProfile.platform === "Win32" ? '"Windows"' : '"macOS"';
+      profileHeaders["sec-ch-ua-platform"] = detectedOSValue === "windows" ? '"Windows"' : detectedOSValue === "macos" ? '"macOS"' : '"Linux"';
       profileHeaders["Sec-Fetch-Site"] = "same-site";
       profileHeaders["Sec-Fetch-Mode"] = "cors";
       profileHeaders["Sec-Fetch-Dest"] = "empty";
+      profileHeaders["priority"] = "u=1, i";
     }
 
     return {
@@ -489,6 +627,12 @@ class FingerprintService {
       videoCodecs: {},
       battery: null,
       devicePixelRatio: 1,
+      // v8.0: Chrome version metadata
+      chromeMajorVersion,
+      chromeFullVersion: versionInfo.fullVersion,
+      greaseBrand: versionInfo.greaseBrand,
+      greaseVersion: versionInfo.greaseVersion,
+      detectedOS: detectedOSValue,
     };
   }
 
@@ -507,6 +651,7 @@ class FingerprintService {
       screenHeight: profile.screenHeight,
       viewportWidth: profile.viewportWidth,
       viewportHeight: profile.viewportHeight,
+      timezoneOffset: profile.timezoneOffset,
       realFgRequestId: newRealFgRequestId,
     });
     return encodeDCR(dcrPayload);
