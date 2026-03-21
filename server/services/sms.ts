@@ -36,7 +36,12 @@ const DEFAULTS: Record<string, string> = {
   sms_country: "6",
   sms_service: "ot",
   sms_max_price: "0.01",
-  sms_provider_ids: "2295,3291,2482,1507,3250,3027,2413",
+  // v9.4: Changed from hardcoded list to empty string.
+  // The old default "2295,3291,..." was forcing legacy mode even when
+  // multi-country (sms_countries) was configured, because legacyHasProviders
+  // was always true. Now multi-country activates correctly when the user
+  // hasn't explicitly set sms_provider_ids in the database.
+  sms_provider_ids: "",
   sms_max_retries: "3",
   sms_wait_time: "120",
   sms_poll_interval: "5",
@@ -947,6 +952,13 @@ class SmsService {
     const enabledCountries = configSnapshot.countries.filter(c => c.enabled);
     const legacyHasProviders = configSnapshot.providerIds.length > 0;
     const useMultiCountry = enabledCountries.length > 0 && !options.country && !options.providerIds && !legacyHasProviders;
+
+    // v9.4: Diagnostic log for mode decision
+    await logger.info("sms",
+      `Decisão de modo: enabledCountries=${enabledCountries.length}, legacyProviders=${configSnapshot.providerIds.length}, ` +
+      `optionsCountry=${!!options.country}, optionsProviders=${!!options.providerIds} => ${useMultiCountry ? "MULTI-PAÍS" : "LEGADO"}`,
+      {}, jobId
+    );
 
     if (useMultiCountry) {
       // ============================================================

@@ -986,6 +986,46 @@ function setProxyCooldown(proxy?: ProxyInfo | null): void {
 }
 
 // ============================================================
+// v9.4: Per-proxy FPJS 400 blacklist
+// Proxies that get persistent 400 errors are blacklisted to avoid
+// wasting retries on IPs that FPJS has flagged/blocked.
+// ============================================================
+
+const proxyFpjs400Count = new Map<string, number>();       // proxyKey -> consecutive 400 count
+const proxyFpjsBlacklist = new Map<string, number>();      // proxyKey -> blacklisted-until timestamp
+const FPJS_400_BLACKLIST_THRESHOLD = 2;                    // 2 consecutive 400s -> blacklist
+const FPJS_400_BLACKLIST_DURATION_MS = 10 * 60 * 1000;     // 10 minutes
+
+function recordProxy400(proxy?: ProxyInfo | null): boolean {
+  const key = getProxyCooldownKey(proxy);
+  const count = (proxyFpjs400Count.get(key) || 0) + 1;
+  proxyFpjs400Count.set(key, count);
+  if (count >= FPJS_400_BLACKLIST_THRESHOLD) {
+    proxyFpjsBlacklist.set(key, Date.now() + FPJS_400_BLACKLIST_DURATION_MS);
+    console.warn(`[FPJS-Direct] \u26d4 Proxy ${key} BLACKLISTED por ${FPJS_400_BLACKLIST_DURATION_MS / 60000}min (${count}x 400 consecutivos)`);
+    return true; // blacklisted
+  }
+  return false;
+}
+
+function resetProxy400(proxy?: ProxyInfo | null): void {
+  const key = getProxyCooldownKey(proxy);
+  proxyFpjs400Count.delete(key);
+}
+
+function isProxyFpjsBlacklisted(proxy?: ProxyInfo | null): boolean {
+  const key = getProxyCooldownKey(proxy);
+  const until = proxyFpjsBlacklist.get(key);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    proxyFpjsBlacklist.delete(key);
+    proxyFpjs400Count.delete(key);
+    return false;
+  }
+  return true;
+}
+
+// ============================================================
 // Public API
 // ============================================================
 
@@ -1010,6 +1050,12 @@ export async function getRequestIdDirect(
   proxy?: ProxyInfo | null,
   jobId?: number,
 ): Promise<string> {
+  // v9.4: Check if this proxy is blacklisted from FPJS (persistent 400s)
+  if (isProxyFpjsBlacklisted(proxy)) {
+    const key = proxy ? `${proxy.host}:${proxy.port}` : "direct";
+    throw new Error(`FPJS_PROXY_BLACKLISTED: Proxy ${key} na blacklist do FPJS (400 persistente). Troque o proxy.`);
+  }
+
   // Check cache first (same proxy may have been used for a previous RPC in this job)
   const cached = getCachedRequestId(proxy);
   if (cached) {
@@ -1080,9 +1126,10 @@ async function _generateRequestIdWithRetry(
       if (response.status === 400) {
         lastError = new Error(`FPJS Direct POST: status 400`);
         console.warn(`[FPJS-Direct] 400 via proxy ${useProxy?.host || "direct"} — payload rejeitado ${jobId ? `[job ${jobId}]` : ""}`);
-        // On 400, fail fast after 2 attempts (payload or proxy issue)
-        if (attempt >= 1) {
-          console.warn(`[FPJS-Direct] 400 persistente — abortando (proxy bloqueado ou payload inválido) ${jobId ? `[job ${jobId}]` : ""}`);
+        // v9.4: Track 400s per proxy — blacklist after threshold
+        const blacklisted = recordProxy400(useProxy);
+        if (blacklisted || attempt >= 1) {
+          console.warn(`[FPJS-Direct] 400 persistente — proxy ${useProxy?.host || "direct"} ${blacklisted ? "BLACKLISTED" : "abortando"} ${jobId ? `[job ${jobId}]` : ""}`);
           break;
         }
         continue;
@@ -1103,7 +1150,9 @@ async function _generateRequestIdWithRetry(
       const data = JSON.parse(responseJson);
 
       if (data.requestId) {
-        console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) via proxy ${useProxy?.host || "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
+        console.log(`[FPJS-Direct] \u2713 RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) via proxy ${useProxy?.host || "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
+        // v9.4: Success — reset 400 counter for this proxy (it's working)
+        resetProxy400(useProxy);
         setCachedRequestId(proxy, data.requestId);
         return data.requestId;
       }

@@ -49,6 +49,17 @@ interface RpcOptions {
   clientDcr?: string;
 }
 
+/**
+ * v9.0 CHANGES:
+ * - CAPTCHA verification failed (code_1015) is now treated as PERMANENT error.
+ *   Before: it retried 5x with backoff, wasting ~60s per RPC call.
+ *   The root cause of code_1015 is that the FPJS requestId was invalid/expired,
+ *   so retrying the same RPC with the same bad requestId is pointless.
+ *   Now: it fails immediately and lets the orchestrator retry with a fresh proxy+FPJS.
+ * - Need CAPTCHA code (code_1715) is also treated as permanent (FPJS completely failed).
+ * - On transient retry, regenerate FPJS + DCR fresh (not reuse the stale one).
+ * - Reduced MAX_RETRIES from 5 to 3 (fail fast, let orchestrator handle recovery).
+ */
 async function rpcCall(
   servicePath: string,
   payload: Record<string, unknown>,
@@ -57,52 +68,44 @@ async function rpcCall(
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}/${servicePath}`;
 
-  // v6.2: Get a real FPJS Pro requestId (serialized + cached + retry with backoff).
-  // NEVER falls back to synthetic ID — if FPJS fails after all retries, the RPC call
-  // proceeds without a fresh fgRequestId (regenerateDcr uses the previous one from profile).
-  // Only requests mo:["id"] — no bot detection or extras — so Smart Signals won't flag us.
-  let freshFgRequestId: string | undefined;
-  try {
-    freshFgRequestId = await getRequestIdDirect(options.fingerprint, options.proxy);
-  } catch (err) {
-    // FPJS failed even after retries — log but DO NOT use synthetic ID.
-    // regenerateDcr without a fresh ID will reuse whatever was in the profile before.
-    console.error(`[RPC] FPJS Direct falhou após retries para ${servicePath}: ${err instanceof Error ? err.message : err}`);
-  }
-
-  // ANTI-DETECTION: Regenerate DCR fresh on EVERY call (fresh timestamp + fresh fgRequestId)
-  // This matches real browser behavior — getDCR(true) is called before each API request
-  const freshDcr = fingerprintService.regenerateDcr(options.fingerprint, freshFgRequestId);
-
-  // Update the profile's DCR header with the fresh value
-  const profileWithFreshDcr = {
-    ...options.fingerprint,
-    headers: {
-      ...options.fingerprint.headers,
-      "x-client-dcr": freshDcr,
-    },
-  };
-
-  const headers = fingerprintService.getOrderedHeaders(profileWithFreshDcr);
-
-  // ConnectRPC required headers
-  headers["Connect-Protocol-Version"] = "1";
-
-  if (options.authToken) {
-    headers["Authorization"] = `Bearer ${options.authToken}`;
-  }
-
-  // Merge extra headers (e.g., explicit x-client-dcr override, x-client-id)
-  if (extraHeaders) {
-    Object.assign(headers, extraHeaders);
-  }
-
-  // RPC retry 5x com backoff exponencial e PermanentRpcError
-  const MAX_RETRIES = 5;
+  // RPC retry 3x com backoff exponencial e PermanentRpcError
+  // v9.0: Reduced from 5 to 3 — fail fast, let orchestrator handle recovery with fresh proxy
+  const MAX_RETRIES = 3;
   let attempt = 1;
   let lastError: Error | null = null;
 
   while (attempt <= MAX_RETRIES) {
+    // v9.0: Generate fresh FPJS + DCR on EVERY attempt (not just the first one)
+    // This is critical: if attempt 1 failed because FPJS was rate-limited,
+    // attempt 2 needs a fresh requestId, not the same stale one.
+    let freshFgRequestId: string | undefined;
+    try {
+      freshFgRequestId = await getRequestIdDirect(options.fingerprint, options.proxy);
+    } catch (err) {
+      console.error(`[RPC] FPJS Direct falhou após retries para ${servicePath}: ${err instanceof Error ? err.message : err}`);
+    }
+
+    // Regenerate DCR fresh with the new FPJS requestId
+    const freshDcr = fingerprintService.regenerateDcr(options.fingerprint, freshFgRequestId);
+    const profileWithFreshDcr = {
+      ...options.fingerprint,
+      headers: {
+        ...options.fingerprint.headers,
+        "x-client-dcr": freshDcr,
+      },
+    };
+
+    const headers = fingerprintService.getOrderedHeaders(profileWithFreshDcr);
+    headers["Connect-Protocol-Version"] = "1";
+
+    if (options.authToken) {
+      headers["Authorization"] = `Bearer ${options.authToken}`;
+    }
+
+    if (extraHeaders) {
+      Object.assign(headers, extraHeaders);
+    }
+
     try {
       const response = await httpRequest({
         method: "POST",
@@ -127,8 +130,21 @@ async function rpcCall(
         const details = data.details as Array<{ debug?: { message?: string } }> | undefined;
         const debugMsg = details?.[0]?.debug?.message || (data.message as string) || "";
         
+        // v9.0: Expanded permanent errors list
         const permanentErrors = ["invalid_argument", "unauthenticated", "not_found", "already_exists", "permission_denied"];
         if (permanentErrors.includes(data.code as string)) {
+          const err = new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
+          err.name = "PermanentRpcError";
+          throw err;
+        }
+
+        // v9.0: CAPTCHA-related errors are now PERMANENT.
+        // code_1015 = "CAPTCHA verification failed" (invalid/expired FPJS requestId)
+        // code_1715 = "Need CAPTCHA code!" (FPJS completely failed, no requestId at all)
+        // Retrying with the same proxy+profile won't fix these — the orchestrator
+        // needs to allocate a fresh proxy and generate a new FPJS requestId.
+        const captchaErrorCodes = ["code_1015", "code_1715"];
+        if (captchaErrorCodes.some(code => debugMsg.includes(code) || (data.code as string).includes(code))) {
           const err = new Error(`RPC ${servicePath} error [${data.code}]: ${debugMsg}`);
           err.name = "PermanentRpcError";
           throw err;
@@ -159,7 +175,7 @@ async function rpcCall(
         break;
       }
       
-      const backoff = Math.min(2000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 30000);
+      const backoff = Math.min(3000 * Math.pow(2, attempt - 1) + Math.random() * 2000, 30000);
       console.warn(`[RPC] Falha transitória em ${servicePath} (tentativa ${attempt}/${MAX_RETRIES}): ${lastError.message}. Retentando em ${Math.round(backoff/1000)}s...`);
       
       await new Promise(r => setTimeout(r, backoff));

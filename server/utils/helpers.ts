@@ -541,20 +541,57 @@ export function encodeDCR(jsonString: string): string {
 export const logger = {
   async info(source: string, message: string, details: Record<string, unknown> = {}, jobId?: number) {
     const ts = new Date().toISOString();
-    console.log(`[${ts}] [INFO] [${source}] ${message}`);
+    const jobTag = jobId ? ` [job ${jobId}]` : "";
+    console.log(`[${ts}] [INFO] [${source}]${jobTag} ${message}`);
+    // v9.4: Print profileSnapshot and other diagnostic details to console
+    _printDiagnosticDetails(details);
     await _saveLog("info", source, message, details, jobId);
   },
   async warn(source: string, message: string, details: Record<string, unknown> = {}, jobId?: number) {
     const ts = new Date().toISOString();
-    console.warn(`[${ts}] [WARN] [${source}] ${message}`);
+    const jobTag = jobId ? ` [job ${jobId}]` : "";
+    console.warn(`[${ts}] [WARN] [${source}]${jobTag} ${message}`);
+    _printDiagnosticDetails(details);
     await _saveLog("warn", source, message, details, jobId);
   },
   async error(source: string, message: string, details: Record<string, unknown> = {}, jobId?: number) {
     const ts = new Date().toISOString();
-    console.error(`[${ts}] [ERROR] [${source}] ${message}`);
+    const jobTag = jobId ? ` [job ${jobId}]` : "";
+    console.error(`[${ts}] [ERROR] [${source}]${jobTag} ${message}`);
+    _printDiagnosticDetails(details);
     await _saveLog("error", source, message, details, jobId);
   },
 };
+
+/**
+ * v9.4: Print diagnostic details to console when they contain important data.
+ * Specifically targets profileSnapshot (for ban analysis) and error details,
+ * but also prints any non-trivial details object for debugging.
+ */
+function _printDiagnosticDetails(details: Record<string, unknown>): void {
+  if (!details || Object.keys(details).length === 0) return;
+
+  // Always print profileSnapshot in full (critical for ban pattern analysis)
+  if (details.profileSnapshot) {
+    console.log("  \u2514\u2500 profileSnapshot:", JSON.stringify(details.profileSnapshot, null, 2));
+    return;
+  }
+
+  // Print error-related details
+  if (details.error || details.errorMessage || details.responseBody) {
+    console.log("  \u2514\u2500 details:", JSON.stringify(details, null, 2));
+    return;
+  }
+
+  // For other details, print a compact one-liner if small, skip if trivial
+  const keys = Object.keys(details);
+  if (keys.length <= 3) {
+    const compact = keys.map(k => `${k}=${typeof details[k] === "string" ? details[k] : JSON.stringify(details[k])}`).join(", ");
+    if (compact.length <= 200) {
+      console.log(`  \u2514\u2500 ${compact}`);
+    }
+  }
+}
 
 async function _saveLog(
   level: "info" | "warn" | "error" | "debug",
