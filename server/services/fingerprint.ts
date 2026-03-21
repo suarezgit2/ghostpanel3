@@ -1,6 +1,15 @@
 /**
- * FingerprintService + HumanizationEngine
+ * FingerprintService + HumanizationEngine (v7.0 — Apify Integration)
  * Generates realistic browser fingerprints with DCR encoding for manus.im
+ *
+ * v7.0 CHANGES:
+ * - Integrated Apify fingerprint-generator (Bayesian Network trained on real browsers)
+ * - All fingerprint attributes are now INTERNALLY CONSISTENT:
+ *   GPU matches OS, screen matches device, deviceMemory matches hardware, etc.
+ * - BrowserProfile extended with Apify-sourced fields:
+ *   deviceMemory, hardwareConcurrency, webglVendor, webglRenderer,
+ *   fonts, audioCodecs, videoCodecs, battery, maxTouchPoints
+ * - Fallback to legacy hardcoded profiles if Apify fails
  *
  * DCR format reverse-engineered from manus.im frontend (module 54273):
  * {
@@ -8,35 +17,34 @@
  *   locale: string,       // e.g. "en-US"
  *   languages: string[],  // navigator.languages
  *   timezone: string,     // IANA timezone
- *   fgRequestId: string,  // FingerprintJS Pro requestId (real via rpc.ts, synthetic fallback)
+ *   fgRequestId: string,  // FingerprintJS Pro requestId (real via rpc.ts)
  *   clientId: string,     // localStorage client_id_v2
  *   screen: { width, height },
  *   viewport: { width, height },
  *   timestamp: number,    // Date.now()
  *   timezoneOffset: number // new Date().getTimezoneOffset()
  * }
- *
- * ANTI-DETECTION IMPROVEMENTS (v5.4):
- * - Real FPJS Pro requestIds are now generated PER RPC CALL inside rpc.ts
- *   (previously a single ID was reused across all calls, causing "user is blocked")
- * - regenerateDcr() accepts a fresh realFgRequestId from rpc.ts on each call
- * - Synthetic fgRequestId used as fallback when FPJS service is unavailable
- * - Real timezone offsets with DST awareness (Intl.DateTimeFormat)
- * - DCR is regenerated fresh on every call (fresh timestamp + fresh fgRequestId)
- * - Updated Chrome versions (133 removed, 134/135/136 added)
- * - firstEntry randomized with realistic distribution
  */
 
 import { encodeDCR, generateClientId } from "../utils/helpers";
+import { FingerprintGenerator } from "fingerprint-generator";
+
+// ============================================================
+// Apify Fingerprint Generator (singleton)
+// ============================================================
+
+const apifyGenerator = new FingerprintGenerator();
+
+// ============================================================
+// Synthetic fallback (used only if Apify fails)
+// ============================================================
 
 /**
  * Generate a synthetic FingerprintJS Pro requestId as fallback.
  * Format: {timestamp}.{6 random alphanumeric chars}
- * Used only when fpjsService fails to generate a real ID.
  */
 function generateFgRequestId(): string {
   const ALPHANUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  // Simulate page loaded 20-40 seconds ago
   const pageLoadDelay = 20000 + Math.floor(Math.random() * 20000);
   const ts = Date.now() - pageLoadDelay;
   let rand = '';
@@ -46,40 +54,36 @@ function generateFgRequestId(): string {
   return `${ts}.${rand}`;
 }
 
+// ============================================================
+// Timezone helpers
+// ============================================================
+
 /**
  * Get the REAL timezone offset in minutes for a given IANA timezone.
- * Uses Intl.DateTimeFormat to correctly handle DST (Daylight Saving Time).
- * Positive = west of UTC (matches JS getTimezoneOffset() convention).
- *
- * Example: In March 2026, America/New_York is in EDT (UTC-4) → offset = 240
- *          In January 2026, America/New_York is in EST (UTC-5) → offset = 300
+ * Uses Intl.DateTimeFormat to correctly handle DST.
  */
 function getRealTimezoneOffset(timezone: string): number {
   try {
     const now = new Date();
-    // Get the UTC time parts for this timezone
     const utcDate = new Date(now.toLocaleString("en-US", { timeZone: "UTC" }));
     const tzDate = new Date(now.toLocaleString("en-US", { timeZone: timezone }));
     const diffMs = utcDate.getTime() - tzDate.getTime();
-    // Convert to minutes (positive = west of UTC, matching JS convention)
     return Math.round(diffMs / 60000);
   } catch {
-    // Fallback to static values if timezone is invalid
     return STATIC_TZ_OFFSETS[timezone] ?? 300;
   }
 }
 
-// Static fallback offsets (used only if Intl fails)
 const STATIC_TZ_OFFSETS: Record<string, number> = {
-  "America/New_York": 240,   // EDT in March (DST active)
-  "America/Chicago": 300,    // CDT in March
-  "America/Denver": 360,     // MDT in March
-  "America/Los_Angeles": 420, // PDT in March
-  "America/Sao_Paulo": 180,  // BRT (no DST in 2026)
+  "America/New_York": 240,
+  "America/Chicago": 300,
+  "America/Denver": 360,
+  "America/Los_Angeles": 420,
+  "America/Sao_Paulo": 180,
   "America/Fortaleza": 180,
   "America/Manaus": 240,
-  "Europe/London": 0,        // GMT in March (BST starts late March)
-  "Europe/Berlin": -60,      // CET in March (CEST starts late March)
+  "Europe/London": 0,
+  "Europe/Berlin": -60,
   "Europe/Paris": -60,
   "Europe/Madrid": -60,
   "Asia/Tokyo": -540,
@@ -91,26 +95,9 @@ const STATIC_TZ_OFFSETS: Record<string, number> = {
   "Pacific/Auckland": -780,
 };
 
-interface UAProfile {
-  ua: string;
-  platform: string;
-  screens: number[][];
-  weight: number;
-  chromeVersion?: string;
-}
-
-// UPDATED: Chrome 132 removed (too old), Chrome 134/135/136 added
-// Chrome 136 remains dominant (most recent stable in early 2026)
-const UA_PROFILES: UAProfile[] = [
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 25, chromeVersion: "136" },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 20, chromeVersion: "135" },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900]], weight: 15, chromeVersion: "134" },
-  { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 15, chromeVersion: "136" },
-  { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 10, chromeVersion: "135" },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864]], weight: 5 },
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900]], weight: 8, chromeVersion: "136" },
-  { ua: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "Linux x86_64", screens: [[1920,1080],[1366,768],[2560,1440]], weight: 2, chromeVersion: "135" },
-];
+// ============================================================
+// Region config
+// ============================================================
 
 const TIMEZONES: Record<string, string[]> = {
   us: ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
@@ -132,33 +119,22 @@ const LOCALES: Record<string, string[]> = {
   default: ["en-US", "pt-BR", "en-GB"],
 };
 
-/**
- * Realistic firstEntry distribution.
- * Reverse-engineered from manus.im frontend (module 10358):
- *   getFirstEntry() reads localStorage "first_entry"
- *   Returns the stored value or undefined if empty/"0"
- *
- * The value stored is the FULL URL of the referrer or landing page:
- *   - undefined (not sent) — direct access (most common)
- *   - "https://manus.im/login" — direct to login page
- *   - "https://www.google.com" — came from Google
- *   - "https://twitter.com" — came from Twitter
- *
- * IMPORTANT: The old values ("direct", "google") were WRONG.
- * The real frontend stores full URLs, not short strings.
- */
+// ============================================================
+// First entry distribution
+// ============================================================
+
 const FIRST_ENTRY_OPTIONS: Array<{ value: string | undefined; weight: number }> = [
-  { value: undefined, weight: 45 },                          // Direct access — getFirstEntry() returns undefined
-  { value: "https://manus.im/login", weight: 15 },           // Direct to login
-  { value: "https://manus.im/", weight: 10 },                // Direct to homepage
-  { value: "https://www.google.com", weight: 12 },           // Google organic
-  { value: "https://www.google.com/search", weight: 5 },     // Google search
-  { value: "https://twitter.com", weight: 4 },               // Twitter/X
-  { value: "https://x.com", weight: 3 },                     // X (new domain)
-  { value: "https://www.linkedin.com", weight: 2 },          // LinkedIn
-  { value: "https://www.reddit.com", weight: 2 },            // Reddit
-  { value: "https://www.facebook.com", weight: 1 },          // Facebook
-  { value: "https://news.ycombinator.com", weight: 1 },      // Hacker News
+  { value: undefined, weight: 45 },
+  { value: "https://manus.im/login", weight: 15 },
+  { value: "https://manus.im/", weight: 10 },
+  { value: "https://www.google.com", weight: 12 },
+  { value: "https://www.google.com/search", weight: 5 },
+  { value: "https://twitter.com", weight: 4 },
+  { value: "https://x.com", weight: 3 },
+  { value: "https://www.linkedin.com", weight: 2 },
+  { value: "https://www.reddit.com", weight: 2 },
+  { value: "https://www.facebook.com", weight: 1 },
+  { value: "https://news.ycombinator.com", weight: 1 },
 ];
 
 function randomFirstEntry(): string | undefined {
@@ -170,6 +146,10 @@ function randomFirstEntry(): string | undefined {
   }
   return undefined;
 }
+
+// ============================================================
+// BrowserProfile (extended with Apify fields for FPJS payload)
+// ============================================================
 
 export interface BrowserProfile {
   userAgent: string;
@@ -185,22 +165,37 @@ export interface BrowserProfile {
   clientId: string;
   dcrEncoded: string;
   headers: Record<string, string>;
-  /** firstEntry value for authCommandCmd (URL or undefined for direct access) */
   firstEntry: string | undefined;
-  /** Real timezone offset in minutes (DST-aware) */
   timezoneOffset: number;
+
+  // === Apify-sourced fields (used by fpjsDirectClient.ts for 144 signals) ===
+
+  /** GPU vendor string, e.g. "Google Inc. (Intel)" */
+  webglVendor: string;
+  /** GPU renderer string, e.g. "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 ...)" */
+  webglRenderer: string;
+  /** Device memory in GB (1, 2, 4, 8, 16, 32) */
+  deviceMemory: number;
+  /** Logical CPU cores */
+  hardwareConcurrency: number;
+  /** Max touch points (0 for desktop, 1-10 for touch devices) */
+  maxTouchPoints: number;
+  /** List of installed fonts */
+  fonts: string[];
+  /** Audio codecs support map */
+  audioCodecs: Record<string, string>;
+  /** Video codecs support map */
+  videoCodecs: Record<string, string>;
+  /** Battery info (null if not available) */
+  battery: { charging: boolean; chargingTime: number | null; dischargingTime: number | null; level: number } | null;
+  /** Device pixel ratio */
+  devicePixelRatio: number;
 }
 
-/**
- * Build the DCR payload matching the exact format used by manus.im frontend.
- * Reverse-engineered from module 54273 of the manus.im webapp.
- *
- * IMPORTANT: This function generates a FRESH timestamp on every call.
- * The real browser regenerates the DCR for each API call (timestamp changes).
- *
- * @param realFgRequestId - Real FPJS Pro requestId from rpc.ts. If provided, uses it.
- *                          If not, falls back to synthetic ID (less safe).
- */
+// ============================================================
+// DCR builder
+// ============================================================
+
 function buildDcrPayload(params: {
   ua: string;
   locale: string;
@@ -214,8 +209,6 @@ function buildDcrPayload(params: {
   realFgRequestId?: string;
 }): string {
   const tzOffset = getRealTimezoneOffset(params.timezone);
-
-  // Use real FPJS ID if available (passed from rpc.ts per call), otherwise synthetic fallback
   const fgRequestId = params.realFgRequestId || generateFgRequestId();
 
   const payload = {
@@ -233,24 +226,199 @@ function buildDcrPayload(params: {
       width: params.viewportWidth,
       height: params.viewportHeight,
     },
-    // Timestamp com skew de 1-10s para simular latência de rede
     timestamp: Date.now() - (1000 + Math.floor(Math.random() * 9000)),
     timezoneOffset: tzOffset,
   };
   return JSON.stringify(payload);
 }
 
+// ============================================================
+// OS mapping for Apify constraints
+// ============================================================
+
+/**
+ * Map our region to Apify OS constraints.
+ * We only use desktop + Windows/macOS/Linux to match our use case.
+ */
+function getApifyOS(region: string): ("windows" | "macos" | "linux")[] {
+  // Predominantly Windows, with some macOS variation
+  const roll = Math.random();
+  if (roll < 0.70) return ["windows"];
+  if (roll < 0.90) return ["macos"];
+  return ["linux"];
+}
+
+// ============================================================
+// FingerprintService
+// ============================================================
+
 class FingerprintService {
   /**
-   * Generate a browser profile for the given region.
-   * NOTE (v5.4): realFgRequestId is NO LONGER passed here.
-   * Each RPC call in rpc.ts generates its own fresh FPJS ID and passes it to regenerateDcr().
-   * The initial DCR in the profile uses a synthetic ID (it will be overwritten before first use).
-   *
-   * @param region - Geo region bucket (us, br, eu, asia, id, sg, default)
+   * Generate a browser profile using Apify fingerprint-generator.
+   * Falls back to legacy hardcoded profiles if Apify fails.
    */
   generateProfile(region = "default"): BrowserProfile {
-    // Weighted random UA selection
+    const clientId = generateClientId();
+    const firstEntry = randomFirstEntry();
+
+    // Region-specific settings
+    const tzList = TIMEZONES[region] || TIMEZONES.default;
+    const timezone = tzList[Math.floor(Math.random() * tzList.length)];
+    const localeList = LOCALES[region] || LOCALES.default;
+    const locale = localeList[Math.floor(Math.random() * localeList.length)];
+
+    const languages = [locale];
+    if (!locale.startsWith("en")) languages.push("en-US");
+    languages.push("en");
+
+    try {
+      return this._generateWithApify(region, clientId, firstEntry, timezone, locale, languages);
+    } catch (err) {
+      console.warn(`[Fingerprint] Apify generation failed, using legacy fallback: ${err}`);
+      return this._generateLegacy(region, clientId, firstEntry, timezone, locale, languages);
+    }
+  }
+
+  /**
+   * Generate profile using Apify fingerprint-generator (Bayesian Network).
+   * Produces internally consistent fingerprints trained on real browser data.
+   */
+  private _generateWithApify(
+    region: string,
+    clientId: string,
+    firstEntry: string | undefined,
+    timezone: string,
+    locale: string,
+    languages: string[],
+  ): BrowserProfile {
+    const osConstraint = getApifyOS(region);
+
+    const { headers: apifyHeaders, fingerprint: fp } = apifyGenerator.getFingerprint({
+      devices: ["desktop"],
+      operatingSystems: osConstraint,
+    });
+
+    // Extract screen dimensions from Apify
+    const screenWidth = fp.screen.width;
+    const screenHeight = fp.screen.height;
+    const chromeUiHeight = 80 + Math.floor(Math.random() * 40);
+    // Use Apify's innerWidth/outerWidth if available, otherwise derive from screen
+    const viewportWidth = fp.screen.innerWidth > 0 ? fp.screen.innerWidth : screenWidth;
+    const viewportHeight = fp.screen.innerHeight > 0 ? fp.screen.innerHeight : (screenHeight - chromeUiHeight);
+    const colorDepth = fp.screen.colorDepth || 24;
+    const devicePixelRatio = fp.screen.devicePixelRatio || 1;
+
+    // Use Apify's user agent (it's consistent with the generated fingerprint)
+    const userAgent = fp.navigator.userAgent;
+    const platform = fp.navigator.platform;
+
+    // Extract GPU info
+    const webglVendor = fp.videoCard?.vendor || "Google Inc. (Intel)";
+    const webglRenderer = fp.videoCard?.renderer || "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+
+    // Extract hardware info
+    const deviceMemory = fp.navigator.deviceMemory ?? 8;
+    const hardwareConcurrency = fp.navigator.hardwareConcurrency || 8;
+    const maxTouchPoints = fp.navigator.maxTouchPoints ?? 0;
+
+    // Extract fonts
+    const fonts = fp.fonts || [];
+
+    // Extract codecs
+    const audioCodecs = fp.audioCodecs || {};
+    const videoCodecs = fp.videoCodecs || {};
+
+    // Extract battery
+    const battery = fp.battery ? {
+      charging: fp.battery.charging,
+      chargingTime: fp.battery.chargingTime,
+      dischargingTime: fp.battery.dischargingTime,
+      level: fp.battery.level,
+    } : null;
+
+    // Timezone offset
+    const baseOffset = getRealTimezoneOffset(timezone);
+    const jitterMinutes = Math.floor(Math.random() * 31) - 15;
+    const timezoneOffset = baseOffset + jitterMinutes;
+
+    // Build DCR
+    const dcrPayload = buildDcrPayload({
+      ua: userAgent,
+      locale,
+      languages,
+      timezone,
+      clientId,
+      screenWidth,
+      screenHeight,
+      viewportWidth,
+      viewportHeight,
+    });
+    const dcrEncoded = encodeDCR(dcrPayload);
+
+    // Build headers
+    const isChrome = userAgent.includes("Chrome") && !userAgent.includes("Firefox");
+    const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
+    const chromeVersion = chromeVersionMatch ? chromeVersionMatch[1] : "136";
+    const clientLocale = locale.split("-")[0];
+
+    const profileHeaders: Record<string, string> = {
+      "User-Agent": userAgent,
+      "Content-Type": "application/json",
+      "Accept": "*/*",
+      "Origin": "https://manus.im",
+      "Referer": "https://manus.im/",
+      "Accept-Encoding": "gzip, deflate, br, zstd",
+      "Accept-Language": locale + "," + locale.split("-")[0] + ";q=0.9",
+      "x-client-id": clientId,
+      "x-client-dcr": dcrEncoded,
+      "x-client-locale": clientLocale,
+      "x-client-timezone": timezone,
+      "x-client-timezone-offset": String(timezoneOffset),
+      "x-client-type": "web",
+    };
+
+    if (isChrome) {
+      const isEdge = userAgent.includes("Edg/");
+      profileHeaders["sec-ch-ua"] = isEdge
+        ? `"Microsoft Edge";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`
+        : `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`;
+      profileHeaders["sec-ch-ua-mobile"] = "?0";
+      profileHeaders["sec-ch-ua-platform"] = platform.includes("Win") ? '"Windows"' :
+                                              platform === "MacIntel" ? '"macOS"' : '"Linux"';
+      profileHeaders["Sec-Fetch-Site"] = "same-site";
+      profileHeaders["Sec-Fetch-Mode"] = "cors";
+      profileHeaders["Sec-Fetch-Dest"] = "empty";
+    }
+
+    return {
+      userAgent, platform, screenWidth, screenHeight,
+      viewportWidth, viewportHeight, colorDepth,
+      timezone, locale, languages, clientId, dcrEncoded,
+      headers: profileHeaders, firstEntry, timezoneOffset,
+      webglVendor, webglRenderer, deviceMemory, hardwareConcurrency,
+      maxTouchPoints, fonts, audioCodecs, videoCodecs, battery,
+      devicePixelRatio,
+    };
+  }
+
+  /**
+   * Legacy fallback: hardcoded UA profiles (used if Apify fails).
+   */
+  private _generateLegacy(
+    region: string,
+    clientId: string,
+    firstEntry: string | undefined,
+    timezone: string,
+    locale: string,
+    languages: string[],
+  ): BrowserProfile {
+    const UA_PROFILES = [
+      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 25 },
+      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440]], weight: 20 },
+      { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", platform: "MacIntel", screens: [[1440,900],[1680,1050],[2560,1600],[1920,1080]], weight: 15 },
+      { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36", platform: "Win32", screens: [[1920,1080],[1366,768],[1536,864]], weight: 15 },
+    ];
+
     const totalWeight = UA_PROFILES.reduce((sum, p) => sum + p.weight, 0);
     let random = Math.random() * totalWeight;
     let selectedProfile = UA_PROFILES[0];
@@ -264,61 +432,23 @@ class FingerprintService {
     const chromeUiHeight = 80 + Math.floor(Math.random() * 40);
     const viewportWidth = screenWidth;
     const viewportHeight = screenHeight - chromeUiHeight;
-
-    const tzList = TIMEZONES[region] || TIMEZONES.default;
-    const timezone = tzList[Math.floor(Math.random() * tzList.length)];
-    const localeList = LOCALES[region] || LOCALES.default;
-    const locale = localeList[Math.floor(Math.random() * localeList.length)];
-
-    const languages = [locale];
-    if (!locale.startsWith("en")) languages.push("en-US");
-    languages.push("en");
-
     const colorDepth = 24;
-    const clientId = generateClientId();
-    const firstEntry = randomFirstEntry();
 
-    // Timezone offset com jitter ±15min
     const baseOffset = getRealTimezoneOffset(timezone);
     const jitterMinutes = Math.floor(Math.random() * 31) - 15;
     const timezoneOffset = baseOffset + jitterMinutes;
 
-    // Build initial DCR (will be regenerated with fresh real FPJS ID before each RPC call)
     const dcrPayload = buildDcrPayload({
-      ua: selectedProfile.ua,
-      locale,
-      languages,
-      timezone,
-      clientId,
-      screenWidth,
-      screenHeight,
-      viewportWidth,
-      viewportHeight,
-      // No realFgRequestId here — each RPC call generates its own via rpc.ts
+      ua: selectedProfile.ua, locale, languages, timezone, clientId,
+      screenWidth, screenHeight, viewportWidth, viewportHeight,
     });
-
     const dcrEncoded = encodeDCR(dcrPayload);
 
-    const isChrome = selectedProfile.ua.includes("Chrome") && !selectedProfile.ua.includes("Firefox");
-    const chromeVersion = selectedProfile.chromeVersion || selectedProfile.ua.match(/Chrome\/(\d+)/)?.[1] || "136";
-
-    // X-Client-Locale: uses translationManager.locale which is the full locale ("en", "zh-CN", etc.)
-    // Reverse-engineered from module 99238: e.set("x-client-locale", r.I.translationManager.locale)
-    // The translationManager locale is typically the base language ("en") for English users
+    const isChrome = selectedProfile.ua.includes("Chrome");
+    const chromeVersion = selectedProfile.ua.match(/Chrome\/(\d+)/)?.[1] || "136";
     const clientLocale = locale.split("-")[0];
 
-    // IMPORTANT: These headers match EXACTLY what the real manus.im frontend sends.
-    // Reverse-engineered from module 99238 (chunk 99238-182ef26fd616703a.js).
-    // The frontend sets these headers on EVERY request:
-    //   e.set("x-client-type", "web")
-    //   e.set("x-client-id", clientId)
-    //   e.set("x-client-locale", translationManager.locale)
-    //   e.set("x-client-timezone", Intl.DateTimeFormat().resolvedOptions().timeZone)
-    //   e.set("x-client-timezone-offset", String(new Date().getTimezoneOffset()))
-    //
-    // NOTE: The frontend does NOT send "x-client-version"!
-    // The old "X-Client-Version: 2.3.1" was a PHANTOM header that would flag us as a bot.
-    const headers: Record<string, string> = {
+    const profileHeaders: Record<string, string> = {
       "User-Agent": selectedProfile.ua,
       "Content-Type": "application/json",
       "Accept": "*/*",
@@ -332,38 +462,39 @@ class FingerprintService {
       "x-client-timezone": timezone,
       "x-client-timezone-offset": String(timezoneOffset),
       "x-client-type": "web",
-      // NO x-client-version — the real frontend does NOT send this header!
     };
 
     if (isChrome) {
-      const isEdge = selectedProfile.ua.includes("Edg/");
-      headers["sec-ch-ua"] = isEdge
-        ? `"Microsoft Edge";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`
-        : `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`;
-      headers["sec-ch-ua-mobile"] = "?0";
-      headers["sec-ch-ua-platform"] = selectedProfile.platform === "Win32" ? '"Windows"' :
-                                       selectedProfile.platform === "MacIntel" ? '"macOS"' : '"Linux"';
-      headers["Sec-Fetch-Site"] = "same-site";
-      headers["Sec-Fetch-Mode"] = "cors";
-      headers["Sec-Fetch-Dest"] = "empty";
+      profileHeaders["sec-ch-ua"] = `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not A(Brand";v="24"`;
+      profileHeaders["sec-ch-ua-mobile"] = "?0";
+      profileHeaders["sec-ch-ua-platform"] = selectedProfile.platform === "Win32" ? '"Windows"' : '"macOS"';
+      profileHeaders["Sec-Fetch-Site"] = "same-site";
+      profileHeaders["Sec-Fetch-Mode"] = "cors";
+      profileHeaders["Sec-Fetch-Dest"] = "empty";
     }
 
     return {
       userAgent: selectedProfile.ua, platform: selectedProfile.platform,
       screenWidth, screenHeight, viewportWidth, viewportHeight,
-      colorDepth, timezone, locale, languages, clientId, dcrEncoded, headers,
-      firstEntry, timezoneOffset,
+      colorDepth, timezone, locale, languages, clientId, dcrEncoded,
+      headers: profileHeaders, firstEntry, timezoneOffset,
+      // Legacy defaults for Apify fields
+      webglVendor: "Google Inc. (NVIDIA)",
+      webglRenderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      deviceMemory: 8,
+      hardwareConcurrency: 8,
+      maxTouchPoints: 0,
+      fonts: [],
+      audioCodecs: {},
+      videoCodecs: {},
+      battery: null,
+      devicePixelRatio: 1,
     };
   }
 
   /**
    * Regenerate the DCR for a given profile with a fresh timestamp and fgRequestId.
-   * MUST be called before every RPC call to match real browser behavior.
-   * The real manus.im frontend always generates a fresh DCR per call.
-   *
-   * @param profile - The browser profile to regenerate DCR for
-   * @param newRealFgRequestId - Fresh real FPJS requestId from rpc.ts for this specific call.
-   *                             If not provided, falls back to synthetic ID.
+   * MUST be called before every RPC call.
    */
   regenerateDcr(profile: BrowserProfile, newRealFgRequestId?: string): string {
     const dcrPayload = buildDcrPayload({
@@ -382,7 +513,6 @@ class FingerprintService {
   }
 
   getOrderedHeaders(profile: BrowserProfile, extraHeaders: Record<string, string> = {}): Record<string, string> {
-    // Chrome header order matches real browser traffic (observed from DevTools)
     const CHROME_HEADER_ORDER = [
       "host", "connection", "content-length",
       "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",

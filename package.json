@@ -58,6 +58,7 @@
     "drizzle-orm": "^0.44.5",
     "embla-carousel-react": "^8.6.0",
     "express": "^4.21.2",
+    "fingerprint-generator": "^2.1.81",
     "framer-motion": "^12.23.22",
     "https-proxy-agent": "^8.0.0",
     "impers": "^0.0.1",

@@ -1,5 +1,5 @@
 /**
- * FPJS Pro Direct Client — HTTP POST without Puppeteer (v6.4)
+ * FPJS Pro Direct Client — HTTP POST without Puppeteer (v7.0 — Apify Integration)
  *
  * Generates a REAL FPJS Pro requestId by:
  * 1. Building the fingerprint payload JSON (144 signals)
@@ -8,10 +8,14 @@
  * 4. Sending via HTTP POST to metrics.manus.im
  * 5. Decrypting the response to extract requestId
  *
+ * v7.0 CHANGES:
+ * - Now uses Apify-sourced fields from BrowserProfile for GPU, deviceMemory,
+ *   hardwareConcurrency, maxTouchPoints, fonts, devicePixelRatio.
+ *   All signals are internally consistent (Bayesian Network trained on real browsers).
+ * - Removed hardcoded GPU pool — GPU comes from profile.webglVendor/webglRenderer.
+ * - deviceMemory and hardwareConcurrency from profile instead of fixed 8.
  * v6.4 CHANGES:
  * - First attempt uses proxy, retries go DIRECT (no proxy).
- *   Investigation confirmed: the 429 comes from the proxy, not FPJS.
- *   FPJS validates by API key, not source IP. Direct requests work fine.
  * v6.2/6.3 CHANGES:
  * - NEVER falls back to synthetic ID. Retries with exponential backoff on 400/429.
  * - Serialized via semaphore (max 1 concurrent FPJS request).
@@ -231,30 +235,9 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     system: 144.640625 + fontJitter("f_sys"),
   };
 
-  // WebGL vendor/renderer — expanded GPU pool for diversity between accounts
-  const gpuPool = [
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 2070 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 7800 XT Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
-  ];
-  // Deterministic GPU selection per profile
-  const gpuIndex = hashCode(profile.clientId + "gpu") % gpuPool.length;
-  const selectedGpu = gpuPool[gpuIndex];
-  const webglVendor = selectedGpu.vendor;
-  const webglRenderer = selectedGpu.renderer;
+  // WebGL vendor/renderer — now sourced from Apify (consistent with OS/device)
+  const webglVendor = profile.webglVendor;
+  const webglRenderer = profile.webglRenderer;
 
   return {
     // Metadata
@@ -277,10 +260,10 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s1: sig(isWindows ? null : (profile.platform === "Linux x86_64" ? "Linux x86_64" : null), isWindows ? NOT_SUPPORTED : OK),
     s2: sig([profile.languages]),
     s3: sig(profile.colorDepth),
-    s4: sig(8), // deviceMemory
+    s4: sig(profile.deviceMemory), // deviceMemory (from Apify — consistent with hardware)
     s5: sig([profile.screenWidth, profile.screenHeight]),
     s6: sig([0, 0, 0, 0]),
-    s7: sig(8), // hardwareConcurrency
+    s7: sig(profile.hardwareConcurrency), // hardwareConcurrency (from Apify — consistent with CPU)
     s9: sig(profile.timezone),
     s10: sig(true),
     s11: sig(true),
@@ -296,7 +279,7 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
       { name: "WebKit built-in PDF", description: "Portable Document Format", mimeTypes: [{ type: "application/pdf", suffixes: "pdf" }, { type: "text/pdf", suffixes: "pdf" }] },
     ]),
     s17: sig({ winding: true, geometry: canvasGeometry, text: canvasText }),
-    s19: sig({ maxTouchPoints: 0, touchEvent: false, touchStart: false }),
+    s19: sig({ maxTouchPoints: profile.maxTouchPoints, touchEvent: profile.maxTouchPoints > 0, touchStart: profile.maxTouchPoints > 0 }),
     s20: sig([]),
     s21: sig(audioFp),
     s22: sig(23),
@@ -385,7 +368,7 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s103: sig(profile.userAgent.replace("Mozilla/", "")),
     s104: sig(0),
     s106: sig(false), // webdriver = false (CRITICAL!)
-    s117: sig(8),
+    s117: sig(profile.deviceMemory), // deviceMemory repeated (from Apify)
     s118: sig(true),
     s119: sig("TypeError: Cannot read properties of null (reading '0')\n    at https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js:1:1"),
     s120: sig(false),
