@@ -1,5 +1,5 @@
 /**
- * FPJS Pro Direct Client — HTTP POST without Puppeteer (v6.2)
+ * FPJS Pro Direct Client — HTTP POST without Puppeteer (v6.4)
  *
  * Generates a REAL FPJS Pro requestId by:
  * 1. Building the fingerprint payload JSON (144 signals)
@@ -8,15 +8,15 @@
  * 4. Sending via HTTP POST to metrics.manus.im
  * 5. Decrypting the response to extract requestId
  *
- * v6.2 CHANGES:
+ * v6.4 CHANGES:
+ * - First attempt uses proxy, retries go DIRECT (no proxy).
+ *   Investigation confirmed: the 429 comes from the proxy, not FPJS.
+ *   FPJS validates by API key, not source IP. Direct requests work fine.
+ * v6.2/6.3 CHANGES:
  * - NEVER falls back to synthetic ID. Retries with exponential backoff on 400/429.
- * - Serialized via semaphore (max 1 concurrent FPJS request) to avoid rate limiting.
+ * - Serialized via semaphore (max 1 concurrent FPJS request).
  * - mo: ["id"] only — no bot detection (bd) or extras (ex) modules.
- *   This means FPJS Server API returns the requestId WITHOUT Smart Signals
- *   (tampering, proxy, vpn, botd). When Manus queries our requestId, it gets
- *   a valid 200 response but no negative signals to block us.
- * - RequestId cache (5min TTL per proxy) — avoids the ~60s proxy tunnel delay
- *   on every RPC call. First call generates, subsequent calls reuse.
+ * - RequestId cache (5min TTL per proxy).
  *
  * ADVANTAGES over Puppeteer approach:
  * - No browser process = no memory overhead, no bot detection via webdriver
@@ -799,6 +799,10 @@ export async function getRequestIdDirect(
 /**
  * Internal: generate requestId with retry + exponential backoff.
  * NEVER falls back to synthetic ID — keeps retrying until success or max retries.
+ *
+ * v6.4: First attempt uses proxy. On failure (429/network), retries go DIRECT
+ * (no proxy). The 429 typically comes from the proxy, not from FPJS itself.
+ * FPJS validates by API key, not source IP, so direct requests work fine.
  */
 async function _generateRequestIdWithRetry(
   profile: BrowserProfile,
@@ -808,9 +812,12 @@ async function _generateRequestIdWithRetry(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= FPJS_MAX_RETRIES; attempt++) {
+    // First attempt: use proxy. Retries: go direct (no proxy) to avoid proxy 429/tunnel issues.
+    const useProxy = attempt === 0 ? proxy : null;
+
     if (attempt > 0) {
       const delayMs = FPJS_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      console.log(`[FPJS-Direct] Retry ${attempt}/${FPJS_MAX_RETRIES} após ${delayMs / 1000}s... ${jobId ? `[job ${jobId}]` : ""}`);
+      console.log(`[FPJS-Direct] Retry ${attempt}/${FPJS_MAX_RETRIES} após ${delayMs / 1000}s (sem proxy)... ${jobId ? `[job ${jobId}]` : ""}`);
       await new Promise(r => setTimeout(r, delayMs));
     }
 
@@ -828,13 +835,13 @@ async function _generateRequestIdWithRetry(
       // 4. Apply XOR obfuscation with compressed markers [3, 14]
       const encrypted = fpjsEncrypt(compressed, true);
 
-      // 5. Send via HTTP POST
-      const response = await sendBinaryPost(FPJS_URL, encrypted, proxy, profile.userAgent);
+      // 5. Send via HTTP POST (proxy on attempt 0, direct on retries)
+      const response = await sendBinaryPost(FPJS_URL, encrypted, useProxy, profile.userAgent);
 
       if (response.status === 429 || response.status === 400) {
         lastError = new Error(`FPJS Direct POST: status ${response.status}`);
-        console.warn(`[FPJS-Direct] Rate limited (${response.status}), will retry... ${jobId ? `[job ${jobId}]` : ""}`);
-        continue; // retry with backoff
+        console.warn(`[FPJS-Direct] ${response.status} ${useProxy ? "via proxy " + useProxy.host : "direct"}, will retry... ${jobId ? `[job ${jobId}]` : ""}`);
+        continue; // retry with backoff (next attempt goes direct)
       }
 
       if (response.status !== 200) {
@@ -855,8 +862,8 @@ async function _generateRequestIdWithRetry(
       const data = JSON.parse(responseJson);
 
       if (data.requestId) {
-        console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) ${proxy ? `via proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
-        // Cache the requestId to avoid repeated 60s proxy tunnel delays
+        console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) ${useProxy ? `via proxy ${useProxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
+        // Cache the requestId keyed by the original proxy (even if generated direct)
         setCachedRequestId(proxy, data.requestId);
         return data.requestId;
       }
@@ -871,7 +878,7 @@ async function _generateRequestIdWithRetry(
       lastError = err instanceof Error ? err : new Error(String(err));
       // Network errors (socket disconnect, code 56) are also retryable
       if (lastError.message.includes("socket disconnected") || lastError.message.includes("code 56")) {
-        console.warn(`[FPJS-Direct] Network error, will retry... ${jobId ? `[job ${jobId}]` : ""}: ${lastError.message}`);
+        console.warn(`[FPJS-Direct] Network error ${useProxy ? "via proxy" : "direct"}, will retry... ${jobId ? `[job ${jobId}]` : ""}: ${lastError.message}`);
         continue;
       }
       // Non-retryable errors: throw immediately
