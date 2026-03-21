@@ -27,7 +27,7 @@
  *   Legado (ainda suportado): sms_country, sms_max_price, sms_provider_ids
  */
 
-import { getSetting, setSetting } from "../utils/settings";
+import { getSetting, setSetting, clearSettingsCache } from "../utils/settings";
 import { sleep, logger, checkAbort } from "../utils/helpers";
 
 const SMSBOWER_API = "https://smsbower.app/stubs/handler_api.php";
@@ -481,13 +481,16 @@ class ProviderHealthTracker {
         providerId: id,
         successes: h.successes || 0,
         failures: h.failures || 0,
-        consecutiveFailures: h.consecutiveFailures || 0,
+        // v9.5.2: Reset consecutive counters on restore to prevent auto-blacklist
+        // from historical data. Providers start fresh after restart but keep
+        // cumulative stats (successes, failures) for score calculation.
+        consecutiveFailures: 0,
         targetRejections: h.targetRejections || 0,
-        consecutiveTargetRejections: h.consecutiveTargetRejections || 0,
+        consecutiveTargetRejections: 0,
         totalResponseTimeMs: h.totalResponseTimeMs || 0,
         lastFailureAt: h.lastFailureAt || 0,
         lastSuccessAt: h.lastSuccessAt || 0,
-        cooldownUntil: h.cooldownUntil || 0,
+        cooldownUntil: 0, // Also clear cooldowns on restart
       });
     }
   }
@@ -844,14 +847,31 @@ class SmsService {
       this.healthPersistTimer = null;
     }
 
+    // Clear blacklist in DB
     await setSetting("sms_blacklisted_providers", "", "Provedores banidos permanentemente por performance ruim");
+    
+    // Reset all in-memory trackers
     this.providerHealth.reset();
     this.numberQuality.reset();
+    
+    // Clear persisted health/quality in DB
     await setSetting("sms_provider_health", "{}");
     await setSetting("sms_number_quality", "{}");
 
     // v9.5: Set cooldown to prevent running jobs from re-blacklisting immediately
     this.blacklistResetAt = Date.now();
+
+    // v9.5.2: Force-clear the settings cache so subsequent reads get fresh DB values
+    clearSettingsCache();
+
+    // v9.5.2: Verify the clear actually worked
+    const verify = await getSetting("sms_blacklisted_providers");
+    console.log(`[SmsService] clearBlacklist verify: sms_blacklisted_providers = "${verify || ""}"`);
+    if (verify && verify.trim() !== "") {
+      console.error(`[SmsService] ERRO: Blacklist não foi limpa! Valor no banco: "${verify}". Tentando novamente...`);
+      await setSetting("sms_blacklisted_providers", "");
+      clearSettingsCache();
+    }
 
     console.log("[SmsService] Blacklist, health e quality resetados (cooldown de 2min para re-blacklist)");
   }
