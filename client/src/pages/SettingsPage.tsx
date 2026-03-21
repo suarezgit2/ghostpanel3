@@ -350,6 +350,17 @@ export default function SettingsPage() {
     "admin_password_hash",
   ]);
 
+  // v9.5.2: Chaves gerenciadas automaticamente por mutations específicas.
+  // "Salvar Tudo" NÃO deve sobrescrever esses valores, pois são controlados
+  // por clearBlacklist, saveSmsCountries, health tracker, etc.
+  const MANAGED_KEYS = new Set([
+    "sms_blacklisted_providers",
+    "sms_provider_health",
+    "sms_number_quality",
+    "sms_countries",
+    "sms_provider_ids",
+  ]);
+
   const saveSettings = async () => {
     setSaving(true);
     try {
@@ -357,6 +368,8 @@ export default function SettingsPage() {
         .filter(([_, v]) => v !== undefined && v !== null)
         // PROTEÇÃO: nunca enviar valores mascarados (****xxxx) — eles não foram editados
         .filter(([key, value]) => !(SENSITIVE_KEYS.has(key) && value.startsWith("****")))
+        // v9.5.2: nunca sobrescrever chaves gerenciadas por mutations específicas
+        .filter(([key]) => !MANAGED_KEYS.has(key))
         .map(([key, value]) => ({ key, value }));
       await setBulkMutation.mutateAsync(entries);
     } finally {

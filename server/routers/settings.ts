@@ -93,9 +93,24 @@ export const settingsRouter = router({
       let saved = 0;
       let skipped = 0;
 
+      // v9.5.2: Chaves gerenciadas por mutations específicas (blacklist, health, countries).
+      // setBulk NÃO deve sobrescrever esses valores para evitar race conditions.
+      const MANAGED_KEYS = new Set([
+        "sms_blacklisted_providers",
+        "sms_provider_health",
+        "sms_number_quality",
+        "sms_countries",
+        "sms_provider_ids",
+      ]);
+
       for (const item of input) {
         // PROTEÇÃO: pular valores mascarados para não sobrescrever credenciais reais
         if (SENSITIVE_KEYS.has(item.key) && isMaskedValue(item.value)) {
+          skipped++;
+          continue;
+        }
+        // v9.5.2: pular chaves gerenciadas automaticamente
+        if (MANAGED_KEYS.has(item.key)) {
           skipped++;
           continue;
         }
