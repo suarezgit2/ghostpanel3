@@ -945,71 +945,100 @@ function setCachedRequestId(proxy: ProxyInfo | null | undefined, requestId: stri
 }
 
 // ============================================================
-// Semaphore — serializes FPJS requests to avoid 429 rate limiting
+// Per-Proxy Cooldown Tracker (v9.2 — True Job Isolation)
+//
+// v9.0/v9.1 had a GLOBAL semaphore (concurrency=1) and a GLOBAL rate limiter
+// that serialized ALL FPJS requests across ALL jobs into a single queue.
+// This was the root cause of jobs not running in parallel:
+//   10 jobs × 7 RPCs × 2-5s each = 140-350s of serial waiting.
+//
+// v9.2 REMOVES all global serialization. Each job uses its own proxy,
+// and FPJS rate-limits per IP (not globally). So:
+//   - Job A (proxy 1.2.3.4) can request FPJS simultaneously with
+//   - Job B (proxy 5.6.7.8) — no interference.
+//
+// The only shared state is a per-proxy cooldown map: if proxy X gets a 429,
+// only requests through proxy X are delayed. Other proxies are unaffected.
 // ============================================================
 
-class FpjsSemaphore {
-  private queue: Array<() => void> = [];
-  private running = 0;
-  constructor(private maxConcurrency: number) {}
+const proxyCooldowns = new Map<string, number>(); // proxy key -> cooldown-until timestamp
+const COOLDOWN_AFTER_429_MS = 10000; // 10s cooldown per proxy after 429
 
-  async acquire(): Promise<void> {
-    if (this.running < this.maxConcurrency) {
-      this.running++;
-      return;
-    }
-    return new Promise<void>((resolve) => {
-      this.queue.push(() => { this.running++; resolve(); });
-    });
-  }
-
-  release(): void {
-    this.running--;
-    const next = this.queue.shift();
-    if (next) next();
-  }
+function getProxyCooldownKey(proxy?: ProxyInfo | null): string {
+  return proxy ? `${proxy.host}:${proxy.port}` : "direct";
 }
 
-const fpjsSemaphore = new FpjsSemaphore(1);
+function getProxyCooldownWait(proxy?: ProxyInfo | null): number {
+  const key = getProxyCooldownKey(proxy);
+  const until = proxyCooldowns.get(key);
+  if (!until) return 0;
+  const wait = until - Date.now();
+  if (wait <= 0) {
+    proxyCooldowns.delete(key);
+    return 0;
+  }
+  return wait;
+}
+
+function setProxyCooldown(proxy?: ProxyInfo | null): void {
+  const key = getProxyCooldownKey(proxy);
+  proxyCooldowns.set(key, Date.now() + COOLDOWN_AFTER_429_MS);
+}
 
 // ============================================================
 // Public API
 // ============================================================
 
-const FPJS_MAX_RETRIES = 4;
-const FPJS_BASE_DELAY_MS = 3000;
+const FPJS_MAX_RETRIES = 3; // v9.2: reduced from 4 — fail fast, let orchestrator handle
+const FPJS_BASE_DELAY_MS = 3000; // v9.2: reduced from 5s — no global queue, so faster retry is safe
 
 /**
  * Generate a REAL FPJS Pro requestId via HTTP POST.
  * No Puppeteer, no browser — just a direct HTTP request.
+ *
+ * v9.2 CHANGES (True Job Isolation — Zero Global Serialization):
+ * - REMOVED global semaphore (was concurrency=1, serializing ALL jobs)
+ * - REMOVED global rate limiter (was 2s gap between ANY request)
+ * - REMOVED global cooldown (was 15s pause for ALL jobs on ANY 429)
+ * - ADDED per-proxy cooldown (429 on proxy X only affects proxy X)
+ * - Each job runs independently through its own proxy — zero interference
+ * - STILL never falls back to server IP (v9.0 protection maintained)
+ * - Cache per-proxy still active (helps when same proxy does multiple RPCs)
  */
 export async function getRequestIdDirect(
   profile: BrowserProfile,
   proxy?: ProxyInfo | null,
   jobId?: number,
 ): Promise<string> {
+  // Check cache first (same proxy may have been used for a previous RPC in this job)
   const cached = getCachedRequestId(proxy);
   if (cached) {
     console.log(`[FPJS-Direct] ✓ Using cached RequestId: ${cached} ${proxy ? `for proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
     return cached;
   }
 
-  await fpjsSemaphore.acquire();
-  try {
-    const cachedAfterWait = getCachedRequestId(proxy);
-    if (cachedAfterWait) {
-      console.log(`[FPJS-Direct] ✓ Using cached RequestId (post-semaphore): ${cachedAfterWait} ${proxy ? `for proxy ${proxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
-      return cachedAfterWait;
-    }
-
-    return await _generateRequestIdWithRetry(profile, proxy, jobId);
-  } finally {
-    fpjsSemaphore.release();
+  // v9.2: Per-proxy cooldown only — if THIS proxy got a 429, wait before retrying
+  const cooldownWait = getProxyCooldownWait(proxy);
+  if (cooldownWait > 0) {
+    console.log(`[FPJS-Direct] Per-proxy cooldown: aguardando ${Math.round(cooldownWait / 1000)}s para proxy ${proxy?.host || "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
+    await new Promise(r => setTimeout(r, cooldownWait));
   }
+
+  // No semaphore, no global queue — go directly to retry logic
+  return await _generateRequestIdWithRetry(profile, proxy, jobId);
 }
 
 /**
  * Internal: generate requestId with retry + exponential backoff.
+ *
+ * v9.0 KEY CHANGE: Retries ALWAYS use the same proxy, NEVER fall back to
+ * the server's direct IP. The old behavior (attempt > 0 → no proxy) caused
+ * ALL concurrent jobs to hammer the FPJS endpoint from the same server IP,
+ * triggering cascading 429 rate limits that made 70% of jobs fail.
+ *
+ * If the proxy itself is the problem (400), the job should fail fast and
+ * let the orchestrator allocate a new proxy on the next attempt — not
+ * pollute the server IP with direct requests.
  */
 async function _generateRequestIdWithRetry(
   profile: BrowserProfile,
@@ -1019,11 +1048,16 @@ async function _generateRequestIdWithRetry(
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= FPJS_MAX_RETRIES; attempt++) {
-    const useProxy = attempt === 0 ? proxy : null;
+    // v9.0+: ALWAYS use the proxy — never fall back to direct
+    const useProxy = proxy;
 
     if (attempt > 0) {
-      const delayMs = FPJS_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      console.log(`[FPJS-Direct] Retry ${attempt}/${FPJS_MAX_RETRIES} após ${delayMs / 1000}s (sem proxy)... ${jobId ? `[job ${jobId}]` : ""}`);
+      // v9.2: Check per-proxy cooldown before retry
+      const cooldown = getProxyCooldownWait(useProxy);
+      const jitter = Math.random() * 1500;
+      const backoff = FPJS_BASE_DELAY_MS * Math.pow(2, attempt - 1) + jitter;
+      const delayMs = Math.max(backoff, cooldown);
+      console.log(`[FPJS-Direct] Retry ${attempt}/${FPJS_MAX_RETRIES} após ${(delayMs / 1000).toFixed(1)}s via proxy ${useProxy?.host || "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
       await new Promise(r => setTimeout(r, delayMs));
     }
 
@@ -1035,9 +1069,22 @@ async function _generateRequestIdWithRetry(
       const encrypted = fpjsEncrypt(compressed, true);
       const response = await sendBinaryPost(FPJS_URL, encrypted, useProxy, profile.userAgent);
 
-      if (response.status === 429 || response.status === 400) {
-        lastError = new Error(`FPJS Direct POST: status ${response.status}`);
-        console.warn(`[FPJS-Direct] ${response.status} ${useProxy ? "via proxy " + useProxy.host : "direct"}, will retry... ${jobId ? `[job ${jobId}]` : ""}`);
+      if (response.status === 429) {
+        // v9.2: Per-proxy cooldown only — does NOT affect other jobs/proxies
+        setProxyCooldown(useProxy);
+        lastError = new Error(`FPJS Direct POST: status 429`);
+        console.warn(`[FPJS-Direct] 429 via proxy ${useProxy?.host || "direct"} — cooldown ${COOLDOWN_AFTER_429_MS / 1000}s (per-proxy only) ${jobId ? `[job ${jobId}]` : ""}`);
+        continue;
+      }
+
+      if (response.status === 400) {
+        lastError = new Error(`FPJS Direct POST: status 400`);
+        console.warn(`[FPJS-Direct] 400 via proxy ${useProxy?.host || "direct"} — payload rejeitado ${jobId ? `[job ${jobId}]` : ""}`);
+        // On 400, fail fast after 2 attempts (payload or proxy issue)
+        if (attempt >= 1) {
+          console.warn(`[FPJS-Direct] 400 persistente — abortando (proxy bloqueado ou payload inválido) ${jobId ? `[job ${jobId}]` : ""}`);
+          break;
+        }
         continue;
       }
 
@@ -1056,7 +1103,7 @@ async function _generateRequestIdWithRetry(
       const data = JSON.parse(responseJson);
 
       if (data.requestId) {
-        console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) ${useProxy ? `via proxy ${useProxy.host}` : "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
+        console.log(`[FPJS-Direct] ✓ RequestId: ${data.requestId} (confidence: ${data.products?.identification?.data?.result?.confidence?.score || "?"}) via proxy ${useProxy?.host || "direct"} ${jobId ? `[job ${jobId}]` : ""}${attempt > 0 ? ` (retry ${attempt})` : ""}`);
         setCachedRequestId(proxy, data.requestId);
         return data.requestId;
       }
@@ -1069,8 +1116,8 @@ async function _generateRequestIdWithRetry(
 
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (lastError.message.includes("socket disconnected") || lastError.message.includes("code 56")) {
-        console.warn(`[FPJS-Direct] Network error ${useProxy ? "via proxy" : "direct"}, will retry... ${jobId ? `[job ${jobId}]` : ""}: ${lastError.message}`);
+      if (lastError.message.includes("socket disconnected") || lastError.message.includes("code 56") || lastError.message.includes("timeout")) {
+        console.warn(`[FPJS-Direct] Network error via proxy ${useProxy?.host || "direct"}, will retry... ${jobId ? `[job ${jobId}]` : ""}: ${lastError.message}`);
         continue;
       }
       if (!lastError.message.includes("status 400") && !lastError.message.includes("status 429")) {

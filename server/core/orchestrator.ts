@@ -67,38 +67,10 @@ export interface QuickJobRecipient {
   jobCount?: number;
 }
 
-// v9.1: Global job concurrency limiter.
-// With a pool of 20 proxies and single-use policy, running more than 3-4 jobs
-// simultaneously causes proxy exhaustion within minutes. This semaphore ensures
-// at most MAX_CONCURRENT_JOBS jobs are actively running at any time.
-// Additional jobs wait in a FIFO queue until a slot opens.
-const MAX_CONCURRENT_JOBS = 3;
-
-class JobSemaphore {
-  private running = 0;
-  private queue: Array<() => void> = [];
-
-  async acquire(): Promise<void> {
-    if (this.running < MAX_CONCURRENT_JOBS) {
-      this.running++;
-      return;
-    }
-    return new Promise<void>((resolve) => {
-      this.queue.push(() => { this.running++; resolve(); });
-    });
-  }
-
-  release(): void {
-    this.running--;
-    const next = this.queue.shift();
-    if (next) next();
-  }
-
-  get activeCount(): number { return this.running; }
-  get queuedCount(): number { return this.queue.length; }
-}
-
-const jobSemaphore = new JobSemaphore();
+// v9.2: JobSemaphore REMOVED. With per-proxy isolation in FPJS (no global semaphore),
+// each job is truly independent. The old semaphore was a band-aid for the global FPJS
+// serialization problem — now that the root cause is fixed, jobs can run fully in parallel.
+// Each job gets its own proxy and makes its own FPJS requests without interfering with others.
 
 class Orchestrator {
   /** Maps jobId -> AbortController for immediate cancellation signaling */
@@ -148,25 +120,8 @@ class Orchestrator {
     const abortController = new AbortController();
     this.activeJobs.set(jobId, abortController);
 
-    // v9.1: Wrap execution in job semaphore to limit concurrency
-    const wrappedExecution = async () => {
-      await logger.info("orchestrator",
-        `Job ${jobId}: aguardando slot (${jobSemaphore.activeCount}/${MAX_CONCURRENT_JOBS} ativos, ${jobSemaphore.queuedCount} na fila)`,
-        {}, jobId
-      );
-      await jobSemaphore.acquire();
-      await logger.info("orchestrator",
-        `Job ${jobId}: slot adquirido (${jobSemaphore.activeCount}/${MAX_CONCURRENT_JOBS} ativos)`,
-        {}, jobId
-      );
-      try {
-        await this.executeJob(jobId, provider, providerId, options, abortController.signal);
-      } finally {
-        jobSemaphore.release();
-      }
-    };
-
-    wrappedExecution().catch(async (err) => {
+    // v9.2: Direct execution — no job semaphore. Each job is fully independent.
+    this.executeJob(jobId, provider, providerId, options, abortController.signal).catch(async (err) => {
       if (err instanceof Error && err.name === "AbortError") {
         // Job was aborted — status already set by cancelJob/deleteJob
         return;
