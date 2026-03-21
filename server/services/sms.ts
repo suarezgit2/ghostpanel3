@@ -221,7 +221,7 @@ interface RetryResult {
       const now = Date.now();
       const data: Record<string, any> = {};
       
-      for (const [number, info] of this.rejectionCache.entries()) {
+      for (const [number, info] of Array.from(this.rejectionCache.entries())) {
         if (now - info.rejectedAt <= this.REJECTION_TTL) {
           data[number] = info;
         }
@@ -602,7 +602,7 @@ class SmsService {
     const now = Date.now();
     const toProcess: string[] = [];
 
-    for (const [activationId, item] of this.cancelQueue.entries()) {
+    for (const [activationId, item] of Array.from(this.cancelQueue.entries())) {
       // Remove itens expirados (proteção contra memory leak)
       if (now - item.rentedAt > this.ITEM_TTL) {
         this.cancelQueue.delete(activationId);

@@ -360,7 +360,7 @@ export default function SettingsPage() {
   const refillFpjsMutation = trpc.settings.refillFpjsPool.useMutation({
     onSuccess: (data) => {
       if (data.success) {
-        toast.success("Pool FPJS reabastecido!", { description: `${data.poolSize} requestIds disponíveis` });
+        toast.success("FPJS Direct OK!", { description: `requestId gerado: ${(data as any).requestId ?? "—"}` });
       } else {
         toast.warning("FPJS indisponível", { description: (data as any).message });
       }
