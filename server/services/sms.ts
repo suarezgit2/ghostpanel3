@@ -1173,6 +1173,22 @@ class SmsService {
         } catch (err) {
           // Re-throw AbortError immediately — don't try next country
           if (err instanceof DOMException && err.name === "AbortError") throw err;
+
+          // v9.7.1: Re-throw ACCOUNT BANNED immediately — don't waste numbers on other countries.
+          // When the account is blocked by Manus anti-bot, no SMS number from ANY country will work.
+          // Continuing to try other countries only wastes money (renting numbers that can't be used).
+          if (err instanceof Error && (
+            err.message.includes("user is blocked") ||
+            err.message.includes("USER_IS_BLOCKED") ||
+            err.name === "AccountBannedError"
+          )) {
+            await logger.warn("sms",
+              `País ${countryConfig.name}: conta banida pelo Manus. Abortando TODOS os países (não é problema do SMS).`,
+              {}, jobId
+            );
+            throw err;
+          }
+
           lastCountryError = err instanceof Error ? err : new Error(String(err));
           await logger.warn("sms",
             `País ${countryConfig.name} falhou completamente: ${lastCountryError.message}. Tentando próximo país...`,

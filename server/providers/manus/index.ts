@@ -503,35 +503,31 @@ export class ManusProvider {
 
             // 1. ACCOUNT BANNED: "user is blocked" or "USER_IS_BLOCKED"
             //    The account was suspended by Manus anti-bot. No SMS will ever work.
-            //    Abort immediately to save money.
+            //    v9.7.1: Abort IMMEDIATELY on first occurrence.
+            //    "user is blocked" is a DISTINCT message from number rejection
+            //    ("invalid_argument", "Failed to send the code", etc.), so there's
+            //    no ambiguity — the account is dead. Waiting for 2 consecutive bans
+            //    only wastes money renting numbers that can never be used.
             if (rpcMsg.includes("user is blocked") || rpcMsg.includes("USER_IS_BLOCKED")) {
               consecutiveBanErrors++;
+              accountBannedDetected = true;
+
               await logger.error("step_6_sms",
                 `[CONTA BANIDA] SendPhoneVerificationCode retornou "user is blocked" ` +
-                `(tentativa ${attempt}, ${consecutiveBanErrors} ban(s) consecutivo(s)). ` +
-                `A conta foi suspensa pelo anti-bot do Manus ANTES da verificação SMS.`,
+                `(tentativa ${attempt}). Abortando imediatamente — conta suspensa pelo anti-bot do Manus.`,
                 {
                   errorType: "ACCOUNT_BANNED",
                   rpcError: rpcMsg,
                   phoneNumber: formattedPhone,
                   regionCode,
                   attempt,
-                  consecutiveBanErrors,
                 }, jobId
               );
 
-              // After 2 consecutive "user is blocked" from different numbers,
-              // we're confident the account is dead (not just a bad number)
-              if (consecutiveBanErrors >= 2) {
-                accountBannedDetected = true;
-                throw new AccountBannedError(
-                  `Conta banida pelo Manus (${consecutiveBanErrors}x "user is blocked" consecutivos). ` +
-                  `Problema está no fingerprint/perfil, não no SMS.`
-                );
-              }
-
-              // First occurrence: re-throw as regular error so SMS service tries next provider
-              throw rpcErr;
+              throw new AccountBannedError(
+                `Conta banida pelo Manus ("user is blocked" na tentativa ${attempt}). ` +
+                `Problema está no fingerprint/perfil, não no SMS.`
+              );
             }
 
             // 2. NUMBER REJECTED: "invalid_argument", "resource_exhausted", "Failed to send the code"
