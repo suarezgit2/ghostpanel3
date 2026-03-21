@@ -618,14 +618,9 @@ class SMSPoolProvider {
         error.message.includes("fetch failed");
 
       // Detecta rejeição do número pelo alvo
+      // v9.7.1: Único erro conhecido de número rejeitado é "Failed to send the code".
       const isTargetRejection =
-        error.message.includes("invalid_argument") ||
-        error.message.includes("Failed to send the code") ||
-        error.message.includes("resource_exhausted") ||
-        error.message.includes("phone number") ||
-        error.message.includes("too many requests") ||
-        error.message.includes("user is blocked") ||
-        error.message.includes("USER_IS_BLOCKED");
+        error.message.includes("Failed to send the code");
 
       // Account banned — re-throw
       if (error.message.includes("user is blocked") || error.message.includes("USER_IS_BLOCKED")) {

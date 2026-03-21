@@ -1649,12 +1649,10 @@ class SmsService {
       }
 
       // Detecta se é rejeição do NÚMERO pelo alvo (Manus) — conta está OK, número ruim
+      // v9.7.1: Único erro conhecido de número rejeitado é "Failed to send the code".
+      // Outros erros (se existirem) caem no genérico para investigação.
       const isNumberRejected =
-        error.message.includes("invalid_argument") ||
-        error.message.includes("Failed to send the code") ||
-        error.message.includes("resource_exhausted") ||
-        error.message.includes("phone number") ||
-        error.message.includes("too many requests");
+        error.message.includes("Failed to send the code");
 
       // Detecta erro genérico de RPC (que não é ban nem rejeição de número)
       const isTargetApiError =

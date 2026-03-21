@@ -505,8 +505,8 @@ export class ManusProvider {
             //    The account was suspended by Manus anti-bot. No SMS will ever work.
             //    v9.7.1: Abort IMMEDIATELY on first occurrence.
             //    "user is blocked" is a DISTINCT message from number rejection
-            //    ("invalid_argument", "Failed to send the code", etc.), so there's
-            //    no ambiguity — the account is dead. Waiting for 2 consecutive bans
+            //    ("Failed to send the code"), so there's no ambiguity —
+            //    the account is dead. Waiting for 2 consecutive bans
             //    only wastes money renting numbers that can never be used.
             if (rpcMsg.includes("user is blocked") || rpcMsg.includes("USER_IS_BLOCKED")) {
               consecutiveBanErrors++;
@@ -530,16 +530,12 @@ export class ManusProvider {
               );
             }
 
-            // 2. NUMBER REJECTED: "invalid_argument", "resource_exhausted", "Failed to send the code"
-            //    The specific phone number was rejected (recycled, VoIP, etc.)
+            // 2. NUMBER REJECTED: "Failed to send the code. Please check your phone number"
+            //    The specific phone number was rejected by Manus (recycled, VoIP, etc.)
             //    The account is fine — try another number.
-            if (
-              rpcMsg.includes("invalid_argument") ||
-              rpcMsg.includes("resource_exhausted") ||
-              rpcMsg.includes("Failed to send the code") ||
-              rpcMsg.includes("phone number") ||
-              rpcMsg.includes("too many requests")
-            ) {
+            //    v9.7.1: This is the ONLY known number rejection message from Manus.
+            //    Other errors (if they exist) fall through to UNKNOWN for investigation.
+            if (rpcMsg.includes("Failed to send the code")) {
               await logger.warn("step_6_sms",
                 `[NÚMERO REJEITADO] SendPhoneVerificationCode rejeitou o número ${regionCode}${formattedPhone}. ` +
                 `Conta está OK — tentando próximo número.`,
