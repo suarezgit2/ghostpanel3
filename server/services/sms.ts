@@ -195,6 +195,10 @@ interface RetryResult {
       });
     }
     
+    reset(): void {
+      this.rejectionCache.clear();
+    }
+
     // Serialização para persistência
     serialize(): Record<string, any> {
       const now = Date.now();
@@ -504,6 +508,14 @@ class SmsService {
   readonly numberQuality = new PhoneNumberQualityTracker();
   private healthPersistTimer: ReturnType<typeof setTimeout> | null = null;
   private initialized = false;
+
+  /**
+   * v9.5: Timestamp do último reset de blacklist.
+   * Usado para impedir que jobs em execução re-blacklistem provedores
+   * com base em falhas que ocorreram ANTES do reset.
+   */
+  private blacklistResetAt = 0;
+  private static BLACKLIST_COOLDOWN_AFTER_RESET_MS = 120_000; // 2 minutos
 
   /**
    * Fila de cancelamentos assíncronos (Refatorada para evitar memory leaks e race conditions).
@@ -826,10 +838,22 @@ class SmsService {
    * Limpa a blacklist (para reabilitar provedores manualmente).
    */
   async clearBlacklist(): Promise<void> {
+    // v9.5: Cancel any pending persist timer to prevent stale data from being written back
+    if (this.healthPersistTimer) {
+      clearTimeout(this.healthPersistTimer);
+      this.healthPersistTimer = null;
+    }
+
     await setSetting("sms_blacklisted_providers", "", "Provedores banidos permanentemente por performance ruim");
     this.providerHealth.reset();
+    this.numberQuality.reset();
     await setSetting("sms_provider_health", "{}");
-    console.log("[SmsService] Blacklist e health resetados");
+    await setSetting("sms_number_quality", "{}");
+
+    // v9.5: Set cooldown to prevent running jobs from re-blacklisting immediately
+    this.blacklistResetAt = Date.now();
+
+    console.log("[SmsService] Blacklist, health e quality resetados (cooldown de 2min para re-blacklist)");
   }
 
   // ============================================================
@@ -1188,10 +1212,14 @@ class SmsService {
       }
 
       // Falhou — verifica blacklist (apenas se não foi erro de proxy)
+      // v9.5: Skip auto-blacklist during cooldown period after manual reset
       if (!result.wasProxyError) {
-        const toBlacklist = this.providerHealth.getProvidersToBlacklist([currentProviderId]);
-        if (toBlacklist.length > 0) {
-          await this.addToBlacklist(toBlacklist, jobId);
+        const timeSinceReset = Date.now() - this.blacklistResetAt;
+        if (timeSinceReset > SmsService.BLACKLIST_COOLDOWN_AFTER_RESET_MS) {
+          const toBlacklist = this.providerHealth.getProvidersToBlacklist([currentProviderId]);
+          if (toBlacklist.length > 0) {
+            await this.addToBlacklist(toBlacklist, jobId);
+          }
         }
       }
 

@@ -207,6 +207,10 @@ export function generatePassword(length = 16): string {
   const month = String(Math.floor(Math.random() * 12) + 1).padStart(2, "0");
   const day = String(Math.floor(Math.random() * 28) + 1).padStart(2, "0");
 
+  // v9.5: Manus now requires >= 12 chars with letters + numbers + symbols.
+  // ALL patterns MUST include at least one letter, one number, and one symbol.
+  const sym2 = PASSWORD_SYMBOLS[Math.floor(Math.random() * PASSWORD_SYMBOLS.length)];
+
   const roll = Math.random();
   let password: string;
 
@@ -217,30 +221,42 @@ export function generatePassword(length = 16): string {
   } else if (roll < 0.40) {
     password = `${w1}${num2}${sym}${w2}`;               // Storm42!Fire
   } else if (roll < 0.50) {
-    password = `${w1}${w2}${num2}`;                     // SilverFox99
+    password = `${w1}${w2}${num3}${sym}`;               // SilverFox789!
   } else if (roll < 0.65) {
     password = `${w1}${sym}${w2}${num2}`;               // Thunder!Eagle42
   } else if (roll < 0.78) {
-    password = `${w1}${w2}${num3}`;                     // CosmicRaven789
+    password = `${w1}${w2}${num3}${sym2}`;              // CosmicRaven789#
   } else if (roll < 0.83) {
-    password = `${w1}${num4}`;                          // Phoenix2847
+    password = `${w1}${num4}${sym}`;                    // Phoenix2847!
   } else if (roll < 0.88) {
-    password = `${w1}${num2}${w2}`;                     // Blaze42Storm
+    password = `${w1}${num2}${sym}${w2}`;               // Blaze42!Storm
   } else if (roll < 0.91) {
-    password = `${w1}${year}`;                          // Coffee2024
+    password = `${w1}${year}${sym}${num2}`;             // Coffee2024!37
   } else if (roll < 0.94) {
-    password = `${w1}${month}${day}`;                   // Phoenix0315
+    password = `${w1}${month}${day}${sym}${num2}`;      // Phoenix0315!42
   } else if (roll < 0.97) {
     password = `${w1}${num3}${sym}`;                    // Crystal789#
   } else {
-    password = `${w1}${w2}${sym}`;                      // ThunderStorm!
+    password = `${w1}${w2}${num2}${sym}`;               // ThunderStorm42!
   }
 
-  if (password.length < length) {
-    const extra = generateRandomString(length - password.length, "abcdefghijklmnopqrstuvwxyz0123456789");
-    return password + extra;
+  // Enforce minimum 12 characters
+  const minLen = Math.max(length, 12);
+  if (password.length < minLen) {
+    // Pad with mixed alphanumeric to reach minimum length
+    const extra = generateRandomString(minLen - password.length, "abcdefghijklmnopqrstuvwxyz0123456789");
+    password = password + extra;
   }
-  return password.substring(0, length);
+
+  // Final safety: ensure letters + numbers + symbols are all present
+  const hasLetter = /[a-zA-Z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSymbol = /[^a-zA-Z0-9]/.test(password);
+  if (!hasLetter) password = password.slice(0, -1) + "a";
+  if (!hasNumber) password = password.slice(0, -1) + "7";
+  if (!hasSymbol) password = password + sym;
+
+  return password.length > length ? password.substring(0, Math.max(length, 12)) : password;
 }
 
 // ============================================================
