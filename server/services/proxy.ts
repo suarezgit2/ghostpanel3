@@ -333,10 +333,10 @@ class ProxyService {
       return this.getProxy(jobId);
     }
 
-    await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} alocado (uso único) — será substituído automaticamente`, {}, jobId);
+    await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} alocado (uso único) — será substituído após o job terminar`, {}, jobId);
 
-    // Queue this proxy IP for background replacement
-    this.queueForReplacement(proxy.host, jobId);
+    // CHANGED v6.3: Do NOT replace immediately. The proxy must stay alive during the entire job.
+    // The orchestrator will call releaseProxy() after the job attempt finishes.
 
     return {
       id: proxy.id,
@@ -346,6 +346,14 @@ class ProxyService {
       password: proxy.password,
       protocol: proxy.protocol,
     };
+  }
+
+  /**
+   * Release a proxy after the job is done. Queues it for background replacement.
+   * Called by the orchestrator when a job attempt finishes (success or failure).
+   */
+  releaseProxy(ip: string, jobId?: number): void {
+    this.queueForReplacement(ip, jobId);
   }
 
   /**

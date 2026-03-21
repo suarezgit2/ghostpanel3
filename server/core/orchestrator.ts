@@ -310,6 +310,7 @@ class Orchestrator {
 
       try {
         const proxy = await proxyService.getProxy(jobId);
+        let proxyReleased = false;
         // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
         const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
 
@@ -350,6 +351,9 @@ class Orchestrator {
             { email }, jobId
           );
 
+          // Release proxy for replacement now that the attempt is done
+          if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+
           // Reset backoff on success
           consecutiveFailures = 0;
           currentBackoffMs = BACKOFF_CONFIG.initialBackoffMs;
@@ -361,6 +365,9 @@ class Orchestrator {
             `FALHA na tentativa ${totalAttempts}: ${result.error} (sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
             { email }, jobId
           );
+
+          // Release proxy for replacement now that the attempt is done
+          if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
 
           consecutiveFailures++;
 
@@ -375,6 +382,7 @@ class Orchestrator {
         if (err instanceof DOMException && err.name === "AbortError") {
           await logger.info("orchestrator", `Job ${jobId} abortado durante createAccount`, {}, jobId);
           await db.update(accounts).set({ status: "failed", metadata: { error: "Job cancelado" } }).where(eq(accounts.id, accountId));
+          if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);
@@ -391,6 +399,8 @@ class Orchestrator {
           `ERRO na tentativa ${totalAttempts}: ${msg} (sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
           { email }, jobId
         );
+        // Release proxy for replacement now that the attempt is done
+        if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
         consecutiveFailures++;
       }
 
