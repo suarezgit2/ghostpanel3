@@ -134,6 +134,18 @@ function buildAuthCommandCmd(fingerprint: BrowserProfile): Record<string, unknow
 }
 
 /**
+ * Custom error class for account banned detection.
+ * v9.3: Used to distinguish "account suspended by anti-bot" from other failures.
+ * When this error is thrown, the SMS service stops immediately (no more numbers wasted).
+ */
+class AccountBannedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AccountBannedError";
+  }
+}
+
+/**
  * Format phone number for manus.im API.
  */
 function formatPhoneForManus(phoneNumber: string, countryPrefix: string): string {
@@ -407,7 +419,39 @@ export class ManusProvider {
 
       if (!jwtToken) throw new Error("Registro falhou: nenhum token retornado");
 
-      await logger.info("step_5_register", "Conta registrada com sucesso!", {}, jobId);
+      // === DIAGNOSTIC LOG: Profile snapshot for ban analysis ===
+      // This log captures the FULL profile used for this account.
+      // If the account gets banned, compare this with successful accounts to find the pattern.
+      await logger.info("step_5_register", "Conta registrada com sucesso!", {
+        profileSnapshot: {
+          os: fingerprint.detectedOS,
+          chromeVersion: fingerprint.chromeMajorVersion,
+          chromeFullVersion: fingerprint.chromeFullVersion,
+          greaseBrand: fingerprint.greaseBrand,
+          greaseVersion: fingerprint.greaseVersion,
+          userAgent: fingerprint.userAgent,
+          platform: fingerprint.platform,
+          screen: `${fingerprint.screenWidth}x${fingerprint.screenHeight}`,
+          viewport: `${fingerprint.viewportWidth}x${fingerprint.viewportHeight}`,
+          colorDepth: fingerprint.colorDepth,
+          timezone: fingerprint.timezone,
+          timezoneOffset: fingerprint.timezoneOffset,
+          locale: fingerprint.locale,
+          languages: fingerprint.languages,
+          gpu: fingerprint.webglRenderer,
+          gpuVendor: fingerprint.webglVendor,
+          deviceMemory: fingerprint.deviceMemory,
+          hardwareConcurrency: fingerprint.hardwareConcurrency,
+          maxTouchPoints: fingerprint.maxTouchPoints,
+          devicePixelRatio: fingerprint.devicePixelRatio,
+          fontsCount: fingerprint.fonts?.length || 0,
+          battery: fingerprint.battery,
+          clientId: fingerprint.clientId,
+          firstEntry: fingerprint.firstEntry,
+          proxy: proxy ? `${proxy.host}:${proxy.port}` : "sem proxy",
+        },
+        authCommandCmd,
+      }, jobId);
 
       const authedRpcOptions = { fingerprint, proxy, authToken: jwtToken, authCommandCmd };
 
@@ -415,12 +459,25 @@ export class ManusProvider {
       await STEP_DELAYS.afterRegistration(signal);
 
       // STEP 6-7: SMS verification with robust retry
+      // v9.3: Detect ACCOUNT BANNED vs NUMBER REJECTED vs SMS PROVIDER ERROR
       await logger.info("step_6_sms", "Iniciando verificação SMS...", { email }, jobId);
+
+      let accountBannedDetected = false;
+      let consecutiveBanErrors = 0;
 
       const smsResult = await smsService.getCodeWithRetry({
         jobId,
         signal,
         onNumberRented: async ({ phoneNumber, activationId, attempt, regionCode }) => {
+          // If we already detected the account is banned, throw immediately
+          // to prevent wasting more SMS numbers
+          if (accountBannedDetected) {
+            throw new AccountBannedError(
+              `Conta banida pelo Manus (detectado após ${consecutiveBanErrors} tentativas). ` +
+              `Não adianta tentar mais números SMS.`
+            );
+          }
+
           const formattedPhone = formatPhoneForManus(phoneNumber, regionCode);
 
           await logger.info("step_6_sms", `[Tentativa ${attempt}] Enviando SMS para ${regionCode}${formattedPhone}`, {
@@ -430,12 +487,110 @@ export class ManusProvider {
             activationId,
           }, jobId);
 
-          await rpc.sendPhoneVerificationCode(
-            formattedPhone,
-            regionCode,
-            MANUS_CONFIG.smsLocale,
-            authedRpcOptions
-          );
+          try {
+            await rpc.sendPhoneVerificationCode(
+              formattedPhone,
+              regionCode,
+              MANUS_CONFIG.smsLocale,
+              authedRpcOptions
+            );
+            // Reset ban counter on success — the account is alive
+            consecutiveBanErrors = 0;
+          } catch (rpcErr) {
+            const rpcMsg = rpcErr instanceof Error ? rpcErr.message : String(rpcErr);
+
+            // === CLASSIFY THE ERROR ===
+
+            // 1. ACCOUNT BANNED: "user is blocked" or "USER_IS_BLOCKED"
+            //    The account was suspended by Manus anti-bot. No SMS will ever work.
+            //    Abort immediately to save money.
+            if (rpcMsg.includes("user is blocked") || rpcMsg.includes("USER_IS_BLOCKED")) {
+              consecutiveBanErrors++;
+              await logger.error("step_6_sms",
+                `[CONTA BANIDA] SendPhoneVerificationCode retornou "user is blocked" ` +
+                `(tentativa ${attempt}, ${consecutiveBanErrors} ban(s) consecutivo(s)). ` +
+                `A conta foi suspensa pelo anti-bot do Manus ANTES da verificação SMS.`,
+                {
+                  errorType: "ACCOUNT_BANNED",
+                  rpcError: rpcMsg,
+                  phoneNumber: formattedPhone,
+                  regionCode,
+                  attempt,
+                  consecutiveBanErrors,
+                }, jobId
+              );
+
+              // After 2 consecutive "user is blocked" from different numbers,
+              // we're confident the account is dead (not just a bad number)
+              if (consecutiveBanErrors >= 2) {
+                accountBannedDetected = true;
+                throw new AccountBannedError(
+                  `Conta banida pelo Manus (${consecutiveBanErrors}x "user is blocked" consecutivos). ` +
+                  `Problema está no fingerprint/perfil, não no SMS.`
+                );
+              }
+
+              // First occurrence: re-throw as regular error so SMS service tries next provider
+              throw rpcErr;
+            }
+
+            // 2. NUMBER REJECTED: "invalid_argument", "resource_exhausted", "Failed to send the code"
+            //    The specific phone number was rejected (recycled, VoIP, etc.)
+            //    The account is fine — try another number.
+            if (
+              rpcMsg.includes("invalid_argument") ||
+              rpcMsg.includes("resource_exhausted") ||
+              rpcMsg.includes("Failed to send the code") ||
+              rpcMsg.includes("phone number") ||
+              rpcMsg.includes("too many requests")
+            ) {
+              await logger.warn("step_6_sms",
+                `[NÚMERO REJEITADO] SendPhoneVerificationCode rejeitou o número ${regionCode}${formattedPhone}. ` +
+                `Conta está OK — tentando próximo número.`,
+                {
+                  errorType: "NUMBER_REJECTED",
+                  rpcError: rpcMsg,
+                  phoneNumber: formattedPhone,
+                  regionCode,
+                  attempt,
+                }, jobId
+              );
+              // Reset ban counter — account is alive, just bad number
+              consecutiveBanErrors = 0;
+              throw rpcErr;
+            }
+
+            // 3. CAPTCHA/FPJS ERROR: "code_1015", "code_1715", "CAPTCHA"
+            //    The FPJS requestId expired or is invalid. Retry won't help with same session.
+            if (
+              rpcMsg.includes("code_1015") ||
+              rpcMsg.includes("code_1715") ||
+              rpcMsg.includes("CAPTCHA")
+            ) {
+              await logger.error("step_6_sms",
+                `[ERRO FPJS] SendPhoneVerificationCode falhou por CAPTCHA/FPJS inválido.`,
+                {
+                  errorType: "FPJS_ERROR",
+                  rpcError: rpcMsg,
+                  attempt,
+                }, jobId
+              );
+              throw rpcErr;
+            }
+
+            // 4. UNKNOWN ERROR: Log with full details for investigation
+            await logger.error("step_6_sms",
+              `[ERRO DESCONHECIDO] SendPhoneVerificationCode falhou com erro não classificado.`,
+              {
+                errorType: "UNKNOWN",
+                rpcError: rpcMsg,
+                phoneNumber: formattedPhone,
+                regionCode,
+                attempt,
+              }, jobId
+            );
+            throw rpcErr;
+          }
 
           await STEP_DELAYS.afterSmsSent(signal);
         },
@@ -578,13 +733,32 @@ export class ManusProvider {
       // Re-throw AbortError so orchestrator handles it as cancellation, not as a failed account
       if (err instanceof DOMException && err.name === "AbortError") throw err;
       const errorMsg = err instanceof Error ? err.message : String(err);
-      await logger.error("failed", `Falha: ${errorMsg}`, { email }, jobId);
+
+      // v9.3: Classify the failure for better diagnostics
+      const isBanned = err instanceof AccountBannedError;
+      const failureType = isBanned ? "ACCOUNT_BANNED" : "GENERIC_FAILURE";
+
+      await logger.error("failed", `Falha [${failureType}]: ${errorMsg}`, {
+        email,
+        failureType,
+        proxy: proxy ? `${proxy.host}:${proxy.port}` : "sem proxy",
+        os: fingerprint.detectedOS,
+        chromeVersion: fingerprint.chromeMajorVersion,
+        gpu: fingerprint.webglRenderer?.substring(0, 80),
+      }, jobId);
+
       return {
         email,
         password,
-        status: "failed",
+        status: "failed" as const,  // v9.3: Use failureType in metadata to distinguish bans
         error: errorMsg,
-        metadata: {},
+        metadata: {
+          failureType,
+          proxy: proxy?.host || "none",
+          os: fingerprint.detectedOS,
+          chromeVersion: fingerprint.chromeMajorVersion,
+          gpu: fingerprint.webglRenderer?.substring(0, 80),
+        },
       };
     }
   }

@@ -1340,14 +1340,37 @@ class SmsService {
       // Re-throw AbortError immediately — don't process as provider failure
       if (err instanceof DOMException && err.name === "AbortError") throw err;
       const error = err instanceof Error ? err : new Error(String(err));
-      // Detecta se é rejeição pelo alvo (Manus)
+
+      // v9.3: Detect ACCOUNT BANNED — this is a FATAL error.
+      // The account was suspended by Manus anti-bot. No SMS number will ever work.
+      // Re-throw immediately so the job aborts without wasting more numbers.
+      const isAccountBanned =
+        error.message.includes("user is blocked") ||
+        error.message.includes("USER_IS_BLOCKED") ||
+        error.name === "AccountBannedError";
+
+      if (isAccountBanned) {
+        // Cancel the rented number in background (don't waste money)
+        if (numberData) {
+          this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
+        }
+        // Re-throw as-is so the caller (manus/index.ts) handles it
+        throw error;
+      }
+
+      // Detecta se é rejeição do NÚMERO pelo alvo (Manus) — conta está OK, número ruim
+      const isNumberRejected =
+        error.message.includes("invalid_argument") ||
+        error.message.includes("Failed to send the code") ||
+        error.message.includes("resource_exhausted") ||
+        error.message.includes("phone number") ||
+        error.message.includes("too many requests");
+
+      // Detecta erro genérico de RPC (que não é ban nem rejeição de número)
       const isTargetApiError =
         error.message.includes("RPC ") ||
         error.message.includes("permission_denied") ||
-        error.message.includes("user is blocked") ||
-        error.message.includes("invalid_argument") ||
-        error.message.includes("Failed to send the code") ||
-        error.message.includes("resource_exhausted");
+        isNumberRejected;
 
       // Detecta erro de proxy/rede (curl code 28 = timeout, code 56 = recv error)
       // Esses erros NÃO são falha do provedor de SMS — o provedor nem chegou a ser testado.
@@ -1388,16 +1411,24 @@ class SmsService {
           {}, opts.jobId
         );
         return { success: false, cost: 0, error, wasProxyError: true };
-      } else if (isTargetApiError) {
-        // Rejeição pelo alvo (permission_denied, user is blocked, etc.).
-        // O provedor fez seu trabalho — o alvo (Manus) que rejeitou o número.
-        // Rastreia para monitoramento, mas NÃO penaliza (sem cooldown).
+      } else if (isNumberRejected) {
+        // v9.3: NÚMERO REJEITADO — conta está OK, mas este número específico foi recusado.
+        // O provedor fez seu trabalho — o Manus que rejeitou o número (reciclado, VoIP, etc.).
+        // Rastreia para monitoramento, NÃO penaliza o provedor.
         this.providerHealth.recordTargetRejection(providerId);
         await logger.warn("sms",
-          `Provedor #${providerId}: número rejeitado pela API do alvo (rastreado, não penalizado): ${error.message}`,
+          `Provedor #${providerId}: [NÚMERO REJEITADO] pelo Manus (conta OK, número ruim): ${error.message}`,
           {}, opts.jobId
         );
-        // Don't record failure — the provider did its job, the target rejected the number
+        return { success: false, cost: 0, error, wasTargetRejection: true };
+      } else if (isTargetApiError) {
+        // v9.3: Erro genérico de RPC do alvo (não é ban, não é rejeição de número).
+        // Rastreia para monitoramento.
+        this.providerHealth.recordTargetRejection(providerId);
+        await logger.warn("sms",
+          `Provedor #${providerId}: [ERRO RPC] do alvo (rastreado, não penalizado): ${error.message}`,
+          {}, opts.jobId
+        );
         return { success: false, cost: 0, error, wasTargetRejection: true };
       } else {
         await logger.error("sms", `Provedor #${providerId} falhou: ${error.message}`, {}, opts.jobId);
