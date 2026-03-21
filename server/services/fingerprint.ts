@@ -74,8 +74,8 @@ export const CHROME_VERSION_MAP: Record<string, ChromeVersionInfo> = {
   "146": { greaseBrand: "Not-A.Brand",    greaseVersion: "24", buildNumber: "7680", fullVersion: "146.0.7680.153" },
 };
 
-// Default to Chrome 141 (current stable as of March 2026)
-const DEFAULT_CHROME_VERSION = "141";
+// Default to Chrome 145 (current stable as of March 2026)
+const DEFAULT_CHROME_VERSION = "145";
 
 /**
  * Get Chrome version info with fallback to default.
@@ -139,6 +139,9 @@ const STATIC_TZ_OFFSETS: Record<string, number> = {
   "Europe/Berlin": -60,
   "Europe/Paris": -60,
   "Europe/Madrid": -60,
+  "Europe/Athens": -120,
+  "Europe/Helsinki": -120,
+  "Europe/Moscow": -180,
   "Asia/Tokyo": -540,
   "Asia/Shanghai": -480,
   "Asia/Singapore": -480,
@@ -155,7 +158,7 @@ const STATIC_TZ_OFFSETS: Record<string, number> = {
 const TIMEZONES: Record<string, string[]> = {
   us: ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"],
   br: ["America/Sao_Paulo", "America/Fortaleza", "America/Manaus"],
-  eu: ["Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Madrid"],
+  eu: ["Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Madrid", "Europe/Athens", "Europe/Helsinki"],
   asia: ["Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata"],
   id: ["Asia/Jakarta"],
   sg: ["Asia/Singapore"],
@@ -170,6 +173,16 @@ const LOCALES: Record<string, string[]> = {
   id: ["en-ID", "id-ID"],
   sg: ["en-SG"],
   default: ["en-US", "pt-BR", "en-GB"],
+};
+
+/**
+ * v9.5: Ensure timezone and locale are geo-coherent within the "asia" region.
+ * Without this, a Japan proxy could get Asia/Kolkata + ja-JP (impossible combination).
+ */
+const ASIA_TZ_LOCALE_MAP: Record<string, string[]> = {
+  "Asia/Tokyo": ["ja-JP"],
+  "Asia/Shanghai": ["zh-CN"],
+  "Asia/Kolkata": ["en-IN"],
 };
 
 // ============================================================
@@ -382,8 +395,19 @@ class FingerprintService {
     // Region-specific settings
     const tzList = TIMEZONES[region] || TIMEZONES.default;
     const timezone = tzList[Math.floor(Math.random() * tzList.length)];
-    const localeList = LOCALES[region] || LOCALES.default;
-    const locale = localeList[Math.floor(Math.random() * localeList.length)];
+
+    // v9.5: For "asia" region, force locale to match the selected timezone.
+    // Without this, a Japan proxy (Asia/Tokyo) could get zh-CN locale or
+    // an India proxy (Asia/Kolkata) could get ja-JP — impossible combinations
+    // that anti-bot systems trivially detect.
+    let locale: string;
+    if (region === "asia" && ASIA_TZ_LOCALE_MAP[timezone]) {
+      const coherentLocales = ASIA_TZ_LOCALE_MAP[timezone];
+      locale = coherentLocales[Math.floor(Math.random() * coherentLocales.length)];
+    } else {
+      const localeList = LOCALES[region] || LOCALES.default;
+      locale = localeList[Math.floor(Math.random() * localeList.length)];
+    }
 
     const languages = [locale];
     if (!locale.startsWith("en")) languages.push("en-US");
@@ -413,7 +437,7 @@ class FingerprintService {
 
     const { headers: apifyHeaders, fingerprint: fp } =
       apifyGenerator.getFingerprint({
-        browsers: [{ name: "chrome" }],
+        browsers: [{ name: "chrome", minVersion: 144 }],
         devices: ["desktop"],
         operatingSystems: osConstraint,
       });

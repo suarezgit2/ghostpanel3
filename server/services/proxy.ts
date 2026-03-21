@@ -666,6 +666,18 @@ const COUNTRY_TO_REGION: Record<string, ProxyRegion> = {
   // Asia
   JP: "asia", CN: "asia", KR: "asia", IN: "asia", TH: "asia",
   VN: "asia", PH: "asia", TW: "asia", HK: "asia",
+  // Australia / New Zealand → treat as "us" (English-speaking, similar profile)
+  AU: "us", NZ: "us",
+  // Additional Europe (countries that were falling through to "us")
+  GR: "eu", IE: "eu", BG: "eu", HR: "eu", SK: "eu", SI: "eu",
+  LT: "eu", LV: "eu", EE: "eu", LU: "eu", MT: "eu", CY: "eu",
+  IS: "eu", UA: "eu", RS: "eu", BA: "eu", MK: "eu", AL: "eu",
+  MD: "eu", ME: "eu", RU: "eu", BY: "eu", GE: "eu",
+  // Latin America → treat as "br" (Portuguese/Spanish, similar timezones)
+  AR: "br", CL: "br", CO: "br", MX: "br", PE: "br",
+  UY: "br", PY: "br", EC: "br", VE: "br", BO: "br",
+  // Middle East → treat as "eu" (closer timezone-wise)
+  TR: "eu", IL: "eu", AE: "eu", SA: "eu",
 };
 
 // 24h in-memory cache: ip → { region, expiresAt }
