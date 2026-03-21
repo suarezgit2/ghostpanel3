@@ -210,19 +210,43 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
   const mathHash = deterministicHash(profile.clientId + "math");
   const webglHash = deterministicHash(profile.clientId + "webgl");
 
-  // Font metrics — slight variation per profile
+  // Font metrics — slight deterministic variation per profile (Windows base values)
+  // Real Chrome on Windows shows subtle differences due to DPI, font rendering, etc.
+  const fontJitter = (seed: string) => ((hashCode(profile.clientId + seed) % 100) - 50) / 100; // ±0.5
   const fontBase = {
-    default: 149.3125, apple: 149.3125, serif: 149.3125,
-    sans: 144.015625, mono: 132.609375, min: 9.34375, system: 144.640625,
+    default: 149.3125 + fontJitter("f_def"),
+    apple: 149.3125 + fontJitter("f_apl"),
+    serif: 149.3125 + fontJitter("f_ser"),
+    sans: 144.015625 + fontJitter("f_san"),
+    mono: 132.609375 + fontJitter("f_mon"),
+    min: 9.34375 + fontJitter("f_min"),
+    system: 144.640625 + fontJitter("f_sys"),
   };
 
-  // WebGL vendor/renderer — realistic values based on platform
-  const webglVendor = isWindows ? "Google Inc. (NVIDIA)" : (profile.platform === "MacIntel" ? "Google Inc. (Apple)" : "Google Inc. (Mesa)");
-  const webglRenderer = isWindows
-    ? "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
-    : (profile.platform === "MacIntel"
-      ? "ANGLE (Apple, Apple M1, OpenGL 4.1)"
-      : "ANGLE (Mesa, llvmpipe (LLVM 15.0.7, 256 bits), OpenGL ES 3.1)");
+  // WebGL vendor/renderer — expanded GPU pool for diversity between accounts
+  const gpuPool = [
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 2070 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 7800 XT Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  ];
+  // Deterministic GPU selection per profile
+  const gpuIndex = hashCode(profile.clientId + "gpu") % gpuPool.length;
+  const selectedGpu = gpuPool[gpuIndex];
+  const webglVendor = selectedGpu.vendor;
+  const webglRenderer = selectedGpu.renderer;
 
   return {
     // Metadata
@@ -287,7 +311,7 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     s44: sig(false),
     s45: sig([now, now - Math.abs(profile.timezoneOffset) * 60000]),
     s46: sig(mathHash),
-    s48: sig([1574966915, -801625375, 1031927533, -414484534, -761553675, -1336904198, -1698891509, 1776498361, -1280249498, 1479071338]),
+    s48: sig(generateS48Array(profile.clientId)),
     s49: sig([0.09999999403953552, 0.10000000149011612]),
     s50: sig(2167144448),
     s51: sig(fontBase),
@@ -340,8 +364,8 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     }),
     s89: sig(""),
     s91: sig(false),
-    s92: sig({ x: 8, y: 11, left: 8, right: 273.734375, bottom: 27, top: 11, width: 265.734375, height: 16 }),
-    s93: sig({ x: 8, y: 9, left: 8, right: 1605.078125, bottom: 27, top: 9, width: 1597.078125, height: 18 }),
+    s92: sig(generateDomRect(profile.clientId, "s92", profile.viewportWidth)),
+    s93: sig(generateDomRect(profile.clientId, "s93", profile.viewportWidth)),
     s94: sig({ u: generateUUID(), e: ["candidate:1 1 udp 2113937151 " + generateRandomIP() + " 54321 typ host generation 0 ufrag xxxx network-cost 999"] }),
     s95: sig(null, NOT_SUPPORTED),
     s96: sig(null, ERROR),
@@ -409,6 +433,61 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
 // ============================================================
 // Deterministic hash helpers (consistent per profile)
 // ============================================================
+
+/**
+ * Generate a deterministic s48 array (10 int32 values) unique per profile.
+ * In real Chrome, these are AudioContext-derived integers that vary per machine.
+ */
+function generateS48Array(clientId: string): number[] {
+  const result: number[] = [];
+  for (let i = 0; i < 10; i++) {
+    // Generate deterministic int32 per position
+    let h = hashCode(clientId + "s48_" + i);
+    // Spread across full int32 range (positive and negative)
+    h = ((h * 1103515245) + 12345) | 0;
+    result.push(h);
+  }
+  return result;
+}
+
+/**
+ * Generate deterministic DOM rect measurements that vary per profile.
+ * s92 = small element rect (like a span), s93 = wide element rect (like a div).
+ * Values vary subtly based on viewport width and profile to avoid correlation.
+ */
+function generateDomRect(clientId: string, signal: string, viewportWidth: number): Record<string, number> {
+  const jitter = (seed: string) => ((hashCode(clientId + signal + seed) % 200) - 100) / 100; // ±1.0
+  
+  if (signal === "s92") {
+    // Small element: width ~250-280, height ~15-17
+    const baseWidth = 265.734375 + jitter("w") * 5; // ±5px
+    const baseHeight = 16 + jitter("h") * 0.5; // ±0.5px
+    const x = 8;
+    const y = 11 + jitter("y") * 0.5;
+    return {
+      x, y, left: x,
+      right: x + baseWidth,
+      bottom: y + baseHeight,
+      top: y,
+      width: baseWidth,
+      height: baseHeight,
+    };
+  } else {
+    // Wide element: width scales with viewport, height ~17-19
+    const baseWidth = viewportWidth - (22 + jitter("margin") * 3); // viewport minus margins
+    const baseHeight = 18 + jitter("h") * 0.5;
+    const x = 8;
+    const y = 9 + jitter("y") * 0.5;
+    return {
+      x, y, left: x,
+      right: x + baseWidth,
+      bottom: y + baseHeight,
+      top: y,
+      width: baseWidth,
+      height: baseHeight,
+    };
+  }
+}
 
 function hashCode(str: string): number {
   let hash = 0;
