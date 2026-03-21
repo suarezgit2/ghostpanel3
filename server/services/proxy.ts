@@ -263,89 +263,96 @@ class ProxyService {
       .map(c => c.trim().toUpperCase())
       .filter(c => c.length > 0);
 
-    // Only get proxies that are enabled AND have never been used
-    // AND are not from blocked countries
-    let conditions = and(
-      eq(proxies.enabled, true),
-      isNull(proxies.lastUsedAt)
-    );
+    // v9.5.4: Use atomic claim with retry limit to prevent infinite loop.
+    // Instead of SELECT then UPDATE (race condition), we:
+    // 1. SELECT a batch of candidates
+    // 2. Try to UPDATE each one atomically until one succeeds
+    const MAX_RETRIES = 5;
 
-    if (blockedCountries.length > 0) {
-      // Drizzle não tem um "notInArray" nativo simples, então construímos a query com sql
-      const blockedList = blockedCountries.map(c => `'${c}'`).join(",");
-      conditions = and(
-        conditions,
-        sql`${proxies.country} IS NULL OR ${proxies.country} NOT IN (${sql.raw(blockedList)})`
-      );
-    }
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      // Build conditions: enabled=true (available proxies)
+      let conditions = eq(proxies.enabled, true);
 
-    const result = await db
-      .select()
-      .from(proxies)
-      .where(conditions)
-      .orderBy(asc(proxies.failCount), asc(proxies.id))
-      .limit(1);
-
-    if (result.length === 0) {
-      // Check if there are used proxies waiting for replacement
-      const totalCount = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(proxies);
-      const usedCount = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(proxies)
-        .where(eq(proxies.enabled, false));
-
-      const total = totalCount[0]?.count || 0;
-      const used = usedCount[0]?.count || 0;
-
-      if (total > 0 && used > 0) {
-        throw new Error(
-          `Nenhum proxy disponível. ${used}/${total} proxies já foram usados e estão aguardando substituição. ` +
-          `Aguarde a substituição automática ou clique em "Replace Proxies" manualmente.`
-        );
+      if (blockedCountries.length > 0) {
+        const blockedList = blockedCountries.map(c => `'${c}'`).join(",");
+        conditions = and(
+          conditions,
+          sql`(${proxies.country} IS NULL OR ${proxies.country} NOT IN (${sql.raw(blockedList)}))`
+        )!;
       }
 
-      throw new Error("Nenhum proxy disponível. Execute a sincronização primeiro.");
+      // Fetch a batch of candidates (not just 1) to avoid all jobs fighting over the same proxy
+      const candidates = await db
+        .select()
+        .from(proxies)
+        .where(conditions)
+        .orderBy(asc(proxies.failCount), asc(proxies.id))
+        .limit(10);
+
+      if (candidates.length === 0) {
+        // No proxies available at all
+        const totalCount = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(proxies);
+        const usedCount = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(proxies)
+          .where(eq(proxies.enabled, false));
+
+        const total = totalCount[0]?.count || 0;
+        const used = usedCount[0]?.count || 0;
+
+        if (total > 0 && used > 0) {
+          throw new Error(
+            `Nenhum proxy disponível. ${used}/${total} proxies já foram usados e estão aguardando substituição. ` +
+            `Aguarde a substituição automática ou clique em "Replace Proxies" manualmente.`
+          );
+        }
+
+        throw new Error("Nenhum proxy disponível. Execute a sincronização primeiro.");
+      }
+
+      // Try to atomically claim one of the candidates
+      for (const proxy of candidates) {
+        const updateResult = await db
+          .update(proxies)
+          .set({
+            lastUsedAt: new Date(),
+            enabled: false,
+          })
+          .where(
+            and(
+              eq(proxies.id, proxy.id),
+              eq(proxies.enabled, true) // Only update if still available (atomic guard)
+            )
+          );
+
+        if ((updateResult as any)[0]?.affectedRows > 0) {
+          // Successfully claimed this proxy
+          await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} alocado (uso único) — será substituído após o job terminar`, {}, jobId);
+
+          return {
+            id: proxy.id,
+            host: proxy.host,
+            port: proxy.port,
+            username: proxy.username,
+            password: proxy.password,
+            protocol: proxy.protocol,
+          };
+        }
+        // This candidate was already claimed by another job, try next candidate
+      }
+
+      // All 10 candidates were claimed by other jobs, retry with fresh query
+      await logger.info("proxy", `Todos os ${candidates.length} candidatos já foram alocados, tentando novamente (${attempt + 1}/${MAX_RETRIES})...`, {}, jobId);
+      // Small delay to reduce contention
+      await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
     }
 
-    const proxy = result[0];
-
-    // Mark as USED and DISABLED immediately (single-use).
-    // Use conditional UPDATE to prevent race condition: if two concurrent jobs
-    // SELECT the same proxy, only the first UPDATE will match (enabled=true).
-    const updateResult = await db
-      .update(proxies)
-      .set({
-        lastUsedAt: new Date(),
-        enabled: false,
-      })
-      .where(
-        and(
-          eq(proxies.id, proxy.id),
-          eq(proxies.enabled, true) // Only update if still available (atomic guard)
-        )
-      );
-
-    // If another job already claimed this proxy, retry recursively
-    if (updateResult[0]?.affectedRows === 0) {
-      await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} já foi alocado por outro job, tentando próximo...`, {}, jobId);
-      return this.getProxy(jobId);
-    }
-
-    await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} alocado (uso único) — será substituído após o job terminar`, {}, jobId);
-
-    // CHANGED v6.3: Do NOT replace immediately. The proxy must stay alive during the entire job.
-    // The orchestrator will call releaseProxy() after the job attempt finishes.
-
-    return {
-      id: proxy.id,
-      host: proxy.host,
-      port: proxy.port,
-      username: proxy.username,
-      password: proxy.password,
-      protocol: proxy.protocol,
-    };
+    throw new Error(
+      `Não foi possível alocar proxy após ${MAX_RETRIES} tentativas. ` +
+      `Muitos jobs concorrentes disputando poucos proxies disponíveis.`
+    );
   }
 
   /**
