@@ -238,6 +238,21 @@ export default function SettingsPage() {
   const { data: countriesData, refetch: refetchCountries } = trpc.settings.getSmsCountries.useQuery();
   const { data: fpjsStatus, refetch: refetchFpjs } = trpc.settings.getFpjsStatus.useQuery(undefined, { refetchInterval: 15000 });
 
+  // v9.7: SMSPool state
+  const { data: smsPoolConfig, refetch: refetchSmsPoolConfig } = trpc.settings.getSmsPoolConfig.useQuery();
+  const { data: smsPoolBalanceData, refetch: refetchSmsPoolBalance } = trpc.settings.getSmsPoolBalance.useQuery();
+  const [smsPoolForm, setSmsPoolForm] = useState<{
+    enabled?: boolean;
+    apiKey?: string;
+    serviceId?: string;
+    countryId?: string;
+    maxPrice?: string;
+    pool?: string;
+    priority?: "primary" | "secondary";
+  }>({});
+  const [smsPoolModified, setSmsPoolModified] = useState(false);
+  const [showSmsPoolApiKey, setShowSmsPoolApiKey] = useState(false);
+
   // Multi-country state
   const [editingCountries, setEditingCountries] = useState<any[]>([]);
   const [countriesModified, setCountriesModified] = useState(false);
@@ -251,6 +266,32 @@ export default function SettingsPage() {
       setEditingCountries(countriesData.countries);
     }
   }, [countriesData, countriesModified]);
+
+  // v9.7: SMSPool mutation
+  const updateSmsPoolMutation = trpc.settings.updateSmsPoolConfig.useMutation({
+    onSuccess: () => {
+      toast.success("SMSPool atualizado!", { description: "Configuração salva com sucesso" });
+      setSmsPoolModified(false);
+      refetchSmsPoolConfig();
+      refetchSmsPoolBalance();
+    },
+    onError: (err) => toast.error("Erro ao salvar SMSPool", { description: err.message }),
+  });
+
+  // Sync SMSPool form when config loads
+  useEffect(() => {
+    if (smsPoolConfig && !smsPoolModified) {
+      setSmsPoolForm({
+        enabled: smsPoolConfig.enabled,
+        apiKey: smsPoolConfig.apiKey,
+        serviceId: smsPoolConfig.serviceId,
+        countryId: smsPoolConfig.countryId,
+        maxPrice: smsPoolConfig.maxPrice,
+        pool: smsPoolConfig.pool,
+        priority: smsPoolConfig.priority,
+      });
+    }
+  }, [smsPoolConfig, smsPoolModified]);
 
   const discoverMutation = trpc.settings.discoverAndUpdateSmsProviders.useMutation({
     onSuccess: (data) => {
@@ -343,6 +384,7 @@ export default function SettingsPage() {
     "capsolver_api_key",
     "twocaptcha_api_key",
     "smsbower_api_key",
+    "smspool_api_key",
     "webshare_api_key",
     "zoho_client_id",
     "zoho_client_secret",
@@ -1080,6 +1122,232 @@ export default function SettingsPage() {
                   Nenhum dado de saúde ainda. Os provedores aparecerão aqui após as primeiras tentativas de SMS.
                 </p>
               )}
+            </div>
+          </motion.div>
+
+          {/* ============================================================ */}
+          {/*  v9.7: SMSPool — Segunda API de SMS                           */}
+          {/* ============================================================ */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.33 }}
+            className="rounded-xl border border-border bg-card"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-purple-500/10">
+                  <Zap className="w-4 h-4 text-purple-400" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">SMSPool <span className="text-[10px] font-normal text-purple-400 ml-1">2ª API</span></h2>
+                  <p className="text-xs text-muted-foreground">
+                    Segunda API de SMS — soma à pool do SMSBower, não substitui
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {smsPoolBalanceData?.success && (
+                  <span className="text-xs font-mono text-green-400">
+                    Saldo: ${smsPoolBalanceData.balance.toFixed(2)}
+                  </span>
+                )}
+                {smsPoolModified && (
+                  <Button
+                    size="sm"
+                    onClick={() => updateSmsPoolMutation.mutate(smsPoolForm)}
+                    disabled={updateSmsPoolMutation.isPending}
+                    className="gap-1.5 text-xs bg-purple-600 hover:bg-purple-700"
+                  >
+                    <Save className="w-3 h-3" />
+                    {updateSmsPoolMutation.isPending ? "Salvando..." : "Salvar SMSPool"}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Enable/Disable Toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Status
+                  </Label>
+                  <p className="text-[10px] text-muted-foreground/60 mt-0.5">
+                    Habilita ou desabilita o SMSPool como segunda fonte de números SMS
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Switch
+                    checked={smsPoolForm.enabled ?? false}
+                    onCheckedChange={(checked) => {
+                      setSmsPoolForm(prev => ({ ...prev, enabled: checked }));
+                      setSmsPoolModified(true);
+                    }}
+                  />
+                  <span className="text-xs">
+                    {smsPoolForm.enabled ? (
+                      <span className="text-green-400">Ativo</span>
+                    ) : (
+                      <span className="text-muted-foreground">Desativado</span>
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              <Separator className="border-border/30" />
+
+              {/* API Key */}
+              <FieldWithHelp
+                label="API Key"
+                description="Chave de API do SMSPool (smspool.net). Obtenha em: https://www.smspool.net/my/settings"
+              >
+                <div className="relative">
+                  <Input
+                    type={showSmsPoolApiKey ? "text" : "password"}
+                    value={smsPoolForm.apiKey || ""}
+                    onChange={(e) => {
+                      setSmsPoolForm(prev => ({ ...prev, apiKey: e.target.value }));
+                      setSmsPoolModified(true);
+                    }}
+                    placeholder="API key do SMSPool"
+                    className="bg-ghost-surface-2 border-border font-mono text-xs pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSmsPoolApiKey(!showSmsPoolApiKey)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-ghost-surface-2 transition-colors"
+                  >
+                    {showSmsPoolApiKey ? (
+                      <EyeOff className="w-3.5 h-3.5 text-muted-foreground" />
+                    ) : (
+                      <Eye className="w-3.5 h-3.5 text-muted-foreground" />
+                    )}
+                  </button>
+                </div>
+              </FieldWithHelp>
+
+              {/* Priority */}
+              <FieldWithHelp
+                label="Prioridade"
+                description="Primary: tenta SMSPool ANTES do SMSBower. Secondary: tenta SMSPool DEPOIS, como fallback quando o SMSBower falha."
+              >
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setSmsPoolForm(prev => ({ ...prev, priority: "secondary" }));
+                      setSmsPoolModified(true);
+                    }}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                      smsPoolForm.priority === "secondary"
+                        ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                        : "bg-ghost-surface-2 text-muted-foreground border border-border hover:text-foreground"
+                    }`}
+                  >
+                    Secondary (Fallback)
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSmsPoolForm(prev => ({ ...prev, priority: "primary" }));
+                      setSmsPoolModified(true);
+                    }}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                      smsPoolForm.priority === "primary"
+                        ? "bg-purple-500/20 text-purple-400 border border-purple-500/30"
+                        : "bg-ghost-surface-2 text-muted-foreground border border-border hover:text-foreground"
+                    }`}
+                  >
+                    Primary (Tenta Primeiro)
+                  </button>
+                </div>
+              </FieldWithHelp>
+
+              {/* Max Price */}
+              <FieldWithHelp
+                label="Preço Máximo"
+                description="Preço máximo por número SMS no SMSPool (em USD). Valores típicos: $0.10 a $1.00"
+              >
+                <div className="relative">
+                  <Input
+                    type="text"
+                    value={smsPoolForm.maxPrice || ""}
+                    onChange={(e) => {
+                      setSmsPoolForm(prev => ({ ...prev, maxPrice: e.target.value }));
+                      setSmsPoolModified(true);
+                    }}
+                    placeholder="0.50"
+                    className="bg-ghost-surface-2 border-border font-mono text-xs"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/50 font-mono uppercase">
+                    USD
+                  </span>
+                </div>
+              </FieldWithHelp>
+
+              {/* Service ID */}
+              <FieldWithHelp
+                label="Service ID"
+                description="ID do serviço no SMSPool. Deixe vazio para mapeamento automático a partir do serviço SMSBower. Ex: 1=Other, 2=WhatsApp, 9=Google"
+              >
+                <Input
+                  type="text"
+                  value={smsPoolForm.serviceId || ""}
+                  onChange={(e) => {
+                    setSmsPoolForm(prev => ({ ...prev, serviceId: e.target.value }));
+                    setSmsPoolModified(true);
+                  }}
+                  placeholder="Vazio = auto"
+                  className="bg-ghost-surface-2 border-border font-mono text-xs"
+                />
+              </FieldWithHelp>
+
+              {/* Country ID */}
+              <FieldWithHelp
+                label="Country ID"
+                description="ID do país no SMSPool. Deixe vazio para mapeamento automático a partir do país SMSBower. Ex: 1=USA, 5=Indonesia, 36=Brazil"
+              >
+                <Input
+                  type="text"
+                  value={smsPoolForm.countryId || ""}
+                  onChange={(e) => {
+                    setSmsPoolForm(prev => ({ ...prev, countryId: e.target.value }));
+                    setSmsPoolModified(true);
+                  }}
+                  placeholder="Vazio = auto"
+                  className="bg-ghost-surface-2 border-border font-mono text-xs"
+                />
+              </FieldWithHelp>
+
+              {/* Pool */}
+              <FieldWithHelp
+                label="Pool Preferida"
+                description="ID da pool preferida no SMSPool. Deixe vazio para seleção automática. Ex: 1=Foxtrot"
+              >
+                <Input
+                  type="text"
+                  value={smsPoolForm.pool || ""}
+                  onChange={(e) => {
+                    setSmsPoolForm(prev => ({ ...prev, pool: e.target.value }));
+                    setSmsPoolModified(true);
+                  }}
+                  placeholder="Vazio = auto"
+                  className="bg-ghost-surface-2 border-border font-mono text-xs"
+                />
+              </FieldWithHelp>
+
+              {/* Info Banner */}
+              <div className="flex items-start gap-2 rounded-lg border border-purple-500/20 bg-purple-500/5 px-4 py-3 mt-2">
+                <Info className="w-4 h-4 text-purple-400 mt-0.5 shrink-0" />
+                <div className="text-xs text-purple-300/80 space-y-1">
+                  <p className="font-medium text-purple-300">Como funciona</p>
+                  <p>
+                    O SMSPool é uma <strong>segunda fonte de números SMS</strong> que soma ao SMSBower.
+                    No modo <strong>Secondary</strong> (recomendado), ele só é usado quando todos os países/provedores
+                    do SMSBower falharem. No modo <strong>Primary</strong>, ele é tentado primeiro.
+                    Desative a qualquer momento sem afetar o SMSBower.
+                  </p>
+                </div>
+              </div>
             </div>
           </motion.div>
 

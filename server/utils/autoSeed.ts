@@ -61,6 +61,14 @@ export async function autoSeedDefaults(): Promise<void> {
       { countryCode: "46", regionCode: "+46", name: "Sweden",      maxPrice: "0.02",  providerIds: [], enabled: true },
       { countryCode: "48", regionCode: "+31", name: "Netherlands", maxPrice: "0.02",  providerIds: [], enabled: true },
     ]), description: "Configuração multi-país SMS (JSON)" },
+    // v9.7: SMSPool — segunda API de SMS (desabilitada por padrão)
+    { key: "smspool_enabled", value: "false", description: "SMSPool: habilitado/desabilitado" },
+    { key: "smspool_api_key", value: "", description: "SMSPool: API key" },
+    { key: "smspool_service_id", value: "", description: "SMSPool: ID do serviço (vazio = auto)" },
+    { key: "smspool_country_id", value: "", description: "SMSPool: ID do país (vazio = auto)" },
+    { key: "smspool_max_price", value: "0.50", description: "SMSPool: preço máximo por número" },
+    { key: "smspool_pool", value: "", description: "SMSPool: pool preferida (vazio = auto)" },
+    { key: "smspool_priority", value: "secondary", description: "SMSPool: prioridade (primary/secondary)" },
   ];
 
   for (const s of defaultSettings) {

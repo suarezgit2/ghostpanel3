@@ -18,6 +18,7 @@ const SENSITIVE_KEYS = new Set([
   "capsolver_api_key",
   "twocaptcha_api_key",
   "smsbower_api_key",
+  "smspool_api_key",
   "webshare_api_key",
   "zoho_client_id",
   "zoho_client_secret",
@@ -254,6 +255,62 @@ export const settingsRouter = router({
       };
     }),
 
+  // ============================================================
+  // v9.7: SMSPool settings
+  // ============================================================
+
+  /**
+   * Retorna a configuração atual do SMSPool
+   */
+  getSmsPoolConfig: protectedProcedure.query(async () => {
+    return smsService.getSmsPoolConfig();
+  }),
+
+  /**
+   * Atualiza a configuração do SMSPool
+   */
+  updateSmsPoolConfig: protectedProcedure
+    .input(z.object({
+      enabled: z.boolean().optional(),
+      apiKey: z.string().optional(),
+      serviceId: z.string().optional(),
+      countryId: z.string().optional(),
+      maxPrice: z.string().optional(),
+      pool: z.string().optional(),
+      priority: z.enum(["primary", "secondary"]).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      // PROTEÇÃO: não salvar API key mascarada
+      if (input.apiKey && isMaskedValue(input.apiKey)) {
+        delete input.apiKey;
+      }
+      await smsService.updateSmsPoolConfig(input);
+      return { success: true, message: "Configuração do SMSPool atualizada" };
+    }),
+
+  /**
+   * Consulta o saldo do SMSPool
+   */
+  getSmsPoolBalance: protectedProcedure.query(async () => {
+    try {
+      const balance = await smsService.getSmsPoolBalance();
+      return { success: true, balance };
+    } catch (err) {
+      return {
+        success: false,
+        balance: 0,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }),
+
+  /**
+   * Verifica se o SMSPool está habilitado
+   */
+  isSmsPoolEnabled: protectedProcedure.query(async () => {
+    return { enabled: smsService.isSmsPoolEnabled() };
+  }),
+
   // Providers management
   listProviders: protectedProcedure.query(async () => {
     const db = await getDb();
@@ -308,6 +365,14 @@ export const settingsRouter = router({
       { key: "invite_code", value: "", description: "Código de convite para novas contas (+500 créditos)" },
       { key: "proxy_auto_replace", value: "false", description: "Substituir proxies automaticamente via Webshare quando todos forem usados" },
       { key: "proxy_blocked_countries", value: "", description: "Lista de países bloqueados para proxy (ex: ID,BR,US)" },
+      // v9.7: SMSPool — segunda API de SMS (desabilitada por padrão)
+      { key: "smspool_enabled", value: "false", description: "SMSPool: habilitado/desabilitado" },
+      { key: "smspool_api_key", value: "", description: "SMSPool: API key" },
+      { key: "smspool_service_id", value: "", description: "SMSPool: ID do serviço (vazio = auto)" },
+      { key: "smspool_country_id", value: "", description: "SMSPool: ID do país (vazio = auto)" },
+      { key: "smspool_max_price", value: "0.50", description: "SMSPool: preço máximo por número" },
+      { key: "smspool_pool", value: "", description: "SMSPool: pool preferida (vazio = auto)" },
+      { key: "smspool_priority", value: "secondary", description: "SMSPool: prioridade (primary/secondary)" },
     ];
 
     for (const s of defaultSettings) {

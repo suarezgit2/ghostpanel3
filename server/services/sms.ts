@@ -34,6 +34,8 @@
 
 import { getSetting, setSetting, clearSettingsCache } from "../utils/settings";
 import { sleep, logger, checkAbort } from "../utils/helpers";
+import { smsPoolProvider } from "./smspool";
+import type { SMSPoolConfig } from "./smspool";
 
 const SMSBOWER_API = "https://smsbower.app/stubs/handler_api.php";
 
@@ -57,6 +59,14 @@ const DEFAULTS: Record<string, string> = {
   sms_blacklisted_providers: "",
   sms_provider_health: "{}",
   sms_countries: "",
+  // SMSPool settings (segunda API de SMS — aditiva, não substitui SMSBower)
+  smspool_enabled: "false",
+  smspool_api_key: "",
+  smspool_service_id: "",
+  smspool_country_id: "",
+  smspool_max_price: "0.50",
+  smspool_pool: "",
+  smspool_priority: "secondary",
 };
 
 /**
@@ -616,6 +626,30 @@ class SmsService {
     const item = this.cancelQueue.get(activationId);
     if (!item) return;
 
+    // v9.7: Suporte ao SMSPool na fila de cancelamento
+    if (activationId.startsWith("smspool:")) {
+      try {
+        const orderId = activationId.replace("smspool:", "");
+        const success = await smsPoolProvider.cancelSMS(orderId, item.jobId);
+        if (success) {
+          await logger.info("sms", `[Fila] [SMSPool] Pedido ${orderId} cancelado em background`, {}, item.jobId);
+        } else {
+          await logger.warn("sms", `[Fila] [SMSPool] Cancelamento ${orderId} retornou falha`, {}, item.jobId);
+        }
+        this.cancelQueue.delete(activationId);
+      } catch (err) {
+        item.attempts++;
+        if (item.attempts >= 3) {
+          await logger.warn("sms", `[Fila] [SMSPool] Falha ao cancelar ${activationId} após 3 tentativas. Desistindo.`, {}, item.jobId);
+          this.cancelQueue.delete(activationId);
+        } else {
+          const backoff = 10000 * Math.pow(2, item.attempts - 1);
+          item.nextRetry = Date.now() + backoff;
+        }
+      }
+      return;
+    }
+
     try {
       const result = await this.setStatus(activationId, 8);
       
@@ -653,6 +687,48 @@ class SmsService {
     this.apiKey = (await getSetting("smsbower_api_key")) || "";
     await this.loadConfig();
     await this.restoreHealth();
+    await this.loadSmsPoolConfig();
+  }
+
+  /**
+   * Carrega a configuração do SMSPool a partir das settings do banco.
+   * Chamado no init() e no reloadConfig().
+   */
+  private async loadSmsPoolConfig(): Promise<void> {
+    const get = async (key: string): Promise<string> => {
+      try {
+        return (await getSetting(key)) || DEFAULTS[key] || "";
+      } catch {
+        return DEFAULTS[key] || "";
+      }
+    };
+
+    const enabled = (await get("smspool_enabled")) === "true";
+    const apiKey = await get("smspool_api_key");
+    const serviceId = await get("smspool_service_id");
+    const countryId = await get("smspool_country_id");
+    const maxPrice = await get("smspool_max_price");
+    const pool = await get("smspool_pool");
+    const priority = (await get("smspool_priority")) as "primary" | "secondary";
+
+    smsPoolProvider.configure({
+      apiKey,
+      enabled,
+      serviceId,
+      countryId,
+      maxPrice,
+      pool,
+      priority: priority === "primary" ? "primary" : "secondary",
+    });
+
+    if (enabled && apiKey) {
+      await logger.info("sms",
+        `SMSPool habilitado: prioridade=${priority}, maxPrice=$${maxPrice}, ` +
+        `serviceId=${serviceId || "auto"}, countryId=${countryId || "auto"}, pool=${pool || "auto"}`
+      );
+    } else {
+      console.log("[SmsService] SMSPool desabilitado ou sem API key");
+    }
   }
 
   async loadConfig(): Promise<void> {
@@ -709,6 +785,7 @@ class SmsService {
     this.config = null;
     this.apiKey = (await getSetting("smsbower_api_key")) || "";
     await this.loadConfig();
+    await this.loadSmsPoolConfig();
   }
 
   async getConfig(): Promise<SmsConfig> {
@@ -975,17 +1052,15 @@ class SmsService {
   // ============================================================
 
   /**
-   * getCodeWithRetry v3.2 — Multi-Country + Smart Provider Management
+   * getCodeWithRetry v3.3 — Multi-Country + Smart Provider Management + SMSPool
    *
-   * Estratégia (v9.6):
-   *   1. Se sms_countries configurado com países habilitados: usa MULTI-PAÍS.
-   *      Multi-país tem PRIORIDADE sobre sms_provider_ids legado.
-   *      Cada país tem sua própria lista de provedores, maxPrice e regionCode.
-   *   2. Dentro de cada país: mesma lógica v3.0 (blacklist, cooldown, health).
-   *   3. Se um país falha completamente, passa para o próximo.
-   *   4. RetryResult inclui regionCode para o provider usar no sendPhoneVerificationCode.
-   *   5. Compatibilidade retroativa: se sms_countries vazio, usa config legada.
-   *   6. sms_provider_ids legado só é usado quando sms_countries NÃO está configurado.
+   * Estratégia (v9.7):
+   *   1. Se SMSPool está habilitado com priority="primary", tenta SMSPool PRIMEIRO.
+   *   2. Se sms_countries configurado com países habilitados: usa MULTI-PAÍS (SMSBower).
+   *   3. Dentro de cada país: mesma lógica v3.0 (blacklist, cooldown, health).
+   *   4. Se SMSBower falha e SMSPool está habilitado com priority="secondary", tenta SMSPool.
+   *   5. RetryResult inclui regionCode para o provider usar no sendPhoneVerificationCode.
+   *   6. Compatibilidade retroativa: se SMSPool desabilitado, comportamento idêntico ao v3.2.
    */
   async getCodeWithRetry(options: RetryOptions = {}): Promise<RetryResult> {
     if (!this.initialized) await this.init();
@@ -1003,6 +1078,51 @@ class SmsService {
     const signal = options.signal;
     const service = options.service || configSnapshot.service;
 
+    // ============================================================
+    // v9.7: SMSPool como API adicional (soma à pool, não substitui)
+    // Se habilitado com priority="primary", tenta SMSPool ANTES do SMSBower.
+    // Se habilitado com priority="secondary", tenta SMSPool DEPOIS do SMSBower.
+    // Se desabilitado, comportamento idêntico ao v3.2.
+    // ============================================================
+    const smsPoolEnabled = smsPoolProvider.isEnabled();
+    const smsPoolPriority = smsPoolProvider.getPriority();
+
+    if (smsPoolEnabled) {
+      await logger.info("sms",
+        `SMSPool ativo (prioridade: ${smsPoolPriority}). Somando à pool de SMS.`,
+        {}, jobId
+      );
+    }
+
+    // --- SMSPool PRIMARY: tenta SMSPool primeiro ---
+    if (smsPoolEnabled && smsPoolPriority === "primary") {
+      try {
+        checkAbort(signal);
+        const smsPoolResult = await this._trySmsPool({
+          configSnapshot,
+          service,
+          waitTimeMs,
+          onNumberRented,
+          jobId,
+          signal,
+        });
+        if (smsPoolResult) return smsPoolResult;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") throw err;
+        // Erros fatais (account banned, etc.) — re-throw
+        if (err instanceof Error && (
+          err.message.includes("user is blocked") ||
+          err.message.includes("USER_IS_BLOCKED") ||
+          err.name === "AccountBannedError"
+        )) throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        await logger.warn("sms",
+          `SMSPool (primary) falhou: ${msg}. Continuando com SMSBower...`,
+          {}, jobId
+        );
+      }
+    }
+
     // Determina a lista de países a tentar
     // v9.6: Multi-país tem PRIORIDADE quando sms_countries está configurado.
     // Antes, sms_provider_ids (legado) no banco forçava modo legado mesmo com
@@ -1013,10 +1133,11 @@ class SmsService {
     const legacyHasProviders = configSnapshot.providerIds.length > 0;
     const useMultiCountry = enabledCountries.length > 0 && !options.country && !options.providerIds;
 
-    // v9.6: Diagnostic log for mode decision
+    // v9.7: Diagnostic log for mode decision
     await logger.info("sms",
       `Decisão de modo: enabledCountries=${enabledCountries.length}, legacyProviders=${configSnapshot.providerIds.length}, ` +
-      `optionsCountry=${!!options.country}, optionsProviders=${!!options.providerIds} => ${useMultiCountry ? "MULTI-PAÍS" : "LEGADO"}`,
+      `optionsCountry=${!!options.country}, optionsProviders=${!!options.providerIds}, ` +
+      `smsPool=${smsPoolEnabled ? smsPoolPriority : "off"} => ${useMultiCountry ? "MULTI-PAÍS" : "LEGADO"}`,
       {}, jobId
     );
 
@@ -1060,8 +1181,40 @@ class SmsService {
         }
       }
 
+      // v9.7: SMSPool SECONDARY fallback — tenta SMSPool após todos os países SMSBower falharem
+      if (smsPoolEnabled && smsPoolPriority === "secondary") {
+        await logger.info("sms",
+          `Todos os países SMSBower falharam. Tentando SMSPool (secondary fallback)...`,
+          {}, jobId
+        );
+        try {
+          const smsPoolResult = await this._trySmsPool({
+            configSnapshot,
+            service,
+            waitTimeMs,
+            onNumberRented,
+            jobId,
+            signal,
+          });
+          if (smsPoolResult) return smsPoolResult;
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "AbortError") throw err;
+          if (err instanceof Error && (
+            err.message.includes("user is blocked") ||
+            err.message.includes("USER_IS_BLOCKED") ||
+            err.name === "AccountBannedError"
+          )) throw err;
+          const msg = err instanceof Error ? err.message : String(err);
+          await logger.warn("sms",
+            `SMSPool (secondary) também falhou: ${msg}`,
+            {}, jobId
+          );
+        }
+      }
+
       throw new Error(
-        `SMS não recebido em nenhum dos ${enabledCountries.length} país(es) configurados. ` +
+        `SMS não recebido em nenhum dos ${enabledCountries.length} país(es) configurados` +
+        `${smsPoolEnabled ? " + SMSPool" : ""}. ` +
         `Último erro: ${lastCountryError?.message || "timeout"}`
       );
     }
@@ -1080,23 +1233,68 @@ class SmsService {
     const known = KNOWN_COUNTRIES[country];
     const regionCode = known?.regionCode || "+62";
 
-    const result = await this._getCodeForCountry({
-      countryConfig: {
-        countryCode: country,
-        regionCode,
-        name: known?.name || `País ${country}`,
-        maxPrice,
-        providerIds: options.providerIds ? [...options.providerIds] : [...configSnapshot.providerIds],
-        enabled: true,
-      },
-      service,
-      maxRetries,
-      waitTimeMs,
-      onNumberRented,
-      jobId,
-      signal,
-    });
-    return result;
+    try {
+      const result = await this._getCodeForCountry({
+        countryConfig: {
+          countryCode: country,
+          regionCode,
+          name: known?.name || `País ${country}`,
+          maxPrice,
+          providerIds: options.providerIds ? [...options.providerIds] : [...configSnapshot.providerIds],
+          enabled: true,
+        },
+        service,
+        maxRetries,
+        waitTimeMs,
+        onNumberRented,
+        jobId,
+        signal,
+      });
+      return result;
+    } catch (err) {
+      // Re-throw AbortError and fatal errors
+      if (err instanceof DOMException && err.name === "AbortError") throw err;
+      if (err instanceof Error && (
+        err.message.includes("user is blocked") ||
+        err.message.includes("USER_IS_BLOCKED") ||
+        err.name === "AccountBannedError"
+      )) throw err;
+
+      // v9.7: SMSPool SECONDARY fallback para modo legado
+      if (smsPoolEnabled && smsPoolPriority === "secondary") {
+        const legacyMsg = err instanceof Error ? err.message : String(err);
+        await logger.warn("sms",
+          `SMSBower (legado) falhou: ${legacyMsg}. Tentando SMSPool (secondary fallback)...`,
+          {}, jobId
+        );
+        try {
+          const smsPoolResult = await this._trySmsPool({
+            configSnapshot,
+            service,
+            waitTimeMs,
+            onNumberRented,
+            jobId,
+            signal,
+          });
+          if (smsPoolResult) return smsPoolResult;
+        } catch (poolErr) {
+          if (poolErr instanceof DOMException && poolErr.name === "AbortError") throw poolErr;
+          if (poolErr instanceof Error && (
+            poolErr.message.includes("user is blocked") ||
+            poolErr.message.includes("USER_IS_BLOCKED") ||
+            poolErr.name === "AccountBannedError"
+          )) throw poolErr;
+          const poolMsg = poolErr instanceof Error ? poolErr.message : String(poolErr);
+          await logger.warn("sms",
+            `SMSPool (secondary) também falhou: ${poolMsg}`,
+            {}, jobId
+          );
+        }
+      }
+
+      // Re-throw o erro original do SMSBower
+      throw err;
+    }
   }
 
   /**
@@ -1661,6 +1859,16 @@ class SmsService {
   }
 
   async complete(activationId: string, jobId?: number): Promise<string> {
+    // v9.7: Detecta se o activationId é do SMSPool (prefixo "smspool:")
+    if (activationId.startsWith("smspool:")) {
+      const orderId = activationId.replace("smspool:", "");
+      await logger.info("sms", `[SMSPool] Completando pedido ${orderId}`, {}, jobId);
+      // SMSPool não tem endpoint de "complete" — o SMS já foi recebido e o pedido é automaticamente finalizado.
+      // Apenas logamos o sucesso.
+      await logger.info("sms", `[SMSPool] Pedido ${orderId} completado (auto-finalizado pelo SMSPool)`, {}, jobId);
+      return "SMSPOOL_COMPLETE";
+    }
+
     await logger.info("sms", `Completando ativação ${activationId}`, {}, jobId);
     const result = await this.setStatus(activationId, 6);
     await logger.info("sms", `Ativação ${activationId} completada: ${result}`, {}, jobId);
@@ -1668,6 +1876,14 @@ class SmsService {
   }
 
   async cancel(activationId: string, rentedAt?: number, jobId?: number): Promise<string> {
+    // v9.7: Detecta se o activationId é do SMSPool (prefixo "smspool:")
+    if (activationId.startsWith("smspool:")) {
+      const orderId = activationId.replace("smspool:", "");
+      await logger.info("sms", `[SMSPool] Cancelando pedido ${orderId}`, {}, jobId);
+      const success = await smsPoolProvider.cancelSMS(orderId, jobId);
+      return success ? "SMSPOOL_CANCELLED" : "SMSPOOL_CANCEL_FAILED";
+    }
+
     if (!this.config) await this.init();
 
     await logger.info("sms", `Cancelando número ${activationId} — aguardando devolução do saldo...`, {}, jobId);
@@ -1750,6 +1966,80 @@ class SmsService {
   }
 
   // ============================================================
+  // v9.7: SMSPool — Método interno de tentativa
+  // ============================================================
+
+  /**
+   * Tenta obter código SMS usando o SMSPool.
+   * Retorna RetryResult se bem-sucedido, null se falhou (sem throw).
+   * Throws apenas para erros fatais (AbortError, AccountBanned).
+   */
+  private async _trySmsPool(opts: {
+    configSnapshot: SmsConfig;
+    service: string;
+    waitTimeMs: number;
+    onNumberRented: RetryOptions["onNumberRented"];
+    jobId?: number;
+    signal?: AbortSignal;
+  }): Promise<RetryResult | null> {
+    const { configSnapshot, service, waitTimeMs, onNumberRented, jobId, signal } = opts;
+    const smsPoolConfig = smsPoolProvider.getConfig();
+
+    // Determina o regionCode baseado no país configurado no SMSPool
+    // ou usa o primeiro país habilitado no multi-país, ou o legado
+    const enabledCountries = configSnapshot.countries.filter(c => c.enabled);
+    let regionCode = "+62"; // default: Indonesia
+    let countryCode = configSnapshot.country;
+
+    if (enabledCountries.length > 0) {
+      // Usa o primeiro país habilitado como referência
+      regionCode = enabledCountries[0].regionCode;
+      countryCode = enabledCountries[0].countryCode;
+    } else {
+      const known = KNOWN_COUNTRIES[configSnapshot.country];
+      if (known) regionCode = known.regionCode;
+    }
+
+    await logger.info("sms",
+      `[SMSPool] Tentando obter código via SMSPool (país: ${countryCode}, região: ${regionCode}, serviço: ${service})`,
+      {}, jobId
+    );
+
+    const result = await smsPoolProvider.tryGetCode({
+      countryCode,
+      service,
+      maxPrice: smsPoolConfig.maxPrice,
+      waitTimeMs,
+      pollIntervalMs: configSnapshot.pollIntervalMs,
+      regionCode,
+      onNumberRented,
+      jobId,
+      attempt: 1,
+      signal,
+    });
+
+    if (result.success && result.code && result.phoneNumber && result.activationId) {
+      return {
+        code: result.code,
+        phoneNumber: result.phoneNumber,
+        activationId: result.activationId, // Já vem com prefixo "smspool:"
+        attempt: 1,
+        totalCost: result.cost,
+        regionCode,
+      };
+    }
+
+    if (result.error) {
+      await logger.warn("sms",
+        `[SMSPool] Falhou: ${result.error.message}`,
+        {}, jobId
+      );
+    }
+
+    return null;
+  }
+
+  // ============================================================
   // PUBLIC API (para routers e UI)
   // ============================================================
 
@@ -1760,6 +2050,65 @@ class SmsService {
   resetProviderHealth(): void {
     this.providerHealth.reset();
     setSetting("sms_provider_health", "{}").catch(() => {});
+  }
+
+  // ============================================================
+  // v9.7: SMSPool — API pública para routers e UI
+  // ============================================================
+
+  /**
+   * Retorna a configuração atual do SMSPool.
+   * Usado pela UI de Settings para exibir e editar.
+   */
+  getSmsPoolConfig(): SMSPoolConfig {
+    return smsPoolProvider.getConfig();
+  }
+
+  /**
+   * Verifica se o SMSPool está habilitado.
+   */
+  isSmsPoolEnabled(): boolean {
+    return smsPoolProvider.isEnabled();
+  }
+
+  /**
+   * Consulta o saldo do SMSPool.
+   */
+  async getSmsPoolBalance(): Promise<number> {
+    if (!smsPoolProvider.isEnabled()) {
+      throw new Error("SMSPool não está habilitado");
+    }
+    return await smsPoolProvider.getBalance();
+  }
+
+  /**
+   * Atualiza a configuração do SMSPool no banco e recarrega.
+   */
+  async updateSmsPoolConfig(config: Partial<SMSPoolConfig>): Promise<void> {
+    if (config.enabled !== undefined) {
+      await setSetting("smspool_enabled", config.enabled ? "true" : "false", "SMSPool: habilitado/desabilitado");
+    }
+    if (config.apiKey !== undefined) {
+      await setSetting("smspool_api_key", config.apiKey, "SMSPool: API key");
+    }
+    if (config.serviceId !== undefined) {
+      await setSetting("smspool_service_id", config.serviceId, "SMSPool: ID do serviço (vazio = auto)");
+    }
+    if (config.countryId !== undefined) {
+      await setSetting("smspool_country_id", config.countryId, "SMSPool: ID do país (vazio = auto)");
+    }
+    if (config.maxPrice !== undefined) {
+      await setSetting("smspool_max_price", config.maxPrice, "SMSPool: preço máximo por número");
+    }
+    if (config.pool !== undefined) {
+      await setSetting("smspool_pool", config.pool, "SMSPool: pool preferida (vazio = auto)");
+    }
+    if (config.priority !== undefined) {
+      await setSetting("smspool_priority", config.priority, "SMSPool: prioridade (primary/secondary)");
+    }
+
+    // Recarrega configuração
+    await this.loadSmsPoolConfig();
   }
 }
 
