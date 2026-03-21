@@ -943,8 +943,10 @@ class SmsService {
     const service = options.service || configSnapshot.service;
 
     // Determina a lista de países a tentar
+    // Prioridade: se o legado tiver provider IDs definidos, usa legado (override manual)
     const enabledCountries = configSnapshot.countries.filter(c => c.enabled);
-    const useMultiCountry = enabledCountries.length > 0 && !options.country && !options.providerIds;
+    const legacyHasProviders = configSnapshot.providerIds.length > 0;
+    const useMultiCountry = enabledCountries.length > 0 && !options.country && !options.providerIds && !legacyHasProviders;
 
     if (useMultiCountry) {
       // ============================================================
@@ -993,8 +995,14 @@ class SmsService {
     }
 
     // ============================================================
-    // MODO LEGADO: um único país (compatibilidade retroativa)
+    // MODO LEGADO: um único país (prioridade quando provider IDs estão definidos)
     // ============================================================
+    if (legacyHasProviders && enabledCountries.length > 0) {
+      await logger.info("sms",
+        `Modo legado com prioridade: providers [${configSnapshot.providerIds.join(",")}] definidos manualmente (multi-país ignorado)`,
+        {}, jobId
+      );
+    }
     const country = options.country || configSnapshot.country;
     const maxPrice = options.maxPrice || configSnapshot.maxPrice;
     const known = KNOWN_COUNTRIES[country];
