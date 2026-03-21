@@ -78,11 +78,24 @@ async function rpcCall(
     // v9.0: Generate fresh FPJS + DCR on EVERY attempt (not just the first one)
     // This is critical: if attempt 1 failed because FPJS was rate-limited,
     // attempt 2 needs a fresh requestId, not the same stale one.
-    let freshFgRequestId: string | undefined;
+    //
+    // v9.4 CRITICAL FIX: FPJS failure is now FATAL for the RPC call.
+    // Before this fix, when getRequestIdDirect() threw (e.g. FPJS_PROXY_BLACKLISTED),
+    // the error was silently caught and freshFgRequestId was left as undefined.
+    // The RPC then proceeded with a DCR containing NO valid FPJS requestId.
+    // Manus.im accepted the registration but immediately shadowbanned the account
+    // because the fingerprint was missing/invalid. This was the ROOT CAUSE of
+    // ~30% of account bans — accounts created without FPJS fingerprinting.
+    let freshFgRequestId: string;
     try {
       freshFgRequestId = await getRequestIdDirect(options.fingerprint, options.proxy);
     } catch (err) {
-      console.error(`[RPC] FPJS Direct falhou após retries para ${servicePath}: ${err instanceof Error ? err.message : err}`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[RPC] FPJS Direct falhou para ${servicePath}: ${errMsg}`);
+      // Propagate as PermanentRpcError so orchestrator retries with fresh proxy
+      const rpcErr = new Error(`RPC ${servicePath}: FPJS falhou — ${errMsg}`);
+      rpcErr.name = "PermanentRpcError";
+      throw rpcErr;
     }
 
     // Regenerate DCR fresh with the new FPJS requestId
