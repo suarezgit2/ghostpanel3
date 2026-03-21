@@ -26,6 +26,7 @@ import { randomBytes } from "crypto";
 import { deflateRawSync } from "zlib";
 import https from "https";
 import http from "http";
+import tls from "tls";
 import type { ProxyInfo } from "./proxy";
 import type { BrowserProfile } from "./fingerprint";
 
@@ -475,7 +476,6 @@ function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, use
 
       connectReq.on("connect", (_res, socket) => {
         // Now create TLS connection through the tunnel
-        const tls = require("tls");
         const tlsSocket = tls.connect({
           host: urlObj.hostname,
           socket,
