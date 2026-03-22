@@ -397,8 +397,25 @@ class Orchestrator {
         if (err instanceof DOMException && err.name === "AbortError") {
           await logger.info("orchestrator", `Job ${jobId} abortado durante createAccount`, {}, jobId);
           await db.update(accounts).set({ status: "failed", metadata: { error: "Job cancelado" } }).where(eq(accounts.id, accountId));
-          // v9.1: Safe proxy release — proxy may be null if getProxy() itself threw
-          if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+          // v9.8: Smart proxy handling on cancellation.
+          // Check if the account was actually registered (has a token in DB).
+          // If NOT registered, the proxy IP was never associated with a real account
+          // on the target platform, so it can be safely recycled back to the pool
+          // instead of being wasted on a replacement.
+          if (proxy && !proxyReleased) {
+            const acct = await db.select({ token: accounts.token }).from(accounts).where(eq(accounts.id, accountId)).limit(1);
+            const wasRegistered = !!(acct[0]?.token);
+            if (wasRegistered) {
+              // Account was registered — proxy IP is burned, send for replacement
+              await logger.info("orchestrator", `Job ${jobId} cancelado APÓS registro — proxy ${proxy.host} queimado, enviando para replacement`, {}, jobId);
+              proxyService.releaseProxy(proxy.host, jobId);
+            } else {
+              // Account was NOT registered — proxy IP is clean, recycle it
+              await logger.info("orchestrator", `Job ${jobId} cancelado ANTES do registro — proxy ${proxy.host} não foi queimado, reciclando`, {}, jobId);
+              await proxyService.recycleProxy(proxy.host, jobId);
+            }
+            proxyReleased = true;
+          }
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);

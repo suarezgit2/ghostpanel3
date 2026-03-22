@@ -364,6 +364,45 @@ class ProxyService {
   }
 
   /**
+   * Recycle a proxy back to the available pool (undo the claim).
+   * Used when a job is cancelled BEFORE the proxy was actually "burned"
+   * (i.e., before the account was registered on the target platform).
+   * Instead of wasting the proxy by sending it for replacement, we simply
+   * re-enable it so it can be used by the next job.
+   */
+  async recycleProxy(ip: string, jobId?: number): Promise<void> {
+    try {
+      const db = await getDb();
+      if (!db) return;
+
+      const result = await db
+        .update(proxies)
+        .set({
+          enabled: true,
+          lastUsedAt: null,
+        })
+        .where(
+          and(
+            eq(proxies.host, ip),
+            eq(proxies.enabled, false) // Only recycle if it's currently disabled
+          )
+        );
+
+      if ((result as any)[0]?.affectedRows > 0) {
+        await logger.info("proxy", `Proxy ${ip} reciclado (devolvido ao pool — não foi queimado)`, {}, jobId);
+      } else {
+        // Proxy not found or already enabled — fall through to replacement
+        await logger.warn("proxy", `Proxy ${ip} não pôde ser reciclado (não encontrado ou já disponível). Enviando para replacement.`, {}, jobId);
+        this.queueForReplacement(ip, jobId);
+      }
+    } catch (err) {
+      // On any error, fall back to the safe path: queue for replacement
+      await logger.warn("proxy", `Erro ao reciclar proxy ${ip}: ${err}. Enviando para replacement.`, {}, jobId);
+      this.queueForReplacement(ip, jobId);
+    }
+  }
+
+  /**
    * Queue a used proxy IP for background replacement.
    * The background worker will replace it via Webshare API.
    */
