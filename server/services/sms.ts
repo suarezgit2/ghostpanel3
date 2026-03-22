@@ -270,16 +270,20 @@ class ProviderHealthTracker {
   // Cooldown progressivo para falhas de SMS: 60s, 120s, 300s, 600s (máx 10min)
   private static COOLDOWN_STEPS = [60_000, 120_000, 300_000, 600_000];
 
-  // Cooldown para target rejections: 600s, 1800s, 3600s (muito mais agressivo para evitar bloqueios do Manus)
-  private static TARGET_REJECTION_COOLDOWN_STEPS = [600_000, 1800_000, 3600_000];
+  // Cooldown progressivo para target rejections (números ruins do provedor):
+  // Moderado: 60s, 120s, 300s — o provedor volta rápido para ser retestado
+  // Se continuar falhando, o cooldown escala progressivamente
+  private static TARGET_REJECTION_COOLDOWN_STEPS = [60_000, 120_000, 300_000];
 
   // Threshold para blacklist automática
   private static BLACKLIST_CONSECUTIVE_FAILURES = 8;
   private static BLACKLIST_MIN_ATTEMPTS = 5;
   private static BLACKLIST_MAX_SUCCESS_RATE = 0.15; // < 15% de sucesso
 
-  // Threshold para cooldown por target rejection (reduzido para punir mais rápido)
-  private static TARGET_REJECTION_CONSECUTIVE_THRESHOLD = 2; // Punir após apenas 2 rejeições consecutivas
+  // Threshold para cooldown por target rejection:
+  // Após 3 rejeições consecutivas, o provedor está claramente com números ruins.
+  // Colocar em cooldown para focar nos provedores que estão performando.
+  private static TARGET_REJECTION_CONSECUTIVE_THRESHOLD = 3;
 
   private getOrCreate(providerId: number): ProviderHealth {
     if (!this.health.has(providerId)) {
@@ -320,23 +324,46 @@ class ProviderHealthTracker {
   }
 
   /**
-   * Registra rejeição pelo alvo (permission_denied do Manus).
-   * Não é falha do provedor de SMS — o provedor fez seu trabalho.
-   * O alvo (Manus) é que rejeitou o número.
+   * Registra rejeição pelo alvo ("Failed to send the code" do Manus).
+   * Indica que o número fornecido pelo provedor é ruim (reciclado, VoIP, bloqueado).
    * 
-   * Apenas rastreia para monitoramento — NÃO aplica cooldown.
-   * Rejeições do alvo são transitórias (proxy detectado, fingerprint, etc.)
-   * e podem funcionar na próxima tentativa com contexto diferente.
+   * v9.7.2: Aplica cooldown MODERADO após 3 rejeições consecutivas.
+   * O provedor está claramente com números ruins neste momento — melhor
+   * focar nos provedores que estão performando e retestá-lo depois.
+   * 
+   * Cooldown progressivo: 60s → 120s → 300s (máx 5min)
+   * Muito mais leve que o cooldown de falha de SMS (60s → 600s).
+   * O provedor volta rápido para ser retestado.
    */
   recordTargetRejection(providerId: number): void {
     const h = this.getOrCreate(providerId);
     h.targetRejections++;
     h.consecutiveTargetRejections++;
     
-    // NÃO aplicar cooldown para rejeições do alvo.
-    // O provedor continua disponível para próximas tentativas.
-    // Se estava em cooldown por target rejections anteriores, remove agora.
-    h.cooldownUntil = 0;
+    // Aplica cooldown após threshold de rejeições consecutivas
+    if (h.consecutiveTargetRejections >= ProviderHealthTracker.TARGET_REJECTION_CONSECUTIVE_THRESHOLD) {
+      // Calcula o step baseado em quantas vezes já entrou em cooldown por rejeição
+      // (consecutiveTargetRejections - threshold) dá quantos cooldowns extras
+      const cooldownIndex = Math.min(
+        h.consecutiveTargetRejections - ProviderHealthTracker.TARGET_REJECTION_CONSECUTIVE_THRESHOLD,
+        ProviderHealthTracker.TARGET_REJECTION_COOLDOWN_STEPS.length - 1
+      );
+      h.cooldownUntil = Date.now() + ProviderHealthTracker.TARGET_REJECTION_COOLDOWN_STEPS[cooldownIndex];
+    }
+  }
+
+  /**
+   * Retorna info rápida de um provedor para logging.
+   */
+  getProviderInfo(providerId: number): { consecutiveTargetRejections: number; inCooldown: boolean; cooldownRemainingS: number } {
+    const h = this.health.get(providerId);
+    if (!h) return { consecutiveTargetRejections: 0, inCooldown: false, cooldownRemainingS: 0 };
+    const now = Date.now();
+    return {
+      consecutiveTargetRejections: h.consecutiveTargetRejections,
+      inCooldown: now < h.cooldownUntil,
+      cooldownRemainingS: Math.max(0, Math.round((h.cooldownUntil - now) / 1000)),
+    };
   }
 
   /**
@@ -380,14 +407,21 @@ class ProviderHealthTracker {
 
   /**
    * Calcula score de 0 a 100 para o provedor.
-   * Considera: taxa de sucesso (50%), velocidade (20%), recência (20%), target rejections (10%)
+   * v9.7.2: Peso maior para target rejections e penalidade por rejeições consecutivas.
+   * 
+   * Componentes:
+   *   - Taxa de sucesso SMS (40%): sucesso / (sucesso + falhas)
+   *   - Velocidade (15%): tempo médio de resposta
+   *   - Recência (15%): sucesso nos últimos 10min
+   *   - Penalidade rejeição (-30% máx): taxa de rejeição pelo alvo
+   *   - Penalidade consecutiva (-30% máx): rejeições consecutivas recentes
    */
   getScore(providerId: number): number {
     const h = this.health.get(providerId);
-    if (!h || (h.successes + h.failures) === 0) return 50;
+    if (!h || (h.successes + h.failures + h.targetRejections) === 0) return 50;
 
     const total = h.successes + h.failures;
-    const successRate = h.successes / total; // 0.0 - 1.0
+    const successRate = total > 0 ? h.successes / total : 0; // 0.0 - 1.0
     const avgResponseTime = h.successes > 0 ? h.totalResponseTimeMs / h.successes : 120_000;
 
     // Score de velocidade: 0-1 (120s+ = 0, 10s = 1)
@@ -396,12 +430,20 @@ class ProviderHealthTracker {
     // Score de recência: 0 ou 1 (sucesso nos últimos 10min = 1)
     const recencyScore = h.lastSuccessAt > 0 && (Date.now() - h.lastSuccessAt) < 600_000 ? 1 : 0;
 
-    // Penalidade por target rejections: 0.0 - 1.0
+    // Penalidade por target rejections (taxa global): 0.0 - 1.0
     const totalAttempts = total + h.targetRejections;
     const targetRejectionRate = totalAttempts > 0 ? h.targetRejections / totalAttempts : 0;
 
-    // Pesos: sucesso=60%, velocidade=20%, recência=20%, penalidade target=-20% máx
-    const raw = (successRate * 0.60) + (speedScore * 0.20) + (recencyScore * 0.20) - (targetRejectionRate * 0.20);
+    // Penalidade por rejeições CONSECUTIVAS recentes: 0.0 - 1.0
+    // Provedores com muitas rejeições seguidas são fortemente penalizados
+    // 3 consecutivas = 0.3, 5 = 0.5, 10+ = 1.0
+    const consecutivePenalty = Math.min(1, h.consecutiveTargetRejections / 10);
+
+    // Pesos: sucesso=40%, velocidade=15%, recência=15%
+    // Penalidades: rejeição global=-30% máx, consecutiva=-30% máx
+    const raw = (successRate * 0.40) + (speedScore * 0.15) + (recencyScore * 0.15)
+      - (targetRejectionRate * 0.30)
+      - (consecutivePenalty * 0.30);
     return Math.round(Math.max(0, Math.min(1, raw)) * 100);
   }
 
@@ -1700,14 +1742,22 @@ class SmsService {
         );
         return { success: false, cost: 0, error, wasProxyError: true };
       } else if (isNumberRejected) {
-        // v9.3: NÚMERO REJEITADO — conta está OK, mas este número específico foi recusado.
-        // O provedor fez seu trabalho — o Manus que rejeitou o número (reciclado, VoIP, etc.).
-        // Rastreia para monitoramento, NÃO penaliza o provedor.
+        // v9.7.2: NÚMERO REJEITADO — conta está OK, mas este número específico foi recusado.
+        // Rastreia e aplica cooldown após 3 rejeições consecutivas.
         this.providerHealth.recordTargetRejection(providerId);
-        await logger.warn("sms",
-          `Provedor #${providerId}: [NÚMERO REJEITADO] pelo Manus (conta OK, número ruim): ${error.message}`,
-          {}, opts.jobId
-        );
+        const provInfo = this.providerHealth.getProviderInfo(providerId);
+        
+        if (provInfo.inCooldown) {
+          await logger.warn("sms",
+            `Provedor #${providerId}: [NÚMERO REJEITADO] ${provInfo.consecutiveTargetRejections}x consecutivas — COOLDOWN ${provInfo.cooldownRemainingS}s (números ruins, focando em outros provedores)`,
+            {}, opts.jobId
+          );
+        } else {
+          await logger.warn("sms",
+            `Provedor #${providerId}: [NÚMERO REJEITADO] pelo Manus (conta OK, número ruim) [${provInfo.consecutiveTargetRejections}x consecutivas]: ${error.message}`,
+            {}, opts.jobId
+          );
+        }
         return { success: false, cost: 0, error, wasTargetRejection: true };
       } else if (isTargetApiError) {
         // v9.3: Erro genérico de RPC do alvo (não é ban, não é rejeição de número).
