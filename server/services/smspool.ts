@@ -555,16 +555,15 @@ class SMSPoolProvider {
 
   /**
    * Cancela um pedido SMS no SMSPool com retry automático.
-   * O SMSPool tem um período de cooldown após a compra onde o cancelamento
+   * O SMSPool tem um cooldown de ~40s após a compra onde o cancelamento
    * não é permitido ("Your order cannot be cancelled yet, please try again later.").
-   * Este método faz até 4 tentativas com delay progressivo (5s, 10s, 15s, 20s)
-   * para garantir o reembolso.
+   * Este método aguarda o cooldown e faz até 2 tentativas para garantir o reembolso.
    */
   async cancelSMS(orderId: string, jobId?: number): Promise<boolean> {
     await logger.info("smspool", `Cancelando pedido ${orderId}`, {}, jobId);
 
-    const MAX_RETRIES = 4;
-    const DELAYS = [5_000, 10_000, 15_000, 20_000]; // 5s, 10s, 15s, 20s
+    const MAX_RETRIES = 2;
+    const DELAYS = [40_000, 15_000]; // 40s (cooldown), 15s (retry extra)
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       const result = await this._cancelOnce(orderId, jobId);
