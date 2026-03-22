@@ -1,7 +1,7 @@
 /**
- * Orchestrator v2
+ * Orchestrator v2.1
  *
- * Mudanças em relação à v1:
+ * Mudanças em relação à v2:
  *   1. O job agora roda até atingir a QUANTIDADE DE SUCESSO solicitada,
  *      não apenas N tentativas. Se pediu 2 contas, só para quando tiver 2 com sucesso.
  *   2. Limite de segurança (maxAttempts) para evitar loop infinito:
@@ -9,6 +9,15 @@
  *   3. Backoff inteligente: após falhas consecutivas, aumenta o delay progressivamente.
  *   4. Se atingir o maxAttempts sem completar, finaliza com status parcial.
  *   5. Job Rápido suporta múltiplos jobs por destinatário, agrupados em pasta.
+ *
+ * v10.0 FIX: Proxy leak on cancellation
+ *   - cancelJob() and forceAbort() now call proxyService.releaseAllForJob()
+ *     to ensure ALL proxies allocated during the job (including extras from
+ *     provider health-check and step-2 retries) are properly released.
+ *   - executeJob early-return paths (DB status check for cancelled/deleted)
+ *     now release the current proxy before returning.
+ *   - The .finally() block in createJob also calls releaseAllForJob as a
+ *     safety net to catch any remaining tracked proxies.
  */
 
 import { eq, sql } from "drizzle-orm";
@@ -129,8 +138,16 @@ class Orchestrator {
       await logger.error("orchestrator", `Job ${jobId} falhou: ${err}`, {}, jobId);
       const db2 = await getDb();
       if (db2) await db2.update(jobs).set({ status: "failed" }).where(eq(jobs.id, jobId));
-    }).finally(() => {
+    }).finally(async () => {
       this.activeJobs.delete(jobId);
+      // v10.0: Safety net — release any remaining tracked proxies for this job.
+      // This catches edge cases where executeJob returned/threw without releasing
+      // all proxies (e.g., early return on DB status check, or unhandled error paths).
+      try {
+        await proxyService.releaseAllForJob(jobId);
+      } catch (err) {
+        console.warn(`[Orchestrator] Erro ao liberar proxies residuais do job ${jobId}:`, err);
+      }
     });
 
     return jobId;
@@ -216,7 +233,7 @@ class Orchestrator {
   }
 
   /**
-   * executeJob v2 — Retry até atingir a quantidade de sucesso solicitada.
+   * executeJob v2.1 — Retry até atingir a quantidade de sucesso solicitada.
    *
    * Lógica:
    *   - O loop roda enquanto successCount < quantity E totalAttempts < maxAttempts
@@ -225,6 +242,8 @@ class Orchestrator {
    *   - O failedAccounts no banco rastreia quantas tentativas falharam (para visibilidade)
    *   - Limite de segurança: maxAttempts = quantity * 5 (evita loop infinito)
    *   - Se atingir maxAttempts sem completar, finaliza com o que conseguiu
+   *
+   * v10.0: All early-return paths now release the current proxy before returning.
    */
   private async executeJob(jobId: number, provider: ProviderInstance, providerId: number, options: CreateJobOptions, signal?: AbortSignal): Promise<void> {
     // Multi-domain rotation: email_domain can be a comma-separated list
@@ -273,7 +292,9 @@ class Orchestrator {
           `Job ${jobId} ${!currentStatus ? "deletado" : "cancelado"} — parando execução`,
           {}, jobId
         );
-        return; // return em vez de break para não tentar atualizar status de job deletado
+        // v10.0: releaseAllForJob will be called by the .finally() in createJob
+        // No proxy is allocated at this point in the loop (before getProxy), so just return.
+        return;
       }
 
       if (currentStatus === "paused") {
@@ -284,6 +305,7 @@ class Orchestrator {
           const checkStatus = check[0]?.status;
           if (!checkStatus || checkStatus === "cancelled") {
             await logger.info("orchestrator", `Job ${jobId} ${!checkStatus ? "deletado" : "cancelado"} durante pausa`, {}, jobId);
+            // v10.0: releaseAllForJob will be called by the .finally() in createJob
             return;
           }
           if (checkStatus === "running") break;
@@ -416,6 +438,8 @@ class Orchestrator {
             }
             proxyReleased = true;
           }
+          // v10.0: Any remaining proxies (from provider internal swaps) will be
+          // released by the .finally() block in createJob via releaseAllForJob()
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);
@@ -489,6 +513,9 @@ class Orchestrator {
     );
   }
 
+  /**
+   * v10.0: cancelJob now also releases all tracked proxies for the job.
+   */
   async cancelJob(jobId: number): Promise<void> {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
@@ -501,6 +528,19 @@ class Orchestrator {
 
     await db.update(jobs).set({ status: "cancelled" }).where(eq(jobs.id, jobId));
     await logger.info("orchestrator", `Job ${jobId} cancelado (sinal de abort enviado)`, {}, jobId);
+
+    // v10.0: Release any tracked proxies that the job was holding.
+    // The executeJob loop will also try to release via the catch/finally blocks,
+    // but this ensures proxies are freed even if executeJob is stuck in an
+    // HTTP call that doesn't respect AbortSignal.
+    // Note: releaseAllForJob is idempotent — double-releasing is safe because
+    // releaseProxy/recycleProxy already handle the case where the proxy was
+    // already processed (it just won't be in the queue twice).
+    try {
+      await proxyService.releaseAllForJob(jobId);
+    } catch (err) {
+      console.warn(`[Orchestrator] Erro ao liberar proxies do job ${jobId} no cancelamento:`, err);
+    }
   }
 
   async pauseJob(jobId: number): Promise<void> {
@@ -530,13 +570,26 @@ class Orchestrator {
   /**
    * Force-cancels a job immediately by aborting its signal.
    * Used by the delete endpoint to stop a running job before removing it from DB.
+   *
+   * v10.0: Now also releases all tracked proxies for the job before removing
+   * from activeJobs. This prevents proxy leaks when jobs are deleted while running.
    */
-  forceAbort(jobId: number): void {
+  async forceAbort(jobId: number): Promise<void> {
     const controller = this.activeJobs.get(jobId);
     if (controller) {
       controller.abort();
-      this.activeJobs.delete(jobId);
     }
+
+    // v10.0: Release all tracked proxies BEFORE removing from activeJobs.
+    // This ensures proxies are freed even if the executeJob loop hasn't
+    // reached its catch/finally blocks yet.
+    try {
+      await proxyService.releaseAllForJob(jobId);
+    } catch (err) {
+      console.warn(`[Orchestrator] Erro ao liberar proxies do job ${jobId} no forceAbort:`, err);
+    }
+
+    this.activeJobs.delete(jobId);
   }
 }
 

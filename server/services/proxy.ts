@@ -5,6 +5,12 @@
  * - After use, the proxy is marked as "used" and queued for replacement
  * - A background worker replaces used proxies via Webshare API (one at a time)
  * - The pool of available proxies is continuously replenished
+ *
+ * v10.0: Added per-job proxy tracking to prevent proxy leaks on cancellation.
+ * Every proxy allocated via getProxy(jobId) is tracked in a Map<jobId, Set<ip>>.
+ * When a job is cancelled/deleted, releaseAllForJob(jobId) ensures ALL proxies
+ * allocated during that job (including extras from provider health-check and
+ * step-2 retries) are properly released or recycled.
  */
 
 import { eq, asc, sql, and, isNull } from "drizzle-orm";
@@ -30,6 +36,14 @@ class ProxyService {
   private isReplacing = false;
   private replaceQueue: string[] = []; // IPs waiting to be replaced
   private replaceWorkerRunning = false;
+
+  /**
+   * v10.0: Per-job proxy tracking.
+   * Maps jobId → Set of proxy IPs allocated for that job.
+   * Used to ensure ALL proxies are released when a job is cancelled/deleted,
+   * including extras allocated internally by the provider (health-check, step-2 retries).
+   */
+  private jobProxyMap = new Map<number, Set<string>>();
 
   async init(): Promise<void> {
     this.apiKey = (await getSetting("webshare_api_key")) || "";
@@ -251,6 +265,10 @@ class ProxyService {
    * - Marks the proxy as used immediately (sets lastUsedAt)
    * - Disables the proxy (enabled = false) so it can't be picked again
    * - Queues the proxy IP for background replacement
+   *
+   * v10.0: Tracks the allocated proxy in jobProxyMap so it can be released
+   * when the job is cancelled/deleted, even if the provider swapped proxies
+   * internally (health-check, step-2 retries).
    */
   async getProxy(jobId?: number): Promise<ProxyInfo> {
     const db = await getDb();
@@ -331,6 +349,14 @@ class ProxyService {
           // Successfully claimed this proxy
           await logger.info("proxy", `Proxy ${proxy.host}:${proxy.port} alocado (uso único) — será substituído após o job terminar`, {}, jobId);
 
+          // v10.0: Track this proxy for the job
+          if (jobId) {
+            if (!this.jobProxyMap.has(jobId)) {
+              this.jobProxyMap.set(jobId, new Set());
+            }
+            this.jobProxyMap.get(jobId)!.add(proxy.host);
+          }
+
           return {
             id: proxy.id,
             host: proxy.host,
@@ -358,8 +384,14 @@ class ProxyService {
   /**
    * Release a proxy after the job is done. Queues it for background replacement.
    * Called by the orchestrator when a job attempt finishes (success or failure).
+   *
+   * v10.0: Also removes the IP from jobProxyMap tracking (already handled).
    */
   releaseProxy(ip: string, jobId?: number): void {
+    // Remove from job tracking (this IP is now handled)
+    if (jobId) {
+      this.jobProxyMap.get(jobId)?.delete(ip);
+    }
     this.queueForReplacement(ip, jobId);
   }
 
@@ -369,8 +401,15 @@ class ProxyService {
    * (i.e., before the account was registered on the target platform).
    * Instead of wasting the proxy by sending it for replacement, we simply
    * re-enable it so it can be used by the next job.
+   *
+   * v10.0: Also removes the IP from jobProxyMap tracking.
    */
   async recycleProxy(ip: string, jobId?: number): Promise<void> {
+    // Remove from job tracking (this IP is now handled)
+    if (jobId) {
+      this.jobProxyMap.get(jobId)?.delete(ip);
+    }
+
     try {
       const db = await getDb();
       if (!db) return;
@@ -400,6 +439,52 @@ class ProxyService {
       await logger.warn("proxy", `Erro ao reciclar proxy ${ip}: ${err}. Enviando para replacement.`, {}, jobId);
       this.queueForReplacement(ip, jobId);
     }
+  }
+
+  /**
+   * v10.0: Release ALL proxies tracked for a specific job.
+   *
+   * Called when a job is cancelled or deleted to ensure no proxies are left
+   * stuck as "used" (enabled=false) without being queued for replacement.
+   *
+   * This handles the case where the provider allocated extra proxies internally
+   * (health-check retries, step-2 proxy swaps) that the orchestrator doesn't
+   * know about. Without this, those proxies would remain enabled=false forever,
+   * never entering the replace queue.
+   *
+   * Strategy: queue all remaining tracked proxies for replacement.
+   * We don't recycle here because we can't know if they were "burned" or not
+   * (the provider may have used them for requests before the abort propagated).
+   * Replacement is the safe default.
+   */
+  async releaseAllForJob(jobId: number): Promise<void> {
+    const trackedIps = this.jobProxyMap.get(jobId);
+    if (!trackedIps || trackedIps.size === 0) {
+      this.jobProxyMap.delete(jobId);
+      return;
+    }
+
+    const ips = Array.from(trackedIps);
+    await logger.info("proxy",
+      `[releaseAllForJob] Job ${jobId}: liberando ${ips.length} proxy(ies) restantes: ${ips.join(", ")}`,
+      {}, jobId
+    );
+
+    for (const ip of ips) {
+      this.queueForReplacement(ip, jobId);
+    }
+
+    // Clean up the tracking entry
+    this.jobProxyMap.delete(jobId);
+  }
+
+  /**
+   * v10.0: Clear tracking for a job without releasing proxies.
+   * Called by the orchestrator after it has already handled proxy release
+   * for the current attempt, to clean up the tracking map.
+   */
+  clearJobTracking(jobId: number): void {
+    this.jobProxyMap.delete(jobId);
   }
 
   /**

@@ -1,5 +1,7 @@
 /**
  * Jobs Router - Criação e gerenciamento de jobs
+ *
+ * v10.0: Updated forceAbort calls to use await (now async for proxy cleanup).
  */
 
 import { z } from "zod";
@@ -107,6 +109,7 @@ export const jobsRouter = router({
 
   /**
    * deleteFolder - Remove uma pasta e todos os jobs dentro dela
+   * v10.0: forceAbort is now awaited for proper proxy cleanup.
    */
   deleteFolder: protectedProcedure
     .input(z.object({ id: z.number() }))
@@ -118,9 +121,10 @@ export const jobsRouter = router({
       const folderJobs = await db.select({ id: jobs.id, status: jobs.status }).from(jobs).where(eq(jobs.folderId, input.id));
 
       // Force-abort any running/paused jobs before deleting
+      // v10.0: forceAbort is now async — await it for proper proxy cleanup
       const activeJobs = folderJobs.filter(j => j.status === "running" || j.status === "paused");
       for (const activeJob of activeJobs) {
-        orchestrator.forceAbort(activeJob.id);
+        await orchestrator.forceAbort(activeJob.id);
       }
       if (activeJobs.length > 0) {
         // Small wait to let aborts propagate before deleting from DB
@@ -181,6 +185,7 @@ export const jobsRouter = router({
   /**
    * Delete - Remove um job específico.
    * Se o job estiver rodando ou pausado, aborta imediatamente antes de deletar.
+   * v10.0: forceAbort is now awaited for proper proxy cleanup.
    */
   delete: protectedProcedure
     .input(z.object({ id: z.number() }))
@@ -194,8 +199,9 @@ export const jobsRouter = router({
       const { status, folderId } = result[0];
 
       // If job is active, force-abort it immediately before deleting
+      // v10.0: forceAbort is now async — await it for proper proxy cleanup
       if (status === "running" || status === "paused") {
-        orchestrator.forceAbort(input.id);
+        await orchestrator.forceAbort(input.id);
         // Small wait to let the abort propagate before we delete from DB
         await new Promise(resolve => setTimeout(resolve, 200));
       }
