@@ -435,22 +435,56 @@ class FingerprintService {
   ): BrowserProfile {
     const osConstraint = getApifyOS(region);
 
+    // v10.0: Fixed Chrome version range to match impers TLS impersonation capability.
+    // impers supports up to chrome142. If Apify generates Chrome 144/145, the UA
+    // headers say "Chrome/145" but the TLS/HTTP2 fingerprint is chrome142.
+    // Anti-bot systems can detect this version mismatch.
+    // By constraining Apify to 140-142, the UA and TLS fingerprint are consistent.
     const { headers: apifyHeaders, fingerprint: fp } =
       apifyGenerator.getFingerprint({
-        browsers: [{ name: "chrome", minVersion: 144 }],
+        browsers: [{ name: "chrome", minVersion: 140, maxVersion: 142 }],
         devices: ["desktop"],
         operatingSystems: osConstraint,
       });
 
     // Extract screen dimensions from Apify
-    const screenWidth = fp.screen.width;
-    const screenHeight = fp.screen.height;
+    let screenWidth = fp.screen.width;
+    let screenHeight = fp.screen.height;
+
+    // v10.0 SANITIZATION: Reject portrait-mode screens on desktop (e.g. 777x1164).
+    // Real desktop monitors are always landscape or square. Portrait screens are
+    // a trivial bot detection signal.
+    if (screenHeight > screenWidth) {
+      console.warn(`[Fingerprint] Apify gerou tela retrato (${screenWidth}x${screenHeight}), corrigindo para 1920x1080`);
+      screenWidth = 1920;
+      screenHeight = 1080;
+    }
+
+    // v10.0 SANITIZATION: Reject unrealistically small screens (< 1024x768).
+    if (screenWidth < 1024 || screenHeight < 600) {
+      console.warn(`[Fingerprint] Apify gerou tela muito pequena (${screenWidth}x${screenHeight}), corrigindo para 1920x1080`);
+      screenWidth = 1920;
+      screenHeight = 1080;
+    }
+
     const chromeUiHeight = 80 + Math.floor(Math.random() * 40);
     // Use Apify's innerWidth/outerWidth if available, otherwise derive from screen
-    const viewportWidth = fp.screen.innerWidth > 0 ? fp.screen.innerWidth : screenWidth;
-    const viewportHeight = fp.screen.innerHeight > 0 ? fp.screen.innerHeight : (screenHeight - chromeUiHeight);
+    let viewportWidth = fp.screen.innerWidth > 0 ? fp.screen.innerWidth : screenWidth;
+    let viewportHeight = fp.screen.innerHeight > 0 ? fp.screen.innerHeight : (screenHeight - chromeUiHeight);
+
+    // Ensure viewport is consistent with (possibly corrected) screen dimensions
+    if (viewportWidth > screenWidth) viewportWidth = screenWidth;
+    if (viewportHeight > screenHeight) viewportHeight = screenHeight - chromeUiHeight;
+
     const colorDepth = fp.screen.colorDepth || 24;
-    const devicePixelRatio = fp.screen.devicePixelRatio || 1;
+
+    // v10.0 SANITIZATION: Clamp devicePixelRatio to realistic desktop values (1-2).
+    // Values like 2.75 are mobile-only and suspicious on desktop.
+    let devicePixelRatio = fp.screen.devicePixelRatio || 1;
+    if (devicePixelRatio > 2) {
+      console.warn(`[Fingerprint] Apify gerou devicePixelRatio=${devicePixelRatio} (m\u00f3vel), corrigindo para 1`);
+      devicePixelRatio = 1;
+    }
 
     // Use Apify's user agent (it's consistent with the generated fingerprint)
     const userAgent = fp.navigator.userAgent;
@@ -462,12 +496,41 @@ class FingerprintService {
     const webglRenderer = fp.videoCard?.renderer || "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)";
 
     // Extract hardware info
-    const deviceMemory = fp.navigator.deviceMemory ?? 8;
-    const hardwareConcurrency = fp.navigator.hardwareConcurrency || 8;
+    let deviceMemory = fp.navigator.deviceMemory ?? 8;
+    let hardwareConcurrency = fp.navigator.hardwareConcurrency || 8;
     const maxTouchPoints = fp.navigator.maxTouchPoints ?? 0;
 
+    // v10.0 SANITIZATION: Force minimum deviceMemory to 2 GB.
+    // Real Chrome reports 0.25, 0.5, 1, 2, 4, 8 — but 0 is impossible and
+    // values < 2 are extremely rare on desktops capable of running Chrome 142+.
+    if (deviceMemory < 2) {
+      console.warn(`[Fingerprint] Apify gerou deviceMemory=${deviceMemory}, corrigindo para 8`);
+      deviceMemory = 8;
+    }
+
+    // v10.0 SANITIZATION: Clamp hardwareConcurrency to realistic range (2-16).
+    // 32+ cores with integrated GPU (Intel UHD) is an impossible combination.
+    if (hardwareConcurrency > 16) {
+      console.warn(`[Fingerprint] Apify gerou hardwareConcurrency=${hardwareConcurrency}, corrigindo para ${Math.min(hardwareConcurrency, 16)}`);
+      hardwareConcurrency = 16;
+    }
+    if (hardwareConcurrency < 2) {
+      hardwareConcurrency = 4;
+    }
+
     // Extract fonts
-    const fonts = fp.fonts || [];
+    let fonts = fp.fonts || [];
+
+    // v10.0 SANITIZATION: Ensure minimum font count.
+    // A real desktop has 20-200+ fonts. Having 0-4 fonts is a trivial bot signal.
+    if (fonts.length < 5) {
+      console.warn(`[Fingerprint] Apify gerou apenas ${fonts.length} fonte(s), usando fallback de fontes padr\u00e3o`);
+      fonts = detectedOSValue === "windows"
+        ? ["Arial", "Calibri", "Cambria", "Comic Sans MS", "Consolas", "Courier New", "Georgia", "Impact", "Lucida Console", "Microsoft Sans Serif", "Palatino Linotype", "Segoe UI", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana", "Webdings", "Wingdings"]
+        : detectedOSValue === "macos"
+          ? ["Arial", "Courier New", "Georgia", "Helvetica", "Helvetica Neue", "Lucida Grande", "Menlo", "Monaco", "Palatino", "SF Pro", "Times", "Times New Roman", "Trebuchet MS", "Verdana"]
+          : ["Arial", "Courier New", "DejaVu Sans", "DejaVu Sans Mono", "DejaVu Serif", "Droid Sans", "FreeMono", "FreeSans", "FreeSerif", "Liberation Mono", "Liberation Sans", "Liberation Serif", "Noto Sans", "Ubuntu"];
+    }
 
     // Extract codecs
     const audioCodecs = fp.audioCodecs || {};

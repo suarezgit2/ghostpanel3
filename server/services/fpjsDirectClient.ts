@@ -37,6 +37,7 @@ import http from "http";
 import tls from "tls";
 import type { ProxyInfo } from "./proxy";
 import type { BrowserProfile } from "./fingerprint";
+import { ensureImpers, getImpers, getImpersonateTarget } from "./httpClient";
 
 // ============================================================
 // FPJS XOR Obfuscation (reverse-engineered from Hi/Yi functions)
@@ -772,10 +773,78 @@ function deterministicInt32(seed: string): number {
 const FPJS_URL = "https://metrics.manus.im/?ci=js/3.11.8&q=nG226lNwQWNTTWzOzKbF&ii=fingerprint-pro-custom-subdomain/2.0.0/procdn";
 
 /**
- * Send binary POST to FPJS endpoint, optionally through a proxy.
- * Uses Node.js native https/http modules for binary body support.
+ * Send binary POST to FPJS endpoint using impers (curl-impersonate) for
+ * Chrome-identical TLS/HTTP2 fingerprinting.
+ *
+ * v10.0 CRITICAL FIX: Previously used Node.js native https/tls modules,
+ * which exposed a Node.js TLS fingerprint (JA3/JA4) to the FPJS CDN.
+ * The FPJS server compares the real TLS fingerprint of the connection
+ * with the s56 signal inside the payload. The mismatch between Node.js
+ * TLS and the Chrome-like s56 was a primary detection vector.
+ *
+ * Now uses impers (same as RPC calls) so the TLS fingerprint seen by
+ * FPJS matches Chrome, consistent with the s56 signal and all RPC calls.
+ *
+ * Falls back to Node.js native ONLY if impers is unavailable (dev env).
  */
-function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, userAgent?: string): Promise<{ status: number; body: Buffer }> {
+async function sendBinaryPost(url: string, body: Buffer, proxy?: ProxyInfo | null, userAgent?: string): Promise<{ status: number; body: Buffer }> {
+  const impersAvailable = await ensureImpers();
+  const impersModule = getImpers();
+
+  if (impersAvailable && impersModule) {
+    return sendBinaryPostImpers(impersModule, url, body, proxy, userAgent);
+  }
+
+  // Fallback to Node.js native (dev environment only — logs warning)
+  console.warn("[FPJS-Direct] \u26a0 impers indispon\u00edvel, usando Node.js nativo para FPJS POST (TLS fingerprint ser\u00e1 de Node.js!)");
+  return sendBinaryPostNative(url, body, proxy, userAgent);
+}
+
+/**
+ * Send binary POST via impers (curl-impersonate) — Chrome-identical TLS.
+ */
+async function sendBinaryPostImpers(
+  impersModule: typeof import("impers"),
+  url: string,
+  body: Buffer,
+  proxy?: ProxyInfo | null,
+  userAgent?: string,
+): Promise<{ status: number; body: Buffer }> {
+  const ua = userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+  const target = getImpersonateTarget(ua);
+
+  let proxyUrl: string | undefined;
+  if (proxy) {
+    proxyUrl = `http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
+  }
+
+  const response = await impersModule.post(url, {
+    content: body,
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Accept": "*/*",
+      "Origin": "https://manus.im",
+      "Referer": "https://manus.im/",
+    },
+    impersonate: target,
+    proxy: proxyUrl,
+    timeout: 30,
+    // Disable automatic content decoding — FPJS response is XOR-encrypted binary,
+    // not standard gzip/br. If impers tries to decompress, it will corrupt the data.
+    decodeContent: false,
+  });
+
+  return {
+    status: response.statusCode,
+    body: response.content,
+  };
+}
+
+/**
+ * Legacy fallback: Send binary POST via Node.js native https/tls.
+ * WARNING: TLS fingerprint will be Node.js, not Chrome. Only for dev/testing.
+ */
+function sendBinaryPostNative(url: string, body: Buffer, proxy?: ProxyInfo | null, userAgent?: string): Promise<{ status: number; body: Buffer }> {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
     const timeout = 30000;

@@ -33,7 +33,7 @@ let impersInitPromise: Promise<void> | null = null;
  * Map Chrome version from User-Agent to the closest impers impersonate target.
  * impers supports: chrome99, chrome100, ..., chrome131, chrome133a, chrome136, chrome142
  */
-function getImpersonateTarget(userAgent: string): string {
+export function getImpersonateTarget(userAgent: string): string {
   const match = userAgent.match(/Chrome\/(\d+)/);
   if (!match) return "chrome";  // Latest Chrome as default
 
@@ -61,7 +61,7 @@ function getImpersonateTarget(userAgent: string): string {
  * Initialize impers lazily on first use.
  * This avoids crashing the server if libcurl-impersonate is not installed.
  */
-async function ensureImpers(): Promise<boolean> {
+export async function ensureImpers(): Promise<boolean> {
   if (impersAvailable) return true;
   if (impersInitPromise) {
     await impersInitPromise;
@@ -125,6 +125,14 @@ export interface HttpResponse {
  * - Falls back to Node.js native fetch with HttpsProxyAgent
  * - TLS fingerprint will be Node.js (detectable!)
  */
+/**
+ * Get the loaded impers module instance.
+ * Must call ensureImpers() first to guarantee it's loaded.
+ */
+export function getImpers(): typeof import("impers") | null {
+  return impers;
+}
+
 export async function httpRequest(options: HttpRequestOptions): Promise<HttpResponse> {
   const available = await ensureImpers();
 
