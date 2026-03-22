@@ -404,7 +404,7 @@ function getFontConfig(os: "windows" | "macos" | "linux"): { value: unknown; sta
  *
  * v8.0: All signals are now OS-aware and version-consistent.
  */
-function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
+function buildFpjsPayload(profile: BrowserProfile, tlsToken?: string | null): Record<string, unknown> {
   const now = Date.now();
   const os = profile.detectedOS;
   const isWindows = os === "windows";
@@ -482,8 +482,8 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
   // v8.0: Deterministic canvas/webgl hash (NOT random per call)
   const canvasWebglHash = deterministicHash(profile.clientId + "s55_canvas_webgl");
 
-  // v8.0: Deterministic TLS fingerprint per profile
-  const tlsFingerprint = generateTLSFingerprint(profile.clientId);
+  // v10.1: Use REAL TLS token from pre-flight endpoint (was fake generated hash)
+  const tlsFingerprint = tlsToken || generateTLSFingerprint(profile.clientId);
 
   // v8.0: Version-aware error stack
   const errorStack = generateErrorStack(chromeVersion);
@@ -507,7 +507,9 @@ function buildFpjsPayload(profile: BrowserProfile): Record<string, unknown> {
     epv: "e683a40",
     lr: [{ r: null }],
 
-    // v8.0: TLS fingerprint — deterministic per profile (was static for all)
+    // v10.1: TLS token from pre-flight endpoint (was fake generated hash)
+    // The real FPJS loader gets this from a GET to the TLS endpoint, NOT locally generated
+    // sig() wraps as {s: 0, v: value}, matching the Xi function's o.s56 = {s: 0, v: base64token}
     s56: sig(tlsFingerprint),
     s67: sig(null, NOT_SUPPORTED),
 
@@ -771,6 +773,100 @@ function deterministicInt32(seed: string): number {
 // ============================================================
 
 const FPJS_URL = "https://metrics.manus.im/?ci=js/3.11.8&q=nG226lNwQWNTTWzOzKbF&ii=fingerprint-pro-custom-subdomain/2.0.0/procdn";
+const FPJS_TLS_URL = "https://metrics.manus.im/vjN7bI/OjA2/RJJjS?q=nG226lNwQWNTTWzOzKbF";
+
+/**
+ * Fetch the TLS token from the FPJS TLS pre-flight endpoint.
+ *
+ * v10.1 CRITICAL FIX: The real FPJS loader v3.11.8 makes a GET request to
+ * a separate TLS endpoint BEFORE the main fingerprint POST. The server
+ * records the TLS fingerprint (JA3/JA4) of this connection and returns
+ * a base64-encoded token (~96 chars). This token is then placed in the
+ * s56 field of the main POST payload.
+ *
+ * Previously, s56 was a locally-generated fake hash — the server detected
+ * this as invalid and returned 400 "RequestCannotBeParsed".
+ *
+ * The TLS GET and the main POST MUST use the same proxy and impersonation
+ * target so the TLS fingerprints match.
+ */
+async function fetchTlsToken(
+  proxy?: ProxyInfo | null,
+  userAgent?: string,
+): Promise<string | null> {
+  const ua = userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+
+  try {
+    const impersAvailable = await ensureImpers();
+    const impersModule = getImpers();
+
+    if (impersAvailable && impersModule) {
+      const target = getImpersonateTarget(ua);
+      let proxyUrl: string | undefined;
+      if (proxy) {
+        proxyUrl = `http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
+      }
+
+      const response = await impersModule.get(FPJS_TLS_URL, {
+        headers: {
+          "Accept": "*/*",
+          "Origin": "https://manus.im",
+          "Referer": "https://manus.im/",
+        },
+        impersonate: target,
+        proxy: proxyUrl,
+        timeout: 10,
+      });
+
+      if (response.statusCode === 200) {
+        const body = response.content.toString();
+        // Validate: must be a base64 string (as per FPJS Ms() validator)
+        if (/^[a-zA-Z0-9+/]{1,1022}={0,2}$/.test(body)) {
+          console.log(`[FPJS-Direct] TLS pre-flight OK — token: ${body.substring(0, 20)}... (${body.length} chars) via proxy ${proxy?.host || "direct"}`);
+          return body;
+        }
+        console.warn(`[FPJS-Direct] TLS pre-flight returned invalid body (not base64): ${body.substring(0, 50)}`);
+      } else {
+        console.warn(`[FPJS-Direct] TLS pre-flight returned status ${response.statusCode} via proxy ${proxy?.host || "direct"}`);
+      }
+    } else {
+      // Fallback: Node.js native GET (dev only)
+      return await new Promise<string | null>((resolve) => {
+        const urlObj = new URL(FPJS_TLS_URL);
+        const req = https.get({
+          hostname: urlObj.hostname,
+          path: urlObj.pathname + urlObj.search,
+          headers: {
+            "Accept": "*/*",
+            "Origin": "https://manus.im",
+            "Referer": "https://manus.im/",
+            "User-Agent": ua,
+          },
+        }, (res) => {
+          let data = "";
+          res.on("data", (chunk: Buffer) => data += chunk.toString());
+          res.on("end", () => {
+            if (res.statusCode === 200 && /^[a-zA-Z0-9+/]{1,1022}={0,2}$/.test(data)) {
+              resolve(data);
+            } else {
+              console.warn(`[FPJS-Direct] TLS pre-flight (native) status ${res.statusCode}`);
+              resolve(null);
+            }
+          });
+        });
+        req.on("error", (e) => {
+          console.warn(`[FPJS-Direct] TLS pre-flight (native) error: ${e.message}`);
+          resolve(null);
+        });
+        req.setTimeout(10000, () => { req.destroy(); resolve(null); });
+      });
+    }
+  } catch (e) {
+    console.warn(`[FPJS-Direct] TLS pre-flight error: ${e instanceof Error ? e.message : e}`);
+  }
+
+  return null;
+}
 
 /**
  * Send binary POST to FPJS endpoint using impers (curl-impersonate) for
@@ -1177,7 +1273,16 @@ async function _generateRequestIdWithRetry(
     }
 
     try {
-      const payload = buildFpjsPayload(profile);
+      // v10.1: Fetch TLS token from pre-flight endpoint BEFORE building payload
+      // This must use the same proxy so the TLS fingerprint matches the main POST
+      const tlsToken = await fetchTlsToken(useProxy, profile.userAgent);
+      if (tlsToken) {
+        console.log(`[FPJS-Direct] TLS token acquired for attempt ${attempt} via proxy ${useProxy?.host || "direct"} ${jobId ? `[job ${jobId}]` : ""}`);
+      } else {
+        console.warn(`[FPJS-Direct] TLS pre-flight failed, using fallback hash for s56 ${jobId ? `[job ${jobId}]` : ""}`);
+      }
+
+      const payload = buildFpjsPayload(profile, tlsToken);
       const jsonStr = JSON.stringify(payload);
       const jsonBytes = Buffer.from(jsonStr, "utf-8");
       const compressed = deflateRawSync(jsonBytes);
