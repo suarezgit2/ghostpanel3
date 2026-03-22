@@ -502,10 +502,12 @@ function buildFpjsPayload(profile: BrowserProfile, tlsToken?: string | null): Re
     mo: ["id"],  // ONLY identification — no bot detection (bd) or extras (ex)
     sc: { u: "https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js" },
     gt: 1,
-    ab: { noop: "b", CTRb3vV: "ctrl" },
+    // v10.2: Randomize A/B tests — real loader randomly assigns each visitor
+    ab: { noop: Math.random() < 0.5 ? "a" : "b", CTRb3vV: Math.random() < 0.5 ? "ctrl" : "clup" },
     url: "https://manus.im/login",
     epv: "e683a40",
-    lr: [{ r: null }],
+    // v10.2: First visit = no previous FPJS requests in localStorage
+    lr: [],
 
     // v10.1: TLS token from pre-flight endpoint (was fake generated hash)
     // The real FPJS loader gets this from a GET to the TLS endpoint, NOT locally generated
@@ -568,8 +570,10 @@ function buildFpjsPayload(profile: BrowserProfile, tlsToken?: string | null): Re
     s50: sig(deterministicInt32(profile.clientId + webglRenderer + "s50")),
     s51: sig(fontBase),
     s52: sig(null, ERROR),
-    // v8.0: Canvas/WebGL hash — deterministic per profile (was random per call!)
-    s55: sig(canvasWebglHash),
+    // v10.2: First visit = no visitor token in cookie/localStorage
+    // Real loader calls Js(storageKey) which reads cookie + localStorage.
+    // On first visit (account creation), both are empty → {s: -1, v: null}
+    s55: sig(null, NOT_SUPPORTED),
     s57: sig(1),
     // v8.0: UA Client Hints — correct GREASE brand + full version
     s58: sig(uaData),
