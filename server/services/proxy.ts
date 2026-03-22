@@ -380,9 +380,15 @@ class ProxyService {
 
   /**
    * Background worker that processes the replace queue.
-   * Batches used proxy IPs and replaces them via Webshare API.
-   * Waits a short delay to accumulate IPs for batch efficiency.
+   * v9.7.3: Refatorado para ser mais resiliente:
+   * - Delay reduzido de 10s para 3s (acumula batch rápido)
+   * - Re-enfileira IPs quando replacement falha (com limite de 3 retries)
+   * - Trata erro not_enough_replacements_in_subscription
+   * - Log claro de cada etapa
    */
+  private failedReplacements = new Map<string, number>(); // IP -> retry count
+  private readonly MAX_REPLACE_RETRIES = 3;
+
   private async startReplaceWorker(jobId?: number): Promise<void> {
     if (this.replaceWorkerRunning) return;
     this.replaceWorkerRunning = true;
@@ -391,9 +397,8 @@ class ProxyService {
       await this.ensureApiKey();
 
       while (this.replaceQueue.length > 0) {
-        // Wait a bit to accumulate more IPs for batch replacement
-        // (Webshare only allows 1 replacement at a time)
-        await sleep(10000); // 10 seconds
+        // Delay curto para acumular batch (Webshare só permite 1 replacement ativo)
+        await sleep(3000);
 
         if (this.replaceQueue.length === 0) break;
 
@@ -401,12 +406,26 @@ class ProxyService {
         const ipsToReplace = [...this.replaceQueue];
         this.replaceQueue = [];
 
-        await logger.info("proxy", `Substituindo ${ipsToReplace.length} proxy(ies) usados: ${ipsToReplace.join(", ")}`, {}, jobId);
+        await logger.info("proxy",
+          `[Replace Worker] Substituindo ${ipsToReplace.length} proxy(ies): ${ipsToReplace.join(", ")}`,
+          {}, jobId
+        );
 
         try {
           // Wait if another replacement (manual) is in progress
+          let waitCount = 0;
           while (this.isReplacing) {
+            if (waitCount % 5 === 0) {
+              await logger.info("proxy", `[Replace Worker] Aguardando replacement anterior finalizar...`, {}, jobId);
+            }
             await sleep(3000);
+            waitCount++;
+            // Safety: se esperou mais de 5 minutos, força reset do mutex
+            if (waitCount > 100) {
+              await logger.warn("proxy", `[Replace Worker] Timeout aguardando replacement anterior. Resetando mutex.`, {}, jobId);
+              this.isReplacing = false;
+              break;
+            }
           }
 
           this.isReplacing = true;
@@ -428,53 +447,130 @@ class ProxyService {
 
           if (!resp.ok) {
             const errorText = await resp.text();
-            // If active_replacement error, put IPs back in queue and retry later
+
+            // active_replacement: outro replacement em andamento na Webshare
             if (errorText.includes("active_replacement")) {
-              await logger.warn("proxy", "Substituição já em andamento na Webshare, reagendando...", {}, jobId);
+              await logger.warn("proxy",
+                `[Replace Worker] Webshare já tem replacement ativo. Re-enfileirando ${ipsToReplace.length} IPs, retry em 15s...`,
+                {}, jobId
+              );
               this.replaceQueue.push(...ipsToReplace);
               this.isReplacing = false;
               await sleep(15000);
               continue;
             }
+
+            // not_enough_replacements_in_subscription: limite de replacements atingido
+            if (errorText.includes("not_enough_replacements")) {
+              await logger.error("proxy",
+                `[Replace Worker] LIMITE DE REPLACEMENTS DA ASSINATURA ATINGIDO! ` +
+                `${ipsToReplace.length} proxies não podem ser substituídos. ` +
+                `Faça upgrade da assinatura Webshare ou aguarde o reset mensal.`,
+                {}, jobId
+              );
+              // Re-enfileira para tentar novamente mais tarde (pode resetar)
+              this.replaceQueue.push(...ipsToReplace);
+              this.isReplacing = false;
+              // Espera 5 minutos antes de tentar de novo
+              await sleep(300_000);
+              continue;
+            }
+
             throw new Error(`Webshare replace error (${resp.status}): ${errorText}`);
           }
 
           const replaceResult = (await resp.json()) as Record<string, unknown>;
           const replacementId = replaceResult.id as number;
 
-          await logger.info("proxy", `Substituição criada (ID: ${replacementId}), aguardando...`, {}, jobId);
+          await logger.info("proxy",
+            `[Replace Worker] Replacement criado (ID: ${replacementId}), polling status...`,
+            {}, jobId
+          );
 
           // Poll until complete
           let state = replaceResult.state as string;
           let pollAttempts = 0;
-          const maxPollAttempts = 60;
+          const maxPollAttempts = 60; // 60 * 5s = 5 minutos max
 
           while (state !== "completed" && state !== "failed" && pollAttempts < maxPollAttempts) {
             await sleep(5000);
             pollAttempts++;
 
-            const statusResp = await fetch(`${WEBSHARE_API_V3}/proxy/replace/${replacementId}/`, {
-              headers: { Authorization: `Token ${this.apiKey}` },
-            });
+            try {
+              const statusResp = await fetch(`${WEBSHARE_API_V3}/proxy/replace/${replacementId}/`, {
+                headers: { Authorization: `Token ${this.apiKey}` },
+              });
 
-            if (!statusResp.ok) continue;
+              if (!statusResp.ok) continue;
 
-            const statusData = (await statusResp.json()) as Record<string, unknown>;
-            state = statusData.state as string;
+              const statusData = (await statusResp.json()) as Record<string, unknown>;
+              state = statusData.state as string;
+
+              if (pollAttempts % 6 === 0) {
+                await logger.info("proxy",
+                  `[Replace Worker] Replacement ${replacementId} em andamento... (estado: ${state}, ${pollAttempts * 5}s)`,
+                  {}, jobId
+                );
+              }
+            } catch {
+              // Erro de rede no polling — continua tentando
+            }
           }
 
           if (state === "completed") {
             // Fetch new proxies from Webshare and add only the NEW ones
             await this.syncNewProxies(ipsToReplace, jobId);
-            await logger.info("proxy", `${ipsToReplace.length} proxy(ies) substituídos com sucesso!`, {}, jobId);
+            await logger.info("proxy",
+              `[Replace Worker] ${ipsToReplace.length} proxy(ies) substituídos com sucesso!`,
+              {}, jobId
+            );
+            // Limpa contadores de retry dos IPs que foram substituídos
+            for (const ip of ipsToReplace) {
+              this.failedReplacements.delete(ip);
+            }
           } else {
-            await logger.error("proxy", `Substituição falhou (estado: ${state}). IPs: ${ipsToReplace.join(", ")}`, {}, jobId);
-            // Don't re-queue on failure to avoid infinite loop
+            // FALHOU: re-enfileira com limite de retries
+            await logger.error("proxy",
+              `[Replace Worker] Replacement ${replacementId} falhou (estado: ${state}). Re-enfileirando...`,
+              {}, jobId
+            );
+            for (const ip of ipsToReplace) {
+              const retries = (this.failedReplacements.get(ip) || 0) + 1;
+              if (retries <= this.MAX_REPLACE_RETRIES) {
+                this.failedReplacements.set(ip, retries);
+                this.replaceQueue.push(ip);
+                await logger.info("proxy",
+                  `[Replace Worker] IP ${ip} re-enfileirado (tentativa ${retries}/${this.MAX_REPLACE_RETRIES})`,
+                  {}, jobId
+                );
+              } else {
+                await logger.error("proxy",
+                  `[Replace Worker] IP ${ip} falhou ${this.MAX_REPLACE_RETRIES}x. Desistindo — faça Replace manual.`,
+                  {}, jobId
+                );
+                this.failedReplacements.delete(ip);
+              }
+            }
+            // Delay antes de retentar
+            await sleep(10000);
           }
 
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          await logger.error("proxy", `Erro no replace automático: ${msg}`, {}, jobId);
+          await logger.error("proxy", `[Replace Worker] Erro: ${msg}`, {}, jobId);
+          // Re-enfileira os IPs que falharam por erro inesperado
+          for (const ip of ipsToReplace) {
+            const retries = (this.failedReplacements.get(ip) || 0) + 1;
+            if (retries <= this.MAX_REPLACE_RETRIES) {
+              this.failedReplacements.set(ip, retries);
+              if (!this.replaceQueue.includes(ip)) {
+                this.replaceQueue.push(ip);
+              }
+            } else {
+              this.failedReplacements.delete(ip);
+            }
+          }
+          await sleep(10000);
         } finally {
           this.isReplacing = false;
         }
