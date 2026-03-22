@@ -34,7 +34,7 @@ RUN pnpm build
 FROM debian:bookworm-slim AS curl-dl
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      wget ca-certificates gcc binutils python3 \
+      wget ca-certificates gcc libc6-dev binutils python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy build scripts
