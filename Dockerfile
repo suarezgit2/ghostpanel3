@@ -2,7 +2,8 @@
 # Ghost Panel - Dockerfile (Otimizado)
 # Build multi-stage para produção
 # Includes:
-#   - curl-impersonate for TLS/HTTP2 fingerprint impersonation
+#   - curl-impersonate v1.5.1 for TLS/HTTP2 fingerprint impersonation
+#     (GREASE, ECH, Kyber768, ALPS — Chrome 142+ identical)
 #   - Chromium for FingerprintJS Pro real requestId generation (Puppeteer)
 # ============================================================
 
@@ -27,17 +28,22 @@ COPY . .
 # Build do frontend (Vite) e backend (esbuild)
 RUN pnpm build
 
-# ---------- Stage 2: Download curl-impersonate ----------
+# ---------- Stage 2: Build curl-impersonate shared library ----------
+# v1.5.1 only ships static .a archives. We patch ELF symbol visibility
+# and link into a .so that impers (Node.js FFI) can load at runtime.
 FROM debian:bookworm-slim AS curl-dl
 
-RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      wget ca-certificates gcc binutils python3 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Download curl-impersonate for Linux x64 (Chrome variant)
-RUN mkdir -p /opt/curl-impersonate && \
-    wget -q "https://github.com/lexiforest/curl-impersonate/releases/download/v0.8.0/libcurl-impersonate-v0.8.0.x86_64-linux-gnu.tar.gz" \
-      -O /tmp/curl-impersonate.tar.gz && \
-    tar xzf /tmp/curl-impersonate.tar.gz -C /opt/curl-impersonate/ && \
-    rm /tmp/curl-impersonate.tar.gz
+# Copy build scripts
+COPY scripts/build-curl-impersonate.sh /tmp/build-curl-impersonate.sh
+COPY scripts/patch-elf-visibility.py /tmp/patch-elf-visibility.py
+
+# Build the shared library from static archive
+RUN chmod +x /tmp/build-curl-impersonate.sh && \
+    SCRIPT_DIR=/tmp /tmp/build-curl-impersonate.sh v1.5.1 /opt/curl-impersonate
 
 # ---------- Stage 3: Production ----------
 FROM node:22-slim AS runner
