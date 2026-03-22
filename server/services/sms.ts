@@ -580,146 +580,92 @@ class SmsService {
   private static BLACKLIST_COOLDOWN_AFTER_RESET_MS = 120_000; // 2 minutos
 
   /**
-   * Fila de cancelamentos assíncronos (Refatorada para evitar memory leaks e race conditions).
-   * Usa um Map para deduplicação e processamento em batch controlado.
+   * Conjunto de IDs sendo cancelados (para deduplicação).
    */
-  private cancelQueue = new Map<string, {
-    rentedAt: number;
-    minWait: number;
-    jobId?: number;
-    attempts: number;
-    nextRetry: number;
-  }>();
-  
-  private isProcessingQueue = false;
-  private readonly MAX_QUEUE_SIZE = 500;
-  private readonly PROCESSING_CONCURRENCY = 3; // Limita requisições simultâneas à API
-  private readonly ITEM_TTL = 24 * 60 * 60 * 1000; // 24h
+  private cancellingIds = new Set<string>();
 
   /**
-   * Enfileira um cancelamento assíncrono. Retorna imediatamente sem bloquear.
-   * O cancelamento real acontece em background após o tempo mínimo.
+   * v9.7.3: Cancelamento imediato fire-and-forget.
+   * Tenta cancelar NA HORA. Se a API recusar (número alugado há pouco tempo),
+   * faz retry a cada 15s até conseguir (máx 5 tentativas).
+   * 
+   * Não bloqueia o job — roda em background como Promise independente.
+   * Cada cancelamento é uma Promise isolada, não depende de fila central.
    */
-  enqueueCancelAsync(activationId: string, rentedAt: number, jobId?: number): void {
-    // Deduplicação: se já está na fila, não adiciona novamente
-    if (this.cancelQueue.has(activationId)) {
-      return;
-    }
+  cancelFireAndForget(activationId: string, rentedAt: number, jobId?: number): void {
+    // Deduplicação
+    if (this.cancellingIds.has(activationId)) return;
+    this.cancellingIds.add(activationId);
 
-    // Proteção contra memory leak
-    if (this.cancelQueue.size >= this.MAX_QUEUE_SIZE) {
-      logger.warn("sms", `[Fila] Fila de cancelamento cheia (${this.MAX_QUEUE_SIZE}). Forçando processamento...`, {}, jobId).catch(() => {});
-      this.processCancelQueue().catch(() => {});
-    }
-
-    const minWait = this.config?.cancelWaitMs ?? 125_000; // fallback: 125s (padrão SMSBower)
-    
-    this.cancelQueue.set(activationId, {
-      rentedAt,
-      minWait,
-      jobId,
-      attempts: 0,
-      nextRetry: rentedAt + minWait // Só processa após o tempo mínimo
+    // Dispara em background
+    this._doCancelWithRetry(activationId, rentedAt, jobId).catch(() => {}).finally(() => {
+      this.cancellingIds.delete(activationId);
     });
-
-    // Inicia o loop de processamento se não estiver rodando
-    this.startQueueProcessor();
   }
 
-  private startQueueProcessor() {
-    if (this.isProcessingQueue) return;
-    this.isProcessingQueue = true;
-    
-    // Roda em background
-    (async () => {
-      while (this.cancelQueue.size > 0) {
-        await this.processCancelQueue();
-        await sleep(5000); // Intervalo entre batches
-      }
-      this.isProcessingQueue = false;
-    })();
-  }
+  /**
+   * Tenta cancelar imediatamente, com retry rápido se a API recusar.
+   */
+  private async _doCancelWithRetry(activationId: string, rentedAt: number, jobId?: number): Promise<void> {
+    const MAX_ATTEMPTS = 5;
+    const RETRY_INTERVAL = 15_000; // 15s entre tentativas
 
-  private async processCancelQueue(): Promise<void> {
-    const now = Date.now();
-    const toProcess: string[] = [];
-
-    for (const [activationId, item] of Array.from(this.cancelQueue.entries())) {
-      // Remove itens expirados (proteção contra memory leak)
-      if (now - item.rentedAt > this.ITEM_TTL) {
-        this.cancelQueue.delete(activationId);
-        continue;
-      }
-
-      // Seleciona itens prontos para processamento
-      if (item.nextRetry <= now) {
-        toProcess.push(activationId);
-      }
-    }
-
-    // Processa em batches para não sobrecarregar a API
-    for (let i = 0; i < toProcess.length; i += this.PROCESSING_CONCURRENCY) {
-      const batch = toProcess.slice(i, i + this.PROCESSING_CONCURRENCY);
-      await Promise.all(batch.map(id => this.executeCancelation(id)));
-    }
-  }
-
-  private async executeCancelation(activationId: string): Promise<void> {
-    const item = this.cancelQueue.get(activationId);
-    if (!item) return;
-
-    // v9.7: Suporte ao SMSPool na fila de cancelamento
-    if (activationId.startsWith("smspool:")) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        const orderId = activationId.replace("smspool:", "");
-        const success = await smsPoolProvider.cancelSMS(orderId, item.jobId);
-        if (success) {
-          await logger.info("sms", `[Fila] [SMSPool] Pedido ${orderId} cancelado em background`, {}, item.jobId);
-        } else {
-          await logger.warn("sms", `[Fila] [SMSPool] Cancelamento ${orderId} retornou falha`, {}, item.jobId);
+        // SMSPool: cancelamento direto (sem tempo mínimo)
+        if (activationId.startsWith("smspool:")) {
+          const orderId = activationId.replace("smspool:", "");
+          const success = await smsPoolProvider.cancelSMS(orderId, jobId);
+          if (success) {
+            await logger.info("sms", `Número ${activationId} cancelado imediatamente — saldo devolvido`, {}, jobId);
+          } else {
+            await logger.warn("sms", `[SMSPool] Cancelamento ${orderId} retornou falha (tentativa ${attempt})`, {}, jobId);
+          }
+          return; // SMSPool não tem restrição de tempo mínimo
         }
-        this.cancelQueue.delete(activationId);
-      } catch (err) {
-        item.attempts++;
-        if (item.attempts >= 3) {
-          await logger.warn("sms", `[Fila] [SMSPool] Falha ao cancelar ${activationId} após 3 tentativas. Desistindo.`, {}, item.jobId);
-          this.cancelQueue.delete(activationId);
+
+        // SMSBower: tenta cancelar direto
+        const result = await this.setStatus(activationId, 8);
+
+        if (result === "ACCESS_CANCEL") {
+          await logger.info("sms", `Número ${activationId} cancelado imediatamente — saldo devolvido`, {}, jobId);
+          return;
+        } else if (result === "ALREADY_FINISH" || result === "NO_ACTIVATION") {
+          await logger.info("sms", `Cancelamento ${activationId}: ${result} (já finalizado)`, {}, jobId);
+          return;
         } else {
-          const backoff = 10000 * Math.pow(2, item.attempts - 1);
-          item.nextRetry = Date.now() + backoff;
+          // API recusou ou resposta inesperada — retry
+          if (attempt < MAX_ATTEMPTS) {
+            const elapsed = Math.round((Date.now() - rentedAt) / 1000);
+            await logger.info("sms",
+              `Cancelamento ${activationId} resposta: ${result} (${elapsed}s desde aluguel). Retry em ${RETRY_INTERVAL / 1000}s... (${attempt}/${MAX_ATTEMPTS})`,
+              {}, jobId
+            );
+            await sleep(RETRY_INTERVAL);
+          }
+        }
+      } catch (err) {
+        // Erro de rede/API — tenta de novo
+        if (attempt < MAX_ATTEMPTS) {
+          await logger.warn("sms",
+            `Erro ao cancelar ${activationId}: ${err instanceof Error ? err.message : String(err)}. Retry em ${RETRY_INTERVAL / 1000}s... (${attempt}/${MAX_ATTEMPTS})`,
+            {}, jobId
+          );
+          await sleep(RETRY_INTERVAL);
         }
       }
-      return;
     }
 
-    try {
-      const result = await this.setStatus(activationId, 8);
-      
-      if (result === "ACCESS_CANCEL") {
-        await logger.info("sms", `[Fila] Número ${activationId} cancelado em background — saldo devolvido`, {}, item.jobId);
-        this.cancelQueue.delete(activationId);
-      } else if (result === "ALREADY_FINISH" || result === "NO_ACTIVATION") {
-        await logger.info("sms", `[Fila] Cancelamento ${activationId}: ${result} (já finalizado, saldo não perdido)`, {}, item.jobId);
-        this.cancelQueue.delete(activationId);
-      } else {
-        throw new Error(`Resposta inesperada: ${result}`);
-      }
-    } catch (err) {
-      item.attempts++;
-      if (item.attempts >= 3) {
-        await logger.warn("sms", `[Fila] Falha ao cancelar ${activationId} após 3 tentativas. Desistindo.`, {}, item.jobId);
-        this.cancelQueue.delete(activationId);
-      } else {
-        // Backoff exponencial: 10s, 20s, 40s
-        const backoff = 10000 * Math.pow(2, item.attempts - 1);
-        item.nextRetry = Date.now() + backoff;
-      }
-    }
+    // Esgotou tentativas
+    await logger.error("sms",
+      `FALHA ao cancelar ${activationId} após ${MAX_ATTEMPTS} tentativas. Saldo pode ter sido perdido!`,
+      {}, jobId
+    );
   }
 
-  /** Retorna quantos cancelamentos estão pendentes na fila */
+  /** Retorna quantos cancelamentos estão em andamento */
   getPendingCancellations(): number {
-    return this.cancelQueue.size;
+    return this.cancellingIds.size;
   }
 
   async init(): Promise<void> {
@@ -1684,7 +1630,7 @@ class SmsService {
       if (isAccountBanned) {
         // Cancel the rented number in background (don't waste money)
         if (numberData) {
-          this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
+          this.cancelFireAndForget(numberData.activationId, numberData.rentedAt, opts.jobId);
         }
         // Re-throw as-is so the caller (manus/index.ts) handles it
         throw error;
@@ -1715,11 +1661,11 @@ class SmsService {
 
       if (numberData) {
         if (isTargetApiError || isProxyNetworkError) {
-          // Rejeição pelo alvo ou erro de proxy: enfileira cancelamento assíncrono.
+          // Rejeição pelo alvo ou erro de proxy: cancela imediatamente em background.
           // O job continua imediatamente tentando o próximo provedor.
-          this.enqueueCancelAsync(numberData.activationId, numberData.rentedAt, opts.jobId);
+          this.cancelFireAndForget(numberData.activationId, numberData.rentedAt, opts.jobId);
           await logger.info("sms",
-            `Número ${numberData.activationId} enfileirado para cancelamento em background (job continua imediatamente)`,
+            `Número ${numberData.activationId} cancelamento disparado em background (job continua imediatamente)`,
             {}, opts.jobId
           );
         } else {
@@ -1950,28 +1896,15 @@ class SmsService {
 
     if (!this.config) await this.init();
 
-    await logger.info("sms", `Cancelando número ${activationId} — aguardando devolução do saldo...`, {}, jobId);
-
-    if (rentedAt && this.config) {
-      const elapsed = Date.now() - rentedAt;
-      // Respeita o cancelWaitMs completo (padrão: 125s) para garantir devolução do saldo.
-      // A API SMSBower só aceita cancelamento e devolve saldo após 2 minutos do aluguel.
-      const minCancelWait = this.config.cancelWaitMs;
-      if (elapsed < minCancelWait) {
-        const waitTime = minCancelWait - elapsed;
-        await logger.info("sms",
-          `Aguardando ${Math.ceil(waitTime / 1000)}s antes de cancelar (${Math.round(elapsed / 1000)}s já decorridos, mínimo: ${Math.round(minCancelWait / 1000)}s)`,
-          {}, jobId
-        );
-        await sleep(waitTime);
-      }
-    }
+    await logger.info("sms", `Cancelando número ${activationId} imediatamente...`, {}, jobId);
 
     const result = await this.setStatus(activationId, 8);
     if (result === "ACCESS_CANCEL") {
       await logger.info("sms", `Número ${activationId} cancelado — saldo devolvido`, {}, jobId);
+    } else if (result === "ALREADY_FINISH" || result === "NO_ACTIVATION") {
+      await logger.info("sms", `Cancelamento ${activationId}: ${result} (já finalizado)`, {}, jobId);
     } else {
-      await logger.warn("sms", `Cancelamento retornou: ${result} (pode não ter devolvido saldo)`, { activationId }, jobId);
+      await logger.warn("sms", `Cancelamento ${activationId} retornou: ${result} (pode precisar de retry)`, { activationId }, jobId);
     }
     return result;
   }
