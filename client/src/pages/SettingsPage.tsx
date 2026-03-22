@@ -393,13 +393,24 @@ export default function SettingsPage() {
   ]);
 
   // v9.5.2: Chaves gerenciadas automaticamente por mutations específicas.
+  // v9.8: Adicionadas chaves smspool_* — gerenciadas por updateSmsPoolConfig.
   // "Salvar Tudo" NÃO deve sobrescrever esses valores, pois são controlados
-  // por clearBlacklist, saveSmsCountries, health tracker, etc.
+  // por clearBlacklist, saveSmsCountries, health tracker, updateSmsPoolConfig, etc.
   const MANAGED_KEYS = new Set([
     "sms_blacklisted_providers",
     "sms_provider_health",
     "sms_number_quality",
     "sms_countries",
+    // v9.8: SMSPool settings gerenciadas por updateSmsPoolConfig mutation.
+    // Sem isso, "Salvar Tudo" sobrescreve com valores stale/mascarados,
+    // resetando a configuração do SMSPool.
+    "smspool_enabled",
+    "smspool_api_key",
+    "smspool_service_id",
+    "smspool_country_id",
+    "smspool_max_price",
+    "smspool_pool",
+    "smspool_priority",
   ]);
 
   const saveSettings = async () => {

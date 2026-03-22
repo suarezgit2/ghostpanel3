@@ -95,12 +95,23 @@ export const settingsRouter = router({
       let skipped = 0;
 
       // v9.5.2: Chaves gerenciadas por mutations específicas (blacklist, health, countries).
+      // v9.8: Adicionadas chaves smspool_* — gerenciadas exclusivamente por updateSmsPoolConfig.
       // setBulk NÃO deve sobrescrever esses valores para evitar race conditions.
       const MANAGED_KEYS = new Set([
         "sms_blacklisted_providers",
         "sms_provider_health",
         "sms_number_quality",
         "sms_countries",
+        // v9.8: SMSPool settings são gerenciadas por updateSmsPoolConfig mutation.
+        // Sem isso, "Salvar Tudo" sobrescreve com valores stale do mapa genérico,
+        // resetando a configuração do SMSPool a cada deploy/reload.
+        "smspool_enabled",
+        "smspool_api_key",
+        "smspool_service_id",
+        "smspool_country_id",
+        "smspool_max_price",
+        "smspool_pool",
+        "smspool_priority",
       ]);
 
       for (const item of input) {

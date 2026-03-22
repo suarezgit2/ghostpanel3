@@ -84,6 +84,138 @@ const SMSBOWER_TO_SMSPOOL_COUNTRY: Record<string, string> = {
 };
 
 /**
+ * v9.8: Mapeamento reverso de SMSPool countryId para regionCode (prefixo telefônico).
+ * Usado para derivar o regionCode correto do número comprado no SMSPool,
+ * em vez de usar o regionCode do SMSBower (que pode ser de outro país).
+ */
+const SMSPOOL_COUNTRY_TO_REGION: Record<string, string> = {
+  "1":  "+1",    // USA
+  "2":  "+44",   // United Kingdom
+  "3":  "+31",   // Netherlands
+  "4":  "+33",   // France
+  "5":  "+62",   // Indonesia
+  "6":  "+91",   // India
+  "7":  "+7",    // Kazakhstan
+  "8":  "+254",  // Kenya
+  "9":  "+60",   // Malaysia
+  "10": "+86",   // China
+  "11": "+234",  // Nigeria (alt)
+  "12": "+52",   // Mexico
+  "14": "+84",   // Vietnam
+  "15": "+63",   // Philippines
+  "17": "+66",   // Thailand
+  "19": "+234",  // Nigeria
+  "21": "+20",   // Egypt
+  "22": "+972",  // Israel
+  "23": "+380",  // Ukraine
+  "24": "+48",   // Poland
+  "25": "+1",    // Canada
+  "29": "+212",  // Morocco
+  "30": "+57",   // Colombia
+  "32": "+92",   // Pakistan
+  "34": "+880",  // Bangladesh
+  "36": "+55",   // Brazil
+  "37": "+358",  // Finland
+  "38": "+351",  // Portugal
+  "39": "+40",   // Romania
+  "40": "+7",    // Russia
+  "42": "+46",   // Sweden
+  "43": "+34",   // Spain
+  "44": "+90",   // Turkey
+  "46": "+57",   // Colombia (alt)
+  "47": "+56",   // Chile
+  "49": "+49",   // Germany
+  "50": "+54",   // Argentina
+  "51": "+420",  // Czech Republic
+  "52": "+39",   // Italy
+  "53": "+27",   // South Africa
+  "54": "+61",   // Australia
+  "55": "+81",   // Japan
+  "56": "+82",   // South Korea
+  "57": "+852",  // Hong Kong
+  "58": "+65",   // Singapore
+  "59": "+353",  // Ireland
+  "60": "+64",   // New Zealand
+  "61": "+30",   // Greece
+  "62": "+36",   // Hungary
+  "63": "+43",   // Austria
+  "64": "+45",   // Denmark
+  "65": "+47",   // Norway
+  "66": "+32",   // Belgium
+  "67": "+41",   // Switzerland
+  "68": "+372",  // Estonia
+  "69": "+371",  // Latvia
+  "70": "+370",  // Lithuania
+  "72": "+51",   // Peru
+};
+
+/**
+ * v9.8: Lista ordenada de prefixos telefônicos internacionais (do mais longo ao mais curto).
+ * Usada para detectar o regionCode real a partir do número de telefone retornado pelo SMSPool.
+ */
+const PHONE_PREFIXES: Array<{ prefix: string; regionCode: string }> = [
+  // 4 dígitos
+  { prefix: "1684", regionCode: "+1684" },
+  // 3 dígitos
+  { prefix: "880", regionCode: "+880" },
+  { prefix: "852", regionCode: "+852" },
+  { prefix: "972", regionCode: "+972" },
+  { prefix: "380", regionCode: "+380" },
+  { prefix: "234", regionCode: "+234" },
+  { prefix: "254", regionCode: "+254" },
+  { prefix: "212", regionCode: "+212" },
+  { prefix: "358", regionCode: "+358" },
+  { prefix: "351", regionCode: "+351" },
+  { prefix: "420", regionCode: "+420" },
+  { prefix: "353", regionCode: "+353" },
+  { prefix: "372", regionCode: "+372" },
+  { prefix: "371", regionCode: "+371" },
+  { prefix: "370", regionCode: "+370" },
+  // 2 dígitos
+  { prefix: "62", regionCode: "+62" },
+  { prefix: "55", regionCode: "+55" },
+  { prefix: "91", regionCode: "+91" },
+  { prefix: "44", regionCode: "+44" },
+  { prefix: "86", regionCode: "+86" },
+  { prefix: "81", regionCode: "+81" },
+  { prefix: "82", regionCode: "+82" },
+  { prefix: "84", regionCode: "+84" },
+  { prefix: "66", regionCode: "+66" },
+  { prefix: "63", regionCode: "+63" },
+  { prefix: "60", regionCode: "+60" },
+  { prefix: "52", regionCode: "+52" },
+  { prefix: "57", regionCode: "+57" },
+  { prefix: "56", regionCode: "+56" },
+  { prefix: "54", regionCode: "+54" },
+  { prefix: "51", regionCode: "+51" },
+  { prefix: "48", regionCode: "+48" },
+  { prefix: "46", regionCode: "+46" },
+  { prefix: "49", regionCode: "+49" },
+  { prefix: "34", regionCode: "+34" },
+  { prefix: "39", regionCode: "+39" },
+  { prefix: "33", regionCode: "+33" },
+  { prefix: "31", regionCode: "+31" },
+  { prefix: "30", regionCode: "+30" },
+  { prefix: "36", regionCode: "+36" },
+  { prefix: "43", regionCode: "+43" },
+  { prefix: "45", regionCode: "+45" },
+  { prefix: "47", regionCode: "+47" },
+  { prefix: "32", regionCode: "+32" },
+  { prefix: "41", regionCode: "+41" },
+  { prefix: "40", regionCode: "+40" },
+  { prefix: "90", regionCode: "+90" },
+  { prefix: "92", regionCode: "+92" },
+  { prefix: "27", regionCode: "+27" },
+  { prefix: "61", regionCode: "+61" },
+  { prefix: "64", regionCode: "+64" },
+  { prefix: "65", regionCode: "+65" },
+  { prefix: "20", regionCode: "+20" },
+  // 1 dígito
+  { prefix: "7", regionCode: "+7" },
+  { prefix: "1", regionCode: "+1" },
+];
+
+/**
  * Mapeamento de nomes de serviço do SMSBower para IDs do SMSPool.
  * O SMSBower usa códigos curtos (ex: "ot" para OTP genérico),
  * enquanto o SMSPool usa IDs numéricos.
@@ -229,6 +361,34 @@ class SMSPoolProvider {
 
     // Último fallback: serviço genérico "1" (Other)
     return "1";
+  }
+
+  /**
+   * v9.8: Detecta o regionCode real a partir do número de telefone retornado pelo SMSPool.
+   * Primeiro tenta usar o mapeamento countryId → regionCode, depois faz detecção por prefixo.
+   * Isso corrige o bug onde o DDD do SMSBower era usado em vez do DDD real do número SMSPool.
+   */
+  detectRegionCode(phoneNumber: string, smsPoolCountryId?: string): string {
+    // 1. Tenta pelo mapeamento de countryId do SMSPool
+    if (smsPoolCountryId) {
+      const fromCountry = SMSPOOL_COUNTRY_TO_REGION[smsPoolCountryId];
+      if (fromCountry) {
+        return fromCountry;
+      }
+    }
+
+    // 2. Remove "+" se presente
+    const cleaned = phoneNumber.replace(/^\+/, "");
+
+    // 3. Tenta detectar pelo prefixo do número (do mais longo ao mais curto)
+    for (const { prefix, regionCode } of PHONE_PREFIXES) {
+      if (cleaned.startsWith(prefix)) {
+        return regionCode;
+      }
+    }
+
+    // 4. Fallback: retorna o número sem detecção (não assume nenhum país)
+    return "+" + cleaned.substring(0, 2);
   }
 
   /**
@@ -538,13 +698,28 @@ class SMSPoolProvider {
 
       const cost = parseFloat(numberData.cost || opts.maxPrice);
 
+      // v9.8: Detectar o regionCode REAL do número comprado no SMSPool.
+      // O regionCode passado via opts vem do SMSBower (ex: +55 para Brasil),
+      // mas o SMSPool pode retornar um número de outro país (ex: +7 para Cazaquistão).
+      // Usar o regionCode errado causa "Failed to send the code" porque o Manus
+      // recebe um número com DDD inválido.
+      const resolvedCountryId = this.config.countryId || undefined;
+      const detectedRegionCode = this.detectRegionCode(numberData.phoneNumber, resolvedCountryId);
+
+      if (detectedRegionCode !== opts.regionCode) {
+        await logger.info("smspool",
+          `RegionCode corrigido: ${opts.regionCode} → ${detectedRegionCode} (detectado do número ${numberData.phoneNumber})`,
+          {}, opts.jobId
+        );
+      }
+
       // 2. Notificar que o número foi alugado (para o provider Manus enviar o código)
       if (opts.onNumberRented) {
         await opts.onNumberRented({
           phoneNumber: numberData.phoneNumber,
           activationId: `smspool:${numberData.orderId}`, // Prefixo para identificar o provider
           attempt: opts.attempt,
-          regionCode: opts.regionCode,
+          regionCode: detectedRegionCode, // v9.8: Usa regionCode detectado do número real
         });
       }
 

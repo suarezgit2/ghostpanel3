@@ -1970,6 +1970,10 @@ class SmsService {
    * Tenta obter código SMS usando o SMSPool.
    * Retorna RetryResult se bem-sucedido, null se falhou (sem throw).
    * Throws apenas para erros fatais (AbortError, AccountBanned).
+   *
+   * v9.8: O regionCode agora é detectado automaticamente pelo SMSPool a partir
+   * do número real comprado, em vez de usar o regionCode do SMSBower.
+   * Isso corrige o bug onde números do Cazaquistão (+7) eram enviados com DDD do Brasil (+55).
    */
   private async _trySmsPool(opts: {
     configSnapshot: SmsConfig;
@@ -1982,25 +1986,35 @@ class SmsService {
     const { configSnapshot, service, waitTimeMs, onNumberRented, jobId, signal } = opts;
     const smsPoolConfig = smsPoolProvider.getConfig();
 
-    // Determina o regionCode baseado no país configurado no SMSPool
-    // ou usa o primeiro país habilitado no multi-país, ou o legado
+    // v9.8: O regionCode passado aqui é apenas um hint inicial.
+    // O SMSPool detectará o regionCode REAL do número comprado e o usará
+    // no callback onNumberRented (ver smspool.ts tryGetCode).
     const enabledCountries = configSnapshot.countries.filter(c => c.enabled);
-    let regionCode = "+62"; // default: Indonesia
+    let hintRegionCode = "+62"; // default: Indonesia
     let countryCode = configSnapshot.country;
 
     if (enabledCountries.length > 0) {
-      // Usa o primeiro país habilitado como referência
-      regionCode = enabledCountries[0].regionCode;
+      hintRegionCode = enabledCountries[0].regionCode;
       countryCode = enabledCountries[0].countryCode;
     } else {
       const known = KNOWN_COUNTRIES[configSnapshot.country];
-      if (known) regionCode = known.regionCode;
+      if (known) hintRegionCode = known.regionCode;
     }
 
     await logger.info("sms",
-      `[SMSPool] Tentando obter código via SMSPool (país: ${countryCode}, região: ${regionCode}, serviço: ${service})`,
+      `[SMSPool] Tentando obter código via SMSPool (país: ${countryCode}, regiãoHint: ${hintRegionCode}, serviço: ${service})`,
       {}, jobId
     );
+
+    // v9.8: Captura o regionCode real que o SMSPool detectou do número comprado
+    let detectedRegionCode = hintRegionCode;
+    const wrappedOnNumberRented = onNumberRented
+      ? async (data: { phoneNumber: string; activationId: string; attempt: number; regionCode: string }) => {
+          // O regionCode aqui já foi corrigido pelo smspool.ts detectRegionCode()
+          detectedRegionCode = data.regionCode;
+          return onNumberRented(data);
+        }
+      : undefined;
 
     const result = await smsPoolProvider.tryGetCode({
       countryCode,
@@ -2008,8 +2022,8 @@ class SmsService {
       maxPrice: smsPoolConfig.maxPrice,
       waitTimeMs,
       pollIntervalMs: configSnapshot.pollIntervalMs,
-      regionCode,
-      onNumberRented,
+      regionCode: hintRegionCode,
+      onNumberRented: wrappedOnNumberRented,
       jobId,
       attempt: 1,
       signal,
@@ -2022,7 +2036,7 @@ class SmsService {
         activationId: result.activationId, // Já vem com prefixo "smspool:"
         attempt: 1,
         totalCost: result.cost,
-        regionCode,
+        regionCode: detectedRegionCode, // v9.8: Usa regionCode detectado do número real
       };
     }
 
