@@ -821,7 +821,7 @@ async function sendBinaryPostImpers(
   const response = await impersModule.post(url, {
     content: body,
     headers: {
-      "Content-Type": "application/octet-stream",
+      "Content-Type": "text/plain",
       "Accept": "*/*",
       "Origin": "https://manus.im",
       "Referer": "https://manus.im/",
@@ -850,7 +850,7 @@ function sendBinaryPostNative(url: string, body: Buffer, proxy?: ProxyInfo | nul
     const timeout = 30000;
 
     const headers: Record<string, string | number> = {
-      "Content-Type": "application/octet-stream",
+      "Content-Type": "text/plain",
       "Content-Length": body.length,
       "Accept": "*/*",
       "Origin": "https://manus.im",
