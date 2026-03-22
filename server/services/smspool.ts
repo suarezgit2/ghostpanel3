@@ -520,12 +520,10 @@ class SMSPoolProvider {
   }
 
   /**
-   * Cancela um pedido SMS no SMSPool.
-   * Equivalente ao cancel/setStatus(8) do SMSBower.
+   * Cancela um pedido SMS no SMSPool (tentativa única).
+   * Retorna true se cancelou, false se falhou, ou a mensagem de erro.
    */
-  async cancelSMS(orderId: string, jobId?: number): Promise<boolean> {
-    await logger.info("smspool", `Cancelando pedido ${orderId}`, {}, jobId);
-
+  private async _cancelOnce(orderId: string, jobId?: number): Promise<{ ok: boolean; retryable: boolean }> {
     const formData = new URLSearchParams({
       key: this.config.apiKey,
       orderid: orderId,
@@ -540,20 +538,69 @@ class SMSPoolProvider {
       const data = await resp.json() as Record<string, unknown>;
 
       if (data.success === 1 || data.success === "1") {
-        await logger.info("smspool", `Pedido ${orderId} cancelado com sucesso`, {}, jobId);
+        return { ok: true, retryable: false };
+      }
+
+      const message = String(data.message || "");
+      // SMSPool retorna "cannot be cancelled yet" quando o pedido é muito recente
+      const isRetryable = message.toLowerCase().includes("cannot be cancelled yet") ||
+                          message.toLowerCase().includes("try again later");
+
+      return { ok: false, retryable: isRetryable };
+    } catch {
+      // Erros de rede são retryable
+      return { ok: false, retryable: true };
+    }
+  }
+
+  /**
+   * Cancela um pedido SMS no SMSPool com retry automático.
+   * O SMSPool tem um período de cooldown após a compra onde o cancelamento
+   * não é permitido ("Your order cannot be cancelled yet, please try again later.").
+   * Este método faz até 4 tentativas com delay progressivo (5s, 10s, 15s, 20s)
+   * para garantir o reembolso.
+   */
+  async cancelSMS(orderId: string, jobId?: number): Promise<boolean> {
+    await logger.info("smspool", `Cancelando pedido ${orderId}`, {}, jobId);
+
+    const MAX_RETRIES = 4;
+    const DELAYS = [5_000, 10_000, 15_000, 20_000]; // 5s, 10s, 15s, 20s
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      const result = await this._cancelOnce(orderId, jobId);
+
+      if (result.ok) {
+        await logger.info("smspool",
+          `Pedido ${orderId} cancelado com sucesso (reembolso confirmado)${attempt > 0 ? ` após ${attempt + 1} tentativas` : ""}`,
+          {}, jobId
+        );
         return true;
       }
 
-      await logger.warn("smspool",
-        `Cancelamento ${orderId}: ${JSON.stringify(data)}`,
-        {}, jobId
-      );
-      return false;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await logger.warn("smspool", `Erro ao cancelar ${orderId}: ${msg}`, {}, jobId);
-      return false;
+      if (!result.retryable) {
+        await logger.warn("smspool",
+          `Cancelamento ${orderId} falhou definitivamente (não retryable) na tentativa ${attempt + 1}`,
+          {}, jobId
+        );
+        return false;
+      }
+
+      // Se ainda há tentativas, aguardar antes de tentar novamente
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = DELAYS[attempt];
+        await logger.info("smspool",
+          `Cancelamento ${orderId}: SMSPool ainda não permite cancelar. Aguardando ${delay / 1000}s antes de tentar novamente (tentativa ${attempt + 1}/${MAX_RETRIES})...`,
+          {}, jobId
+        );
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
+
+    await logger.warn("smspool",
+      `Cancelamento ${orderId} falhou após ${MAX_RETRIES} tentativas. Pedido pode não ter sido reembolsado — verifique manualmente no painel SMSPool.`,
+      {}, jobId
+    );
+    return false;
   }
 
   /**
@@ -771,13 +818,17 @@ class SMSPoolProvider {
 
       const error = err instanceof Error ? err : new Error(String(err));
 
-      // Cancelar número se foi alugado
+      // Cancelar número se foi alugado (fire-and-forget para não bloquear o fallback).
+      // O cancelSMS agora faz retry com delay progressivo (até ~50s) para garantir
+      // o reembolso mesmo quando o SMSPool retorna "cannot be cancelled yet".
+      // Executamos em background para que o fluxo principal possa continuar
+      // imediatamente com o próximo provider (SMSBower).
       if (numberData) {
-        try {
-          await this.cancelSMS(numberData.orderId, opts.jobId);
-        } catch {
-          // Ignora erros de cancelamento
-        }
+        const oid = numberData.orderId;
+        const jid = opts.jobId;
+        this.cancelSMS(oid, jid).catch(() => {
+          // Ignora erros de cancelamento — já logados internamente
+        });
       }
 
       // Detecta erros fatais
