@@ -166,11 +166,21 @@ async function startServer() {
       console.warn("[ProxyRecovery] Falhou (não-crítico):", err);
     }
 
+    // v10.4: Recovery de jobs interrompidos por restart do servidor.
+    // Retoma imediatamente qualquer job que estava em execução quando o processo morreu,
+    // do ponto onde parou (usando completedAccounts como checkpoint).
+    // Isso substitui a detecção tardia do StaleJobsMonitor (que esperava 30min).
+    try {
+      await orchestrator.recoverInterruptedJobs();
+    } catch (err) {
+      console.warn("[JobRecovery] Falhou (não-crítico):", err);
+    }
+
     // v6.0: FPJS Direct Client (HTTP POST) não precisa de inicialização.
     // Puppeteer-based fpjsService desativado — sem overhead de browser.
     // O fpjsDirectClient gera requestIds reais via HTTP POST sob demanda.
 
-    // Iniciar monitor de jobs travados
+    // Iniciar monitor de jobs travados (agora como rede de segurança secundária)
     startStaleJobsMonitor();
   });
 }

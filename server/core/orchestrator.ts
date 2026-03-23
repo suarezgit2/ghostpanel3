@@ -858,6 +858,121 @@ class Orchestrator {
   }
 
   /**
+   * v10.4: Recovery de jobs interrompidos por restart do servidor.
+   *
+   * Chamado no startup ANTES do StaleJobsMonitor.
+   * Busca todos os jobs com status "running" ou "pending" no banco que
+   * não estão na memória ativa (pois o processo morreu).
+   *
+   * Para cada job interrompido:
+   *   - Se já tem contas completas (completedAccounts > 0): retoma do ponto onde parou
+   *     (successCount parte de completedAccounts, quantity é o restante)
+   *   - Se não tem nada completo: reinicia do zero
+   *   - Jobs "pending" que estavam na fila: reiniciados como se fossem novos
+   *
+   * A raiz do problema anterior era que jobs interrompidos ficavam presos em
+   * status "running" por até 30 minutos (threshold do StaleJobsMonitor) sem
+   * serem retomados. Agora são recuperados imediatamente no startup.
+   */
+  async recoverInterruptedJobs(): Promise<void> {
+    const db = await getDb();
+    if (!db) return;
+
+    try {
+      // Busca todos os jobs que estavam em execução ou na fila quando o servidor parou
+      const interruptedJobs = await db
+        .select()
+        .from(jobs)
+        .where(
+          sql`${jobs.status} IN ('running', 'pending')`
+        );
+
+      if (interruptedJobs.length === 0) {
+        console.log("[JobRecovery] Nenhum job interrompido encontrado.");
+        return;
+      }
+
+      console.log(`[JobRecovery] ${interruptedJobs.length} job(s) interrompido(s) encontrado(s). Retomando...`);
+
+      // Busca o provider manus (necessário para retomar)
+      const providerRows = await db.select().from(providers).where(eq(providers.slug, "manus")).limit(1);
+      if (providerRows.length === 0) {
+        console.warn("[JobRecovery] Provider 'manus' não encontrado. Não é possível retomar jobs.");
+        return;
+      }
+      const providerId = providerRows[0].id;
+      const provider = PROVIDERS["manus"];
+
+      for (const job of interruptedJobs) {
+        try {
+          const config = (job.config || {}) as Record<string, unknown>;
+          const alreadyCompleted = job.completedAccounts || 0;
+          const totalRequired = job.totalAccounts || 1;
+          const remaining = totalRequired - alreadyCompleted;
+
+          if (remaining <= 0) {
+            // Job já estava completo mas não foi finalizado — marca como completed
+            await db.update(jobs).set({
+              status: "completed",
+              completedAt: new Date(),
+              error: null,
+            }).where(eq(jobs.id, job.id));
+            console.log(`[JobRecovery] Job ${job.id} já estava completo (${alreadyCompleted}/${totalRequired}). Marcado como completed.`);
+            continue;
+          }
+
+          // Monta as opções para retomar o job
+          const options: CreateJobOptions = {
+            provider: "manus",
+            quantity: remaining, // Retoma do ponto onde parou
+            password: String(config.password || "auto"),
+            delayMin: Number(config.delayMin || 3000),
+            delayMax: Number(config.delayMax || 10000),
+            region: String(config.region || "default"),
+            inviteCode: config.inviteCode ? String(config.inviteCode) : undefined,
+            label: config.label ? String(config.label) : undefined,
+            folderId: job.folderId || undefined,
+          };
+
+          // Marca como running e retoma
+          await db.update(jobs).set({
+            status: "running",
+            startedAt: job.startedAt || new Date(),
+            error: null,
+          }).where(eq(jobs.id, job.id));
+
+          const abortController = new AbortController();
+          this.activeJobs.set(job.id, abortController);
+
+          const logSuffix = alreadyCompleted > 0
+            ? ` (retomando: ${alreadyCompleted}/${totalRequired} já completas, faltam ${remaining})`
+            : " (reiniciando do zero)";
+          console.log(`[JobRecovery] Retomando job ${job.id}${logSuffix}`);
+          await logger.info("orchestrator",
+            `Job ${job.id} retomado após restart do servidor${logSuffix}`,
+            {}, job.id
+          );
+
+          this._runJob(job.id, provider, providerId, options, abortController);
+
+        } catch (err) {
+          console.warn(`[JobRecovery] Erro ao retomar job ${job.id}:`, err);
+          // Se não conseguiu retomar, marca como failed para não ficar travado
+          await db.update(jobs).set({
+            status: "failed",
+            error: `Não foi possível retomar após restart: ${err instanceof Error ? err.message : String(err)}`,
+            completedAt: new Date(),
+          }).where(eq(jobs.id, job.id));
+        }
+      }
+
+      console.log(`[JobRecovery] Recovery concluído. ${interruptedJobs.length} job(s) processado(s).`);
+    } catch (err) {
+      console.warn("[JobRecovery] Erro durante recovery de jobs:", err);
+    }
+  }
+
+  /**
    * Force-cancels a job immediately by aborting its signal.
    * Used by the delete endpoint to stop a running job before removing it from DB.
    *

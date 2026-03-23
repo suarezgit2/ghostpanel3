@@ -16,6 +16,7 @@
  */
 
 import { logger } from "../utils/helpers";
+import { getSetting, setSetting } from "../utils/settings";
 
 const SMSPOOL_API = "https://api.smspool.net";
 
@@ -268,6 +269,21 @@ const SMSBOWER_TO_SMSPOOL_SERVICE: Record<string, string> = {
 // SMSPOOL PROVIDER CLASS
 // ============================================================
 
+// ============================================================
+// CHAVE DE SETTINGS PARA BLOQUEIO PERSISTENTE
+// ============================================================
+
+/**
+ * Quando o SMSPool retorna "too many failed purchases", o bloqueio dura 6 horas.
+ * Persistimos o timestamp de expiração no banco (via settings) para que o bloqueio
+ * sobreviva a restarts do servidor — evitando chamadas desnecessárias à API.
+ *
+ * Chave: smspool_blocked_until
+ * Valor: timestamp ISO 8601 de quando o bloqueio expira (ex: "2026-03-24T03:12:00.000Z")
+ * Vazio/ausente = não bloqueado.
+ */
+const SMSPOOL_BLOCKED_UNTIL_KEY = "smspool_blocked_until";
+
 class SMSPoolProvider {
   private config: SMSPoolConfig = {
     apiKey: "",
@@ -445,6 +461,46 @@ class SMSPoolProvider {
   // ============================================================
 
   /**
+   * Verifica se o SMSPool está bloqueado por excesso de falhas.
+   * O bloqueio é persistido no banco para sobreviver a restarts.
+   * Retorna o número de minutos restantes se bloqueado, 0 se livre.
+   */
+  async getBlockedMinutesRemaining(): Promise<number> {
+    try {
+      const blockedUntilStr = await getSetting(SMSPOOL_BLOCKED_UNTIL_KEY);
+      if (!blockedUntilStr) return 0;
+      const blockedUntil = new Date(blockedUntilStr).getTime();
+      const remaining = blockedUntil - Date.now();
+      if (remaining <= 0) {
+        // Bloqueio expirou — limpa a chave
+        await setSetting(SMSPOOL_BLOCKED_UNTIL_KEY, "");
+        return 0;
+      }
+      return Math.ceil(remaining / 60_000);
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Registra um bloqueio do SMSPool por N horas no banco.
+   * Chamado quando o SMSPool retorna "too many failed purchases".
+   */
+  async registerBlock(hours: number, jobId?: number): Promise<void> {
+    const blockedUntil = new Date(Date.now() + hours * 60 * 60_000);
+    await setSetting(
+      SMSPOOL_BLOCKED_UNTIL_KEY,
+      blockedUntil.toISOString(),
+      `SMSPool bloqueado por excesso de falhas — libera em ${blockedUntil.toLocaleString("pt-BR")}`
+    );
+    await logger.warn("smspool",
+      `SMSPool bloqueado por ${hours}h (até ${blockedUntil.toISOString()}) — ` +
+      `excesso de compras com falha. Próximas tentativas serão ignoradas até lá.`,
+      {}, jobId
+    );
+  }
+
+  /**
    * Compra um número SMS no SMSPool.
    * Equivalente ao getNumber/getNumberV2 do SMSBower.
    */
@@ -493,6 +549,14 @@ class SMSPoolProvider {
       }
       if (message.toLowerCase().includes("key") || message.toLowerCase().includes("auth")) {
         throw new Error("SMSPool: API key inválida");
+      }
+      // Bloqueio por excesso de falhas — persiste no banco para sobreviver a restarts
+      if (message.toLowerCase().includes("too many failed purchases")) {
+        // Extrai o número de horas da mensagem (ex: "try again in 6 hours")
+        const hoursMatch = message.match(/(\d+)\s*hour/i);
+        const blockHours = hoursMatch ? parseInt(hoursMatch[1]) : 6;
+        await this.registerBlock(blockHours, opts.jobId);
+        throw new Error(`SMSPool: Bloqueado por ${blockHours}h por excesso de falhas`);
       }
       throw new Error(`SMSPool orderSMS: ${message}`);
     }
@@ -767,6 +831,23 @@ class SMSPoolProvider {
     // v10.1: Máximo de trocas de número por chamada.
     // Cada troca ocorre quando o número comprado é VoIP (blacklist) ou
     // quando o Manus rejeita o número com "Failed to send the code".
+    // Verificar bloqueio persistente ANTES de qualquer chamada à API.
+    // O bloqueio é gravado no banco quando o SMSPool retorna "too many failed purchases",
+    // e sobrevive a restarts do servidor — evitando chamadas desnecessárias durante o período de penalidade.
+    const blockedMinutes = await this.getBlockedMinutesRemaining();
+    if (blockedMinutes > 0) {
+      await logger.warn("smspool",
+        `SMSPool bloqueado por excesso de falhas anteriores. Libera em ~${blockedMinutes} minuto(s). Pulando SMSPool.`,
+        {}, opts.jobId
+      );
+      return {
+        success: false,
+        cost: 0,
+        error: new Error(`SMSPool bloqueado por excesso de falhas — libera em ~${blockedMinutes} min`),
+        provider: "smspool",
+      };
+    }
+
     const MAX_NUMBER_RETRIES = 3;
     let numberData: SMSPoolNumberData | null = null;
     let totalCost = 0;
@@ -871,7 +952,8 @@ class SMSPoolProvider {
         const error = err instanceof Error ? err : new Error(String(err));
 
         // Erros fatais — não tenta outro número, propaga imediatamente
-        if (error.message.includes("Saldo insuficiente") || error.message.includes("API key inválida")) {
+        if (error.message.includes("Saldo insuficiente") || error.message.includes("API key inválida") ||
+            error.message.includes("Bloqueado por") || error.message.includes("bloqueado por excesso")) {
           throw error;
         }
 
