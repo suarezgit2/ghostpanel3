@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, sql, like } from "drizzle-orm";
+import { eq, desc, sql, like, and, inArray } from "drizzle-orm";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { accounts } from "../../drizzle/schema";
@@ -88,4 +88,38 @@ export const accountsRouter = router({
       .where(eq(accounts.status, "active"))
       .orderBy(desc(accounts.createdAt));
   }),
+
+  /**
+   * Resgata N contas ativas: retorna os dados e as remove do banco.
+   * Operação atômica — seleciona as N mais antigas, copia e deleta.
+   */
+  redeem: protectedProcedure
+    .input(z.object({
+      quantity: z.number().min(1).max(10000),
+    }))
+    .mutation(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database não disponível");
+
+      // Seleciona as N contas ativas mais antigas (FIFO)
+      const rows = await db
+        .select({ id: accounts.id, email: accounts.email, password: accounts.password })
+        .from(accounts)
+        .where(eq(accounts.status, "active"))
+        .orderBy(accounts.createdAt)
+        .limit(input.quantity);
+
+      if (rows.length === 0) {
+        return { redeemed: [], count: 0 };
+      }
+
+      // Remove as contas selecionadas do banco
+      const ids = rows.map(r => r.id);
+      await db.delete(accounts).where(inArray(accounts.id, ids));
+
+      return {
+        redeemed: rows.map(r => ({ email: r.email, password: r.password })),
+        count: rows.length,
+      };
+    }),
 });

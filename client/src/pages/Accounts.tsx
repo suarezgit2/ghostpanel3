@@ -3,9 +3,10 @@
  */
 
 import { useState, useMemo } from "react";
-import { motion } from "framer-motion";
-import { RefreshCw, Download, Copy, Trash2, Eye, EyeOff } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { RefreshCw, Download, Copy, Trash2, Eye, EyeOff, Gift, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import StatusBadge from "@/components/StatusBadge";
 import { trpc } from "@/lib/trpc";
@@ -20,6 +21,12 @@ export default function Accounts() {
   const [page, setPage] = useState(1);
   const [showPasswords, setShowPasswords] = useState(false);
 
+  // Resgatar Contas — estado do modal
+  const [redeemOpen, setRedeemOpen] = useState(false);
+  const [redeemQty, setRedeemQty] = useState<string>("5");
+  const [redeemResult, setRedeemResult] = useState<{ email: string; password: string }[] | null>(null);
+  const [copied, setCopied] = useState(false);
+
   const queryInput = useMemo(() => ({
     page,
     limit: 50,
@@ -32,9 +39,23 @@ export default function Accounts() {
   const refetchAll = async () => {
     await Promise.all([refetch(), refetchExport()]);
   };
+
   const deleteMutation = trpc.accounts.delete.useMutation({
     onSuccess: () => { toast.success("Conta removida"); refetchAll(); },
     onError: (err) => toast.error("Erro ao deletar conta", { description: err.message }),
+  });
+
+  const redeemMutation = trpc.accounts.redeem.useMutation({
+    onSuccess: (result) => {
+      if (result.count === 0) {
+        toast.info("Nenhuma conta ativa disponível para resgatar");
+        return;
+      }
+      setRedeemResult(result.redeemed);
+      setCopied(false);
+      refetchAll();
+    },
+    onError: (err) => toast.error("Erro ao resgatar contas", { description: err.message }),
   });
 
   const accounts = data?.accounts ?? [];
@@ -70,6 +91,28 @@ export default function Accounts() {
     toast.success("Copiado!");
   };
 
+  const handleRedeem = () => {
+    const qty = parseInt(redeemQty, 10);
+    if (!qty || qty < 1) { toast.error("Informe uma quantidade válida"); return; }
+    setRedeemResult(null);
+    redeemMutation.mutate({ quantity: qty });
+  };
+
+  const copyRedeemed = async () => {
+    if (!redeemResult) return;
+    const text = redeemResult.map(a => `${a.email}:${a.password}`).join("\n");
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    toast.success(`${redeemResult.length} conta${redeemResult.length !== 1 ? "s" : ""} copiada${redeemResult.length !== 1 ? "s" : ""}!`);
+    setTimeout(() => setCopied(false), 2500);
+  };
+
+  const closeModal = () => {
+    setRedeemOpen(false);
+    setRedeemResult(null);
+    setCopied(false);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -82,6 +125,15 @@ export default function Accounts() {
           <Button variant="outline" size="sm" onClick={() => setShowPasswords(!showPasswords)} className="gap-2">
             {showPasswords ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
             {showPasswords ? "Ocultar" : "Mostrar"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { setRedeemOpen(true); setRedeemResult(null); setCopied(false); }}
+            className="gap-2 border-ghost-accent/40 text-ghost-accent hover:bg-ghost-accent/10 hover:text-ghost-accent"
+          >
+            <Gift className="w-3.5 h-3.5" />
+            Resgatar
           </Button>
           <Button variant="outline" size="sm" onClick={copyAll} className="gap-2">
             <Copy className="w-3.5 h-3.5" />
@@ -199,6 +251,123 @@ export default function Accounts() {
           </div>
         </div>
       )}
+
+      {/* Modal — Resgatar Contas */}
+      <AnimatePresence>
+        {redeemOpen && (
+          <motion.div
+            key="redeem-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+            onClick={(e) => { if (e.target === e.currentTarget) closeModal(); }}
+          >
+            <motion.div
+              key="redeem-modal"
+              initial={{ opacity: 0, scale: 0.95, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              transition={{ duration: 0.18 }}
+              className="relative w-full max-w-md mx-4 rounded-2xl border border-border bg-card shadow-2xl overflow-hidden"
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+                <div className="flex items-center gap-2">
+                  <Gift className="w-4 h-4 text-ghost-accent" />
+                  <h2 className="text-sm font-semibold text-foreground">Resgatar Contas</h2>
+                </div>
+                <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={closeModal}>
+                  <X className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+
+              <div className="px-6 py-5 space-y-5">
+                {/* Resultado ainda não gerado — formulário */}
+                {!redeemResult && (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      Define quantas contas <span className="text-ghost-success font-medium">ativas</span> deseja resgatar.
+                      Elas serão copiadas e <span className="text-ghost-error font-medium">removidas permanentemente</span> da lista.
+                    </p>
+                    <div className="space-y-2">
+                      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                        Quantidade de contas
+                      </label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={10000}
+                        value={redeemQty}
+                        onChange={(e) => setRedeemQty(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") handleRedeem(); }}
+                        className="bg-ghost-surface-2 border-border text-foreground"
+                        placeholder="Ex: 5"
+                        autoFocus
+                      />
+                    </div>
+                    <Button
+                      className="w-full gap-2 bg-ghost-accent hover:bg-ghost-accent/90 text-white"
+                      onClick={handleRedeem}
+                      disabled={redeemMutation.isPending}
+                    >
+                      {redeemMutation.isPending ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Gift className="w-3.5 h-3.5" />
+                      )}
+                      {redeemMutation.isPending ? "Resgatando..." : "Resgatar e Copiar"}
+                    </Button>
+                  </>
+                )}
+
+                {/* Resultado — contas resgatadas */}
+                {redeemResult && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-px bg-border" />
+                      <span className="text-xs text-ghost-success font-medium">
+                        {redeemResult.length} conta{redeemResult.length !== 1 ? "s" : ""} resgatada{redeemResult.length !== 1 ? "s" : ""}
+                      </span>
+                      <div className="flex-1 h-px bg-border" />
+                    </div>
+
+                    {/* Preview das contas */}
+                    <div className="rounded-lg border border-border bg-ghost-surface-1 overflow-hidden">
+                      <div className="max-h-56 overflow-y-auto divide-y divide-border">
+                        {redeemResult.map((a, i) => (
+                          <div key={i} className="px-3 py-2 flex items-center justify-between gap-3">
+                            <span className="text-xs font-mono text-foreground truncate">{a.email}</span>
+                            <span className="text-xs font-mono text-muted-foreground shrink-0">••••••••</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <Button
+                        className="flex-1 gap-2"
+                        variant={copied ? "default" : "outline"}
+                        onClick={copyRedeemed}
+                      >
+                        {copied ? <Check className="w-3.5 h-3.5 text-ghost-success" /> : <Copy className="w-3.5 h-3.5" />}
+                        {copied ? "Copiado!" : "Copiar"}
+                      </Button>
+                      <Button
+                        className="flex-1 gap-2 bg-ghost-accent hover:bg-ghost-accent/90 text-white"
+                        onClick={() => { setRedeemResult(null); setCopied(false); }}
+                      >
+                        <Gift className="w-3.5 h-3.5" />
+                        Novo Resgate
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
