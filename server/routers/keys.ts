@@ -260,9 +260,13 @@ export const keysRouter = router({
       });
 
       const cleanInviteCode = extractInviteCode(input.inviteCode);
-      const clientName = input.name
-        ? `${input.name} (${cleanInviteCode})`
-        : cleanInviteCode;
+
+      // Nome da pasta e dos jobs: usa o nome enviado pela API se disponível,
+      // caso contrário usa os primeiros 12 caracteres do invite code.
+      // O invite code já fica registrado no campo redeemedBy da key.
+      const clientName = input.name?.trim()
+        ? input.name.trim()
+        : cleanInviteCode.substring(0, 12);
 
       await orchestrator.createClientJobs({
         provider: "manus",
