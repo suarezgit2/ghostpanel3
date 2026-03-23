@@ -21,34 +21,6 @@ import { getSetting, setSetting } from "../utils/settings";
 const SMSPOOL_API = "https://api.smspool.net";
 
 // ============================================================
-// BLACKLIST DE PREFIXOS VOIP / VIRTUAIS
-// ============================================================
-
-/**
- * Prefixos de números virtuais/VoIP conhecidos que o Manus rejeita com
- * "Failed to send the code". Esses números são entregues pelo SMSPool mas
- * nunca recebem SMS porque o Manus não aceita números virtuais.
- *
- * Formato: string do início do número SEM o sinal "+".
- * Ex: "40732" cobre todos os números romenos virtuais 40732xxxxxx.
- *
- * Para adicionar novos prefixos problemáticos, basta incluí-los aqui.
- */
-const VOIP_BLACKLIST_PREFIXES: string[] = [
-  "40732", // Romênia — números virtuais (rejeitados pelo Manus)
-];
-
-/**
- * Verifica se um número de telefone pertence a um prefixo VoIP/virtual
- * conhecido que será rejeitado pelo alvo.
- * O número pode vir com ou sem o sinal "+".
- */
-function isVoipNumber(phoneNumber: string): boolean {
-  const cleaned = phoneNumber.replace(/^\+/, "");
-  return VOIP_BLACKLIST_PREFIXES.some(prefix => cleaned.startsWith(prefix));
-}
-
-// ============================================================
 // INTERFACES
 // ============================================================
 
@@ -865,22 +837,6 @@ class SMSPoolProvider {
         });
 
         const cost = parseFloat(numberData.cost || opts.maxPrice);
-
-        // v10.1: Verificar blacklist de VoIP ANTES de enviar ao Manus.
-        // Números virtuais/VoIP são rejeitados pelo Manus com "Failed to send the code".
-        // Cancelar imediatamente e tentar outro número economiza 120s de espera.
-        if (isVoipNumber(numberData.phoneNumber)) {
-          await logger.warn("smspool",
-            `Número ${numberData.phoneNumber} identificado como VoIP/virtual (blacklist). ` +
-            `Cancelando e tentando outro número (${numberAttempt}/${MAX_NUMBER_RETRIES})...`,
-            {}, opts.jobId
-          );
-          // Cancelamento em background — não bloqueia a próxima tentativa
-          const oidVoip = numberData.orderId;
-          const jidVoip = opts.jobId;
-          this.cancelSMS(oidVoip, jidVoip).catch(() => {});
-          continue; // Tenta comprar outro número
-        }
 
         // v9.8: Detectar o regionCode REAL do número comprado no SMSPool.
         const resolvedCountryId = this.config.countryId || undefined;
