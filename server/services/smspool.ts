@@ -875,8 +875,15 @@ class SMSPoolProvider {
           throw error;
         }
 
-        // Account banned — re-throw
+        // Account banned — cancela o número comprado (recupera saldo) e re-throw
         if (error.message.includes("user is blocked") || error.message.includes("USER_IS_BLOCKED")) {
+          if (numberData) {
+            await logger.info("smspool",
+              `Conta banida — cancelando número ${numberData.phoneNumber} (orderId: ${numberData.orderId}) para recuperar saldo...`,
+              {}, opts.jobId
+            );
+            this.cancelSMS(numberData.orderId, opts.jobId).catch(() => {});
+          }
           throw error;
         }
 
