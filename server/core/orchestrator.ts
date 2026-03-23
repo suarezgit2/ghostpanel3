@@ -20,7 +20,7 @@
  *     safety net to catch any remaining tracked proxies.
  */
 
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, and } from "drizzle-orm";
 import { getDb } from "../db";
 import { jobs, accounts, providers, jobFolders } from "../../drizzle/schema";
 import { proxyService, getProxyRegion } from "../services/proxy";
@@ -933,8 +933,8 @@ class Orchestrator {
               sql`${jobs.status} IN ('running', 'pending')`
             ));
 
-          // drizzle-orm/mysql2 retorna ResultSetHeader com affectedRows
-          const affectedRows = (lockResult as unknown as { affectedRows?: number })[0]?.affectedRows ?? 1;
+          // drizzle-orm/mysql2 retorna [ResultSetHeader, ...] — affectedRows fica no índice 0
+          const affectedRows = (lockResult as unknown as [{ affectedRows?: number }])[0]?.affectedRows ?? 1;
 
           if (affectedRows === 0) {
             // Outra instância já adquiriu o lock — pular
