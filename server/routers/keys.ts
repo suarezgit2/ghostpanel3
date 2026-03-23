@@ -22,7 +22,13 @@ export const keysRouter = router({
   list: protectedProcedure.query(async () => {
     const db = await getDb();
     if (!db) return [];
-    return await db.select().from(keys).orderBy(desc(keys.createdAt)).limit(500);
+    // Ordenação: redeemed mais recentes no topo (por redeemedAt desc),
+    // depois active/expired/cancelled por createdAt desc
+    return await db.select().from(keys).orderBy(
+      sql`CASE WHEN ${keys.status} = 'redeemed' THEN 0 ELSE 1 END ASC`,
+      desc(keys.redeemedAt),
+      desc(keys.createdAt)
+    ).limit(500);
   }),
 
   stats: protectedProcedure.query(async () => {
