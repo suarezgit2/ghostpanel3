@@ -265,16 +265,18 @@ class Orchestrator {
   }
 
   /**
-   * v10.2: Cria jobs para um cliente via resgate de key.
+   * v10.3: Cria jobs para um cliente via resgate de key ou QuickJob.
    *
    * Fluxo:
    *   1. Aguarda um slot de cliente livre (máx MAX_CONCURRENT_CLIENTS simultâneos)
    *   2. Cria a pasta do cliente no banco
-   *   3. Cria e executa os jobs em SEQUÊNCIA com stagger de 30s entre eles
+   *   3. Dispara TODOS os jobs do cliente em PARALELO (Promise.all)
    *   4. Libera o slot do cliente quando todos os jobs terminarem
    *
-   * Os jobs rodam em sequência (não em paralelo) para evitar que 5 jobs do
-   * mesmo cliente compitam pelos mesmos proxies e saldo de SMS ao mesmo tempo.
+   * Limite de concorrência:
+   *   - Até 5 jobs por cliente (definido em MAX_JOBS_PER_CLIENT no router)
+   *   - Até 3 clientes simultâneos (ClientQueueLimiter)
+   *   - Total máximo: 15 jobs ativos simultâneos
    */
   async createClientJobs(options: CreateClientJobsOptions): Promise<{ folderId: number; jobIds: number[] }> {
     const { provider: providerSlug, inviteCode, clientName, keyCode, jobQuantities } = options;
@@ -299,7 +301,7 @@ class Orchestrator {
     const totalAccounts = jobQuantities.reduce((a, b) => a + b, 0);
 
     await logger.info("orchestrator",
-      `Cliente "${clientName}" (Key ${keyCode}): ${jobCount} job(s), ${totalAccounts} conta(s) total. ` +
+      `Cliente "${clientName}" (Key ${keyCode}): ${jobCount} job(s) em paralelo, ${totalAccounts} conta(s) total. ` +
       `Fila: ${clientQueueLimiter.getQueued()} aguardando, ${clientQueueLimiter.getActive()}/${clientQueueLimiter.getMax()} ativos.`
     );
 
@@ -346,32 +348,30 @@ class Orchestrator {
 
     // Executa os jobs em background, aguardando slot de cliente
     const _runAllJobs = async () => {
-      // Aguarda slot de cliente livre
+      // Aguarda slot de cliente livre (máx MAX_CONCURRENT_CLIENTS clientes ao mesmo tempo)
       const releaseClient = await clientQueueLimiter.acquire(clientName);
 
       try {
         await logger.info("orchestrator",
           `Cliente "${clientName}" iniciando (${clientQueueLimiter.getActive()}/${clientQueueLimiter.getMax()} ativos, ` +
-          `${clientQueueLimiter.getQueued()} na fila). Pasta #${folderId}, ${jobCount} job(s).`
+          `${clientQueueLimiter.getQueued()} na fila). Pasta #${folderId}, ${jobCount} job(s) em paralelo.`
         );
 
-        const STAGGER_DELAY_MS = 30_000; // 30s entre jobs do mesmo cliente
-
-        for (let i = 0; i < pendingJobIds.length; i++) {
-          const jobId = pendingJobIds[i];
+        // Dispara todos os jobs do cliente em PARALELO
+        const jobPromises = pendingJobIds.map(async (jobId, i) => {
           const quantity = jobQuantities[i];
           const label = jobCount > 1
             ? `${clientName} — Job ${i + 1}/${jobCount}`
             : clientName;
 
-          // Verifica se o job foi cancelado enquanto aguardava
+          // Verifica se o job foi cancelado enquanto aguardava na fila de clientes
           const currentJob = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
           if (!currentJob[0] || currentJob[0].status === "cancelled") {
             await logger.info("orchestrator",
               `Job ${jobId} cancelado antes de iniciar. Pulando.`,
               {}, jobId
             );
-            continue;
+            return;
           }
 
           // Marca como running e inicia
@@ -393,33 +393,21 @@ class Orchestrator {
             {}, jobId
           );
 
-          // Aguarda o job terminar antes de iniciar o próximo
-          await new Promise<void>((resolve) => {
-            const run = async () => {
-              try {
-                await this.executeJob(jobId, provider, providerId, jobOptions, abortController.signal);
-              } catch (err) {
-                if (err instanceof Error && err.name === "AbortError") return;
-                await logger.error("orchestrator", `Job ${jobId} falhou: ${err}`, {}, jobId);
-                const db2 = await getDb();
-                if (db2) await db2.update(jobs).set({ status: "failed" }).where(eq(jobs.id, jobId));
-              } finally {
-                this.activeJobs.delete(jobId);
-                try { await proxyService.releaseAllForJob(jobId); } catch {}
-                resolve();
-              }
-            };
-            run();
-          });
-
-          // Stagger entre jobs (exceto após o último)
-          if (i < pendingJobIds.length - 1) {
-            await logger.info("orchestrator",
-              `Aguardando ${STAGGER_DELAY_MS / 1000}s antes do próximo job do cliente "${clientName}"...`
-            );
-            await sleep(STAGGER_DELAY_MS);
+          try {
+            await this.executeJob(jobId, provider, providerId, jobOptions, abortController.signal);
+          } catch (err) {
+            if (err instanceof Error && err.name === "AbortError") return;
+            await logger.error("orchestrator", `Job ${jobId} falhou: ${err}`, {}, jobId);
+            const db2 = await getDb();
+            if (db2) await db2.update(jobs).set({ status: "failed" }).where(eq(jobs.id, jobId));
+          } finally {
+            this.activeJobs.delete(jobId);
+            try { await proxyService.releaseAllForJob(jobId); } catch {}
           }
-        }
+        });
+
+        // Aguarda todos os jobs do cliente terminarem
+        await Promise.all(jobPromises);
 
         await logger.info("orchestrator",
           `Cliente "${clientName}" concluído. Todos os ${jobCount} job(s) finalizados.`
