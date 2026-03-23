@@ -23,7 +23,7 @@ export const jobsRouter = router({
       .select()
       .from(jobs)
       .orderBy(
-        sql`FIELD(${jobs.status}, 'running', 'pending') DESC`,
+        sql`FIELD(${jobs.status}, 'running', 'recovering', 'pending') DESC`,
         desc(jobs.createdAt)
       )
       .limit(100);
@@ -111,7 +111,7 @@ export const jobsRouter = router({
           .from(jobs)
           .where(eq(jobs.folderId, folder.id))
           .orderBy(
-            sql`FIELD(${jobs.status}, 'running', 'pending') DESC`,
+            sql`FIELD(${jobs.status}, 'running', 'recovering', 'pending') DESC`,
             desc(jobs.createdAt)
           );
         return { ...folder, jobs: folderJobs };
@@ -136,7 +136,7 @@ export const jobsRouter = router({
 
       // Force-abort any running/paused jobs before deleting
       // v10.0: forceAbort is now async — await it for proper proxy cleanup
-      const activeJobs = folderJobs.filter(j => j.status === "running" || j.status === "paused");
+      const activeJobs = folderJobs.filter(j => j.status === "running" || j.status === "recovering" || j.status === "paused");
       for (const activeJob of activeJobs) {
         await orchestrator.forceAbort(activeJob.id);
       }
@@ -214,7 +214,7 @@ export const jobsRouter = router({
 
       // If job is active, force-abort it immediately before deleting
       // v10.0: forceAbort is now async — await it for proper proxy cleanup
-      if (status === "running" || status === "paused") {
+      if (status === "running" || status === "recovering" || status === "paused") {
         await orchestrator.forceAbort(input.id);
         // Small wait to let the abort propagate before we delete from DB
         await new Promise(resolve => setTimeout(resolve, 200));
@@ -287,7 +287,7 @@ export const jobsRouter = router({
     const runningJobs = await db
       .select({ id: jobs.id, updatedAt: jobs.updatedAt, startedAt: jobs.startedAt })
       .from(jobs)
-      .where(eq(jobs.status, "running"));
+      .where(sql`${jobs.status} IN ('running', 'recovering')`);
 
     const staleJobs = runningJobs.filter((job) => {
       const isActiveInMemory = activeJobIds.includes(job.id);

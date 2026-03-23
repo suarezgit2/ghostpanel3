@@ -879,21 +879,6 @@ class Orchestrator {
     if (!db) return;
 
     try {
-      // Busca todos os jobs que estavam em execução ou na fila quando o servidor parou
-      const interruptedJobs = await db
-        .select()
-        .from(jobs)
-        .where(
-          sql`${jobs.status} IN ('running', 'pending')`
-        );
-
-      if (interruptedJobs.length === 0) {
-        console.log("[JobRecovery] Nenhum job interrompido encontrado.");
-        return;
-      }
-
-      console.log(`[JobRecovery] ${interruptedJobs.length} job(s) interrompido(s) encontrado(s). Retomando...`);
-
       // Busca o provider manus (necessário para retomar)
       const providerRows = await db.select().from(providers).where(eq(providers.slug, "manus")).limit(1);
       if (providerRows.length === 0) {
@@ -903,28 +888,66 @@ class Orchestrator {
       const providerId = providerRows[0].id;
       const provider = PROVIDERS["manus"];
 
-      for (const job of interruptedJobs) {
+      // Busca candidatos a recovery (running ou pending)
+      const candidates = await db
+        .select()
+        .from(jobs)
+        .where(sql`${jobs.status} IN ('running', 'pending')`);
+
+      if (candidates.length === 0) {
+        console.log("[JobRecovery] Nenhum job interrompido encontrado.");
+        return;
+      }
+
+      console.log(`[JobRecovery] ${candidates.length} candidato(s) encontrado(s). Verificando lock atômico...`);
+
+      let recovered = 0;
+      let skipped = 0;
+
+      for (const job of candidates) {
         try {
-          const config = (job.config || {}) as Record<string, unknown>;
           const alreadyCompleted = job.completedAccounts || 0;
           const totalRequired = job.totalAccounts || 1;
           const remaining = totalRequired - alreadyCompleted;
 
           if (remaining <= 0) {
-            // Job já estava completo mas não foi finalizado — marca como completed
-            await db.update(jobs).set({
-              status: "completed",
-              completedAt: new Date(),
-              error: null,
-            }).where(eq(jobs.id, job.id));
-            console.log(`[JobRecovery] Job ${job.id} já estava completo (${alreadyCompleted}/${totalRequired}). Marcado como completed.`);
+            // Já estava completo mas não foi finalizado
+            await db.update(jobs)
+              .set({ status: "completed", completedAt: new Date(), error: null })
+              .where(and(
+                eq(jobs.id, job.id),
+                sql`${jobs.status} IN ('running', 'pending')`
+              ));
+            console.log(`[JobRecovery] Job ${job.id} já estava completo. Marcado como completed.`);
             continue;
           }
 
-          // Monta as opções para retomar o job
+          // LOCK ATÔMICO: muda status de 'running'/'pending' para 'recovering' em uma única operação.
+          // Se outra instância já fez isso, affectedRows será 0 e pulamos este job.
+          // Isso garante que apenas UMA instância retome cada job, mesmo com múltiplos
+          // restarts simultâneos durante um deploy.
+          const lockResult = await db.update(jobs)
+            .set({ status: "recovering" as typeof jobs.status._.data, updatedAt: new Date() })
+            .where(and(
+              eq(jobs.id, job.id),
+              sql`${jobs.status} IN ('running', 'pending')`
+            ));
+
+          // drizzle-orm/mysql2 retorna ResultSetHeader com affectedRows
+          const affectedRows = (lockResult as unknown as { affectedRows?: number })[0]?.affectedRows ?? 1;
+
+          if (affectedRows === 0) {
+            // Outra instância já adquiriu o lock — pular
+            console.log(`[JobRecovery] Job ${job.id} já está sendo retomado por outra instância. Pulando.`);
+            skipped++;
+            continue;
+          }
+
+          // Lock adquirido com sucesso — agora retomar
+          const config = (job.config || {}) as Record<string, unknown>;
           const options: CreateJobOptions = {
             provider: "manus",
-            quantity: remaining, // Retoma do ponto onde parou
+            quantity: remaining,
             password: String(config.password || "auto"),
             delayMin: Number(config.delayMin || 3000),
             delayMax: Number(config.delayMax || 10000),
@@ -934,12 +957,10 @@ class Orchestrator {
             folderId: job.folderId || undefined,
           };
 
-          // Marca como running e retoma
-          await db.update(jobs).set({
-            status: "running",
-            startedAt: job.startedAt || new Date(),
-            error: null,
-          }).where(eq(jobs.id, job.id));
+          // Marca como running definitivo (saindo do estado 'recovering')
+          await db.update(jobs)
+            .set({ status: "running", startedAt: job.startedAt || new Date(), error: null })
+            .where(eq(jobs.id, job.id));
 
           const abortController = new AbortController();
           this.activeJobs.set(job.id, abortController);
@@ -954,10 +975,10 @@ class Orchestrator {
           );
 
           this._runJob(job.id, provider, providerId, options, abortController);
+          recovered++;
 
         } catch (err) {
           console.warn(`[JobRecovery] Erro ao retomar job ${job.id}:`, err);
-          // Se não conseguiu retomar, marca como failed para não ficar travado
           await db.update(jobs).set({
             status: "failed",
             error: `Não foi possível retomar após restart: ${err instanceof Error ? err.message : String(err)}`,
@@ -966,7 +987,7 @@ class Orchestrator {
         }
       }
 
-      console.log(`[JobRecovery] Recovery concluído. ${interruptedJobs.length} job(s) processado(s).`);
+      console.log(`[JobRecovery] Recovery concluído. Retomados: ${recovered}, ignorados (outra instância): ${skipped}.`);
     } catch (err) {
       console.warn("[JobRecovery] Erro durante recovery de jobs:", err);
     }
