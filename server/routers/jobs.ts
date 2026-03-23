@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, sql, inArray } from "drizzle-orm";
+import { eq, desc, sql, inArray, asc } from "drizzle-orm";
 import { router, protectedProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { jobs, accounts, jobFolders } from "../../drizzle/schema";
@@ -16,7 +16,17 @@ export const jobsRouter = router({
     const db = await getDb();
     if (!db) return [];
 
-    return await db.select().from(jobs).orderBy(desc(jobs.createdAt)).limit(100);
+    // Jobs em execução (running/pending) sempre no topo, depois por data decrescente.
+    // FIELD() atribui peso 0 para running, 1 para pending, 2 para os demais —
+    // assim running > pending > qualquer outro status.
+    return await db
+      .select()
+      .from(jobs)
+      .orderBy(
+        sql`FIELD(${jobs.status}, 'running', 'pending') DESC`,
+        desc(jobs.createdAt)
+      )
+      .limit(100);
   }),
 
   getById: protectedProcedure
@@ -99,7 +109,10 @@ export const jobsRouter = router({
           .select()
           .from(jobs)
           .where(eq(jobs.folderId, folder.id))
-          .orderBy(desc(jobs.createdAt));
+          .orderBy(
+            sql`FIELD(${jobs.status}, 'running', 'pending') DESC`,
+            desc(jobs.createdAt)
+          );
         return { ...folder, jobs: folderJobs };
       })
     );

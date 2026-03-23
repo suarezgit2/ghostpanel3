@@ -69,6 +69,14 @@ export const dashboardRouter = router({
     const db = await getDb();
     if (!db) return [];
 
-    return await db.select().from(jobs).orderBy(desc(jobs.createdAt)).limit(10);
+    // Jobs em execução (running/pending) sempre no topo, depois por data decrescente.
+    return await db
+      .select()
+      .from(jobs)
+      .orderBy(
+        sql`FIELD(${jobs.status}, 'running', 'pending') DESC`,
+        desc(jobs.createdAt)
+      )
+      .limit(10);
   }),
 });
