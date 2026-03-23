@@ -20,6 +20,34 @@ import { logger } from "../utils/helpers";
 const SMSPOOL_API = "https://api.smspool.net";
 
 // ============================================================
+// BLACKLIST DE PREFIXOS VOIP / VIRTUAIS
+// ============================================================
+
+/**
+ * Prefixos de números virtuais/VoIP conhecidos que o Manus rejeita com
+ * "Failed to send the code". Esses números são entregues pelo SMSPool mas
+ * nunca recebem SMS porque o Manus não aceita números virtuais.
+ *
+ * Formato: string do início do número SEM o sinal "+".
+ * Ex: "40732" cobre todos os números romenos virtuais 40732xxxxxx.
+ *
+ * Para adicionar novos prefixos problemáticos, basta incluí-los aqui.
+ */
+const VOIP_BLACKLIST_PREFIXES: string[] = [
+  "40732", // Romênia — números virtuais (rejeitados pelo Manus)
+];
+
+/**
+ * Verifica se um número de telefone pertence a um prefixo VoIP/virtual
+ * conhecido que será rejeitado pelo alvo.
+ * O número pode vir com ou sem o sinal "+".
+ */
+function isVoipNumber(phoneNumber: string): boolean {
+  const cleaned = phoneNumber.replace(/^\+/, "");
+  return VOIP_BLACKLIST_PREFIXES.some(prefix => cleaned.startsWith(prefix));
+}
+
+// ============================================================
 // INTERFACES
 // ============================================================
 
@@ -703,6 +731,11 @@ class SMSPoolProvider {
    *
    * Retorna no mesmo formato que o _tryProvider do SMSBower para
    * manter compatibilidade com o fluxo existente.
+   *
+   * v10.1: Retry automático quando o número comprado é VoIP/virtual (blacklist)
+   * ou quando o Manus rejeita o número com "Failed to send the code".
+   * Em vez de abortar toda a tentativa, cancela o número ruim e compra outro.
+   * Máximo de MAX_NUMBER_RETRIES trocas de número por chamada.
    */
   async tryGetCode(opts: {
     countryCode: string;
@@ -731,141 +764,180 @@ class SMSPoolProvider {
     wasProxyError?: boolean;
     provider: "smspool";
   }> {
+    // v10.1: Máximo de trocas de número por chamada.
+    // Cada troca ocorre quando o número comprado é VoIP (blacklist) ou
+    // quando o Manus rejeita o número com "Failed to send the code".
+    const MAX_NUMBER_RETRIES = 3;
     let numberData: SMSPoolNumberData | null = null;
+    let totalCost = 0;
 
-    try {
-      // 1. Comprar número
-      numberData = await this.orderSMS({
-        countryCode: opts.countryCode,
-        service: opts.service,
-        maxPrice: opts.maxPrice,
-        jobId: opts.jobId,
-      });
+    for (let numberAttempt = 1; numberAttempt <= MAX_NUMBER_RETRIES; numberAttempt++) {
+      numberData = null;
 
-      const cost = parseFloat(numberData.cost || opts.maxPrice);
-
-      // v9.8: Detectar o regionCode REAL do número comprado no SMSPool.
-      // O regionCode passado via opts vem do SMSBower (ex: +55 para Brasil),
-      // mas o SMSPool pode retornar um número de outro país (ex: +7 para Cazaquistão).
-      // Usar o regionCode errado causa "Failed to send the code" porque o Manus
-      // recebe um número com DDD inválido.
-      const resolvedCountryId = this.config.countryId || undefined;
-      const detectedRegionCode = this.detectRegionCode(numberData.phoneNumber, resolvedCountryId);
-
-      if (detectedRegionCode !== opts.regionCode) {
-        await logger.info("smspool",
-          `RegionCode corrigido: ${opts.regionCode} → ${detectedRegionCode} (detectado do número ${numberData.phoneNumber})`,
-          {}, opts.jobId
-        );
-      }
-
-      // 2. Notificar que o número foi alugado (para o provider Manus enviar o código)
-      if (opts.onNumberRented) {
-        await opts.onNumberRented({
-          phoneNumber: numberData.phoneNumber,
-          activationId: `smspool:${numberData.orderId}`, // Prefixo para identificar o provider
-          attempt: opts.attempt,
-          regionCode: detectedRegionCode, // v9.8: Usa regionCode detectado do número real
+      try {
+        // 1. Comprar número
+        numberData = await this.orderSMS({
+          countryCode: opts.countryCode,
+          service: opts.service,
+          maxPrice: opts.maxPrice,
+          jobId: opts.jobId,
         });
-      }
 
-      // 3. Verificar abort
-      if (opts.signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
+        const cost = parseFloat(numberData.cost || opts.maxPrice);
 
-      // 4. Aguardar SMS
-      const code = await this.waitForCode(
-        numberData.orderId,
-        opts.waitTimeMs,
-        opts.pollIntervalMs,
-        opts.jobId,
-        opts.signal
-      );
+        // v10.1: Verificar blacklist de VoIP ANTES de enviar ao Manus.
+        // Números virtuais/VoIP são rejeitados pelo Manus com "Failed to send the code".
+        // Cancelar imediatamente e tentar outro número economiza 120s de espera.
+        if (isVoipNumber(numberData.phoneNumber)) {
+          await logger.warn("smspool",
+            `Número ${numberData.phoneNumber} identificado como VoIP/virtual (blacklist). ` +
+            `Cancelando e tentando outro número (${numberAttempt}/${MAX_NUMBER_RETRIES})...`,
+            {}, opts.jobId
+          );
+          // Cancelamento em background — não bloqueia a próxima tentativa
+          const oidVoip = numberData.orderId;
+          const jidVoip = opts.jobId;
+          this.cancelSMS(oidVoip, jidVoip).catch(() => {});
+          continue; // Tenta comprar outro número
+        }
 
-      if (code) {
-        await logger.info("smspool",
-          `SMS recebido na tentativa ${opts.attempt}! Código: ${code} (orderId: ${numberData.orderId})`,
+        // v9.8: Detectar o regionCode REAL do número comprado no SMSPool.
+        const resolvedCountryId = this.config.countryId || undefined;
+        const detectedRegionCode = this.detectRegionCode(numberData.phoneNumber, resolvedCountryId);
+
+        if (detectedRegionCode !== opts.regionCode) {
+          await logger.info("smspool",
+            `RegionCode corrigido: ${opts.regionCode} → ${detectedRegionCode} (detectado do número ${numberData.phoneNumber})`,
+            {}, opts.jobId
+          );
+        }
+
+        // 2. Notificar que o número foi alugado (para o provider Manus enviar o código)
+        if (opts.onNumberRented) {
+          await opts.onNumberRented({
+            phoneNumber: numberData.phoneNumber,
+            activationId: `smspool:${numberData.orderId}`,
+            attempt: opts.attempt,
+            regionCode: detectedRegionCode,
+          });
+        }
+
+        // 3. Verificar abort
+        if (opts.signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+
+        // 4. Aguardar SMS
+        const code = await this.waitForCode(
+          numberData.orderId,
+          opts.waitTimeMs,
+          opts.pollIntervalMs,
+          opts.jobId,
+          opts.signal
+        );
+
+        if (code) {
+          await logger.info("smspool",
+            `SMS recebido na tentativa ${opts.attempt}! Código: ${code} (orderId: ${numberData.orderId})`,
+            {}, opts.jobId
+          );
+          return {
+            success: true,
+            code,
+            phoneNumber: numberData.phoneNumber,
+            activationId: `smspool:${numberData.orderId}`,
+            cost: totalCost + cost,
+            provider: "smspool",
+          };
+        }
+
+        // 5. Timeout — cancelar e retornar falha (não tenta outro número em timeout)
+        await logger.warn("smspool",
+          `SMS não recebido (timeout). Cancelando pedido ${numberData.orderId}...`,
           {}, opts.jobId
         );
+        await this.cancelSMS(numberData.orderId, opts.jobId);
         return {
-          success: true,
-          code,
-          phoneNumber: numberData.phoneNumber,
-          activationId: `smspool:${numberData.orderId}`,
-          cost,
+          success: false,
+          cost: 0,
+          error: new Error("SMSPool: Timeout aguardando SMS"),
+          provider: "smspool",
+        };
+
+      } catch (err) {
+        // Re-throw AbortError
+        if (err instanceof DOMException && err.name === "AbortError") throw err;
+
+        const error = err instanceof Error ? err : new Error(String(err));
+
+        // Erros fatais — não tenta outro número, propaga imediatamente
+        if (error.message.includes("Saldo insuficiente") || error.message.includes("API key inválida")) {
+          throw error;
+        }
+
+        // Account banned — re-throw
+        if (error.message.includes("user is blocked") || error.message.includes("USER_IS_BLOCKED")) {
+          throw error;
+        }
+
+        // v10.1: Rejeição de número pelo Manus ("Failed to send the code").
+        // Em vez de abortar, cancela o número ruim e tenta comprar outro.
+        const isTargetRejection = error.message.includes("Failed to send the code");
+        if (isTargetRejection && numberAttempt < MAX_NUMBER_RETRIES) {
+          await logger.warn("smspool",
+            `Número ${numberData?.phoneNumber || "desconhecido"} rejeitado pelo Manus. ` +
+            `Cancelando e tentando outro número (${numberAttempt}/${MAX_NUMBER_RETRIES})...`,
+            {}, opts.jobId
+          );
+          if (numberData) {
+            const oidRej = numberData.orderId;
+            const jidRej = opts.jobId;
+            this.cancelSMS(oidRej, jidRej).catch(() => {});
+          }
+          continue; // Tenta comprar outro número
+        }
+
+        // Outros erros (rede, estoque, etc.) — cancela e retorna falha
+        if (numberData) {
+          const oid = numberData.orderId;
+          const jid = opts.jobId;
+          this.cancelSMS(oid, jid).catch(() => {});
+        }
+
+        const isProxyError =
+          error.message.includes("ECONNRESET") ||
+          error.message.includes("ECONNREFUSED") ||
+          error.message.includes("ETIMEDOUT") ||
+          error.message.includes("fetch failed");
+
+        await logger.warn("smspool",
+          `Tentativa ${opts.attempt} falhou (número ${numberAttempt}/${MAX_NUMBER_RETRIES}): ${error.message}`,
+          {}, opts.jobId
+        );
+
+        return {
+          success: false,
+          cost: 0,
+          error,
+          wasProxyError: isProxyError,
+          wasTargetRejection: isTargetRejection,
           provider: "smspool",
         };
       }
-
-      // 5. Timeout — cancelar
-      await logger.warn("smspool",
-        `SMS não recebido (timeout). Cancelando pedido ${numberData.orderId}...`,
-        {}, opts.jobId
-      );
-      await this.cancelSMS(numberData.orderId, opts.jobId);
-      return {
-        success: false,
-        cost: 0,
-        error: new Error("SMSPool: Timeout aguardando SMS"),
-        provider: "smspool",
-      };
-
-    } catch (err) {
-      // Re-throw AbortError
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
-
-      const error = err instanceof Error ? err : new Error(String(err));
-
-      // Cancelar número se foi alugado (fire-and-forget para não bloquear o fallback).
-      // O cancelSMS agora faz retry com delay progressivo (até ~50s) para garantir
-      // o reembolso mesmo quando o SMSPool retorna "cannot be cancelled yet".
-      // Executamos em background para que o fluxo principal possa continuar
-      // imediatamente com o próximo provider (SMSBower).
-      if (numberData) {
-        const oid = numberData.orderId;
-        const jid = opts.jobId;
-        this.cancelSMS(oid, jid).catch(() => {
-          // Ignora erros de cancelamento — já logados internamente
-        });
-      }
-
-      // Detecta erros fatais
-      if (error.message.includes("Saldo insuficiente") || error.message.includes("API key inválida")) {
-        throw error;
-      }
-
-      // Detecta erros de rede/proxy
-      const isProxyError =
-        error.message.includes("ECONNRESET") ||
-        error.message.includes("ECONNREFUSED") ||
-        error.message.includes("ETIMEDOUT") ||
-        error.message.includes("fetch failed");
-
-      // Detecta rejeição do número pelo alvo
-      // v9.7.1: Único erro conhecido de número rejeitado é "Failed to send the code".
-      const isTargetRejection =
-        error.message.includes("Failed to send the code");
-
-      // Account banned — re-throw
-      if (error.message.includes("user is blocked") || error.message.includes("USER_IS_BLOCKED")) {
-        throw error;
-      }
-
-      await logger.warn("smspool",
-        `Tentativa ${opts.attempt} falhou: ${error.message}`,
-        {}, opts.jobId
-      );
-
-      return {
-        success: false,
-        cost: 0,
-        error,
-        wasProxyError: isProxyError,
-        wasTargetRejection: isTargetRejection,
-        provider: "smspool",
-      };
     }
+
+    // Esgotou todas as trocas de número sem sucesso
+    await logger.warn("smspool",
+      `Esgotadas ${MAX_NUMBER_RETRIES} trocas de número sem sucesso (todos VoIP ou rejeitados).`,
+      {}, opts.jobId
+    );
+    return {
+      success: false,
+      cost: 0,
+      error: new Error(`SMSPool: Todos os ${MAX_NUMBER_RETRIES} números tentados foram VoIP ou rejeitados pelo Manus`),
+      wasTargetRejection: true,
+      provider: "smspool",
+    };
   }
 }
 

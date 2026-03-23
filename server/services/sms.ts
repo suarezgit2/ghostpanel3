@@ -1178,6 +1178,23 @@ class SmsService {
           }
 
           lastCountryError = err instanceof Error ? err : new Error(String(err));
+
+          // v10.1: Circuit breaker de saldo — se o SMSBower reportar saldo insuficiente,
+          // não adianta tentar outros países (todos usam a mesma conta SMSBower).
+          // Propaga imediatamente para evitar tentativas desperdiçadas.
+          if (
+            lastCountryError.message.includes("Saldo insuficiente") ||
+            lastCountryError.message.includes("NO_BALANCE") ||
+            lastCountryError.message.includes("API key inválida") ||
+            lastCountryError.message.includes("BAD_KEY")
+          ) {
+            await logger.error("sms",
+              `CIRCUIT BREAKER: ${lastCountryError.message} — abortando todos os países (mesma conta SMSBower).`,
+              {}, jobId
+            );
+            throw lastCountryError;
+          }
+
           await logger.warn("sms",
             `País ${countryConfig.name} falhou completamente: ${lastCountryError.message}. Tentando próximo país...`,
             {}, jobId

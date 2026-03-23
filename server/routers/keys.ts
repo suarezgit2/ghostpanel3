@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, and } from "drizzle-orm";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { keys } from "../../drizzle/schema";
@@ -144,7 +144,16 @@ export const keysRouter = router({
     }),
 
   /**
-   * Endpoint público para resgatar uma key
+   * Endpoint público para resgatar uma key.
+   *
+   * FIX: Race condition eliminada com UPDATE atômico.
+   * O padrão anterior (SELECT → verificar → UPDATE) permitia que dois resgates
+   * simultâneos da mesma chave passassem pela verificação antes de qualquer um
+   * marcar como "redeemed", gerando múltiplos jobs para a mesma chave.
+   *
+   * A correção usa um único UPDATE WHERE status = 'active', que é atômico no
+   * MySQL/TiDB. Se affectedRows === 0, a chave já foi resgatada ou não existe
+   * com status ativo — garantindo que apenas um resgate seja processado.
    */
   redeem: publicProcedure
     .input(z.object({
@@ -156,41 +165,70 @@ export const keysRouter = router({
       const db = await getDb();
       if (!db) throw new Error("Serviço indisponível");
 
-      const result = await db.select().from(keys).where(eq(keys.code, input.code.toUpperCase())).limit(1);
+      const normalizedCode = input.code.toUpperCase().trim();
+      const now = new Date();
 
-      if (result.length === 0) {
+      // ── ETAPA 1: Verificar se a chave existe (para dar mensagem de erro adequada) ──
+      const existing = await db
+        .select()
+        .from(keys)
+        .where(eq(keys.code, normalizedCode))
+        .limit(1);
+
+      if (existing.length === 0) {
         throw new Error("Chave não encontrada");
       }
 
-      const key = result[0];
+      const key = existing[0];
 
-      if (key.status !== "active") {
-        if (key.status === "redeemed") throw new Error("Chave já foi resgatada");
-        if (key.status === "cancelled") throw new Error("Chave cancelada");
-        if (key.status === "expired") throw new Error("Chave expirada");
-        throw new Error("Chave inválida");
-      }
-
-      if (key.expiresAt && new Date(key.expiresAt) < new Date()) {
-        await db.update(keys).set({ status: "expired" }).where(eq(keys.id, key.id));
+      // Verificar expiração antes do UPDATE atômico
+      if (key.expiresAt && new Date(key.expiresAt) < now) {
+        // Marcar como expirada se ainda não foi
+        if (key.status === "active") {
+          await db.update(keys).set({ status: "expired" }).where(eq(keys.id, key.id));
+        }
         throw new Error("Chave expirada");
       }
 
-      // Mark as redeemed
-      await db.update(keys).set({
-        status: "redeemed",
-        redeemedAt: new Date(),
-        redeemedBy: input.name ? `${input.name} (${input.inviteCode})` : input.inviteCode,
-      }).where(eq(keys.id, key.id));
+      // Dar mensagens de erro específicas para estados não-active
+      if (key.status === "redeemed") throw new Error("Chave já foi resgatada");
+      if (key.status === "cancelled") throw new Error("Chave cancelada");
+      if (key.status === "expired") throw new Error("Chave expirada");
+      if (key.status !== "active") throw new Error("Chave inválida");
 
-      // Trigger quick job to send credits
+      // ── ETAPA 2: UPDATE atômico — apenas uma requisição concurrent vence ──
+      // WHERE status = 'active' garante que se duas requisições chegarem ao mesmo tempo,
+      // somente a primeira que executar o UPDATE terá affectedRows > 0.
+      const updateResult = await db
+        .update(keys)
+        .set({
+          status: "redeemed",
+          redeemedAt: now,
+          redeemedBy: input.name
+            ? `${input.name} (${input.inviteCode})`
+            : input.inviteCode,
+        })
+        .where(
+          and(
+            eq(keys.code, normalizedCode),
+            eq(keys.status, "active")
+          )
+        );
+
+      // affectedRows === 0 significa que outra requisição concurrent já resgatou
+      const affectedRows = (updateResult as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
+      if (affectedRows === 0) {
+        throw new Error("Chave já foi resgatada");
+      }
+
+      // ── ETAPA 3: Criar o job de entrega ──
       const { orchestrator } = await import("../core/orchestrator");
       const CREDITS_PER_ACCOUNT = 500;
       const quantity = Math.max(1, Math.floor(key.credits / CREDITS_PER_ACCOUNT));
 
       const cleanInviteCode = extractInviteCode(input.inviteCode);
 
-      const jobId = await orchestrator.createJob({
+      await orchestrator.createJob({
         provider: "manus",
         quantity,
         inviteCode: cleanInviteCode,

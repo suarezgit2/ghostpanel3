@@ -586,17 +586,24 @@ class ProxyService {
 
             // not_enough_replacements_in_subscription: limite de replacements atingido
             if (errorText.includes("not_enough_replacements")) {
+              // v10.1: Backoff exponencial para não spam na API da Webshare.
+              // 1ª vez: 5min, 2ª: 10min, 3ª+: 30min.
+              const notEnoughCount = (this.failedReplacements.get("__not_enough__") || 0) + 1;
+              this.failedReplacements.set("__not_enough__", notEnoughCount);
+              const backoffMs = notEnoughCount === 1 ? 300_000 : notEnoughCount === 2 ? 600_000 : 1_800_000;
+              const backoffMin = Math.round(backoffMs / 60_000);
+
               await logger.error("proxy",
-                `[Replace Worker] LIMITE DE REPLACEMENTS DA ASSINATURA ATINGIDO! ` +
-                `${ipsToReplace.length} proxies não podem ser substituídos. ` +
+                `[Replace Worker] LIMITE DE REPLACEMENTS DA ASSINATURA ATINGIDO (ocorrência ${notEnoughCount})! ` +
+                `${ipsToReplace.length} proxies aguardando. ` +
+                `Próxima tentativa em ${backoffMin}min. ` +
                 `Faça upgrade da assinatura Webshare ou aguarde o reset mensal.`,
                 {}, jobId
               );
-              // Re-enfileira para tentar novamente mais tarde (pode resetar)
+              // Re-enfileira para tentar novamente após o backoff
               this.replaceQueue.push(...ipsToReplace);
               this.isReplacing = false;
-              // Espera 5 minutos antes de tentar de novo
-              await sleep(300_000);
+              await sleep(backoffMs);
               continue;
             }
 

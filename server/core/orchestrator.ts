@@ -76,10 +76,72 @@ export interface QuickJobRecipient {
   jobCount?: number;
 }
 
-// v9.2: JobSemaphore REMOVED. With per-proxy isolation in FPJS (no global semaphore),
-// each job is truly independent. The old semaphore was a band-aid for the global FPJS
-// serialization problem — now that the root cause is fixed, jobs can run fully in parallel.
-// Each job gets its own proxy and makes its own FPJS requests without interfering with others.
+// ============================================================
+// GLOBAL CONCURRENCY LIMITER (v10.1)
+// ============================================================
+//
+// Limita o número máximo de jobs rodando SIMULTANEAMENTE em todo o sistema.
+// Isso evita que um burst de resgates de keys (ex: 10 resgates em 1 segundo)
+// crie 10 jobs ao mesmo tempo, esgotando proxies e saldo de SMS de uma vez.
+//
+// O limite é configurado via setting "max_concurrent_jobs" (padrão: 3).
+// Quando o limite é atingido, novos jobs aguardam em fila (FIFO).
+// Cada job libera um slot ao finalizar (sucesso, falha ou cancelamento).
+
+const DEFAULT_MAX_CONCURRENT_JOBS = 3;
+
+class GlobalJobLimiter {
+  private activeCount = 0;
+  private queue: Array<() => void> = [];
+  private maxConcurrent = DEFAULT_MAX_CONCURRENT_JOBS;
+
+  setMax(max: number): void {
+    this.maxConcurrent = Math.max(1, max);
+  }
+
+  getMax(): number { return this.maxConcurrent; }
+  getActive(): number { return this.activeCount; }
+  getQueued(): number { return this.queue.length; }
+
+  /**
+   * Aguarda um slot livre e o reserva.
+   * Retorna uma função `release` que deve ser chamada quando o job terminar.
+   */
+  async acquire(jobId: number): Promise<() => void> {
+    return new Promise((resolve) => {
+      const tryAcquire = () => {
+        if (this.activeCount < this.maxConcurrent) {
+          this.activeCount++;
+          console.log(
+            `[GlobalJobLimiter] Job ${jobId} iniciou. Ativos: ${this.activeCount}/${this.maxConcurrent}, ` +
+            `Na fila: ${this.queue.length}`
+          );
+          const release = () => {
+            this.activeCount = Math.max(0, this.activeCount - 1);
+            console.log(
+              `[GlobalJobLimiter] Job ${jobId} liberou slot. Ativos: ${this.activeCount}/${this.maxConcurrent}, ` +
+              `Na fila: ${this.queue.length}`
+            );
+            // Acorda o próximo job na fila
+            const next = this.queue.shift();
+            if (next) next();
+          };
+          resolve(release);
+        } else {
+          // Sem slot livre — enfileira
+          console.log(
+            `[GlobalJobLimiter] Job ${jobId} aguardando slot. Ativos: ${this.activeCount}/${this.maxConcurrent}, ` +
+            `Na fila: ${this.queue.length + 1}`
+          );
+          this.queue.push(tryAcquire);
+        }
+      };
+      tryAcquire();
+    });
+  }
+}
+
+const globalJobLimiter = new GlobalJobLimiter();
 
 class Orchestrator {
   /** Maps jobId -> AbortController for immediate cancellation signaling */
@@ -95,6 +157,11 @@ class Orchestrator {
 
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
+
+    // v10.1: Atualiza o limite de concorrência global a partir da setting do banco.
+    const maxConcurrentRaw = await getSetting("max_concurrent_jobs");
+    const maxConcurrent = parseInt(maxConcurrentRaw || "") || DEFAULT_MAX_CONCURRENT_JOBS;
+    globalJobLimiter.setMax(maxConcurrent);
 
     // Find provider in DB
     const providerRows = await db.select().from(providers).where(eq(providers.slug, providerSlug)).limit(1);
@@ -129,8 +196,36 @@ class Orchestrator {
     const abortController = new AbortController();
     this.activeJobs.set(jobId, abortController);
 
-    // v9.2: Direct execution — no job semaphore. Each job is fully independent.
-    this.executeJob(jobId, provider, providerId, options, abortController.signal).catch(async (err) => {
+    // v10.1: Controle de concorrência global.
+    // O job aguarda um slot livre antes de iniciar o trabalho real.
+    // Isso evita que bursts de resgates de keys criem dezenas de jobs simultâneos.
+    const _runWithLimiter = async () => {
+      const releaseSlot = await globalJobLimiter.acquire(jobId);
+      try {
+        // Verifica se o job ainda está válido (pode ter sido cancelado enquanto aguardava na fila)
+        const currentJob = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
+        const currentStatus = currentJob[0]?.status;
+        if (!currentStatus || currentStatus === "cancelled") {
+          await logger.info("orchestrator",
+            `Job ${jobId} cancelado enquanto aguardava slot de concorrência. Ignorando.`,
+            {}, jobId
+          );
+          return;
+        }
+        if (globalJobLimiter.getQueued() > 0 || globalJobLimiter.getActive() > 1) {
+          await logger.info("orchestrator",
+            `Job ${jobId} iniciando execução (ativos: ${globalJobLimiter.getActive()}/${globalJobLimiter.getMax()}, ` +
+            `na fila: ${globalJobLimiter.getQueued()})`,
+            {}, jobId
+          );
+        }
+        await this.executeJob(jobId, provider, providerId, options, abortController.signal);
+      } finally {
+        releaseSlot();
+      }
+    };
+
+    _runWithLimiter().catch(async (err) => {
       if (err instanceof Error && err.name === "AbortError") {
         // Job was aborted — status already set by cancelJob/deleteJob
         return;
@@ -141,8 +236,6 @@ class Orchestrator {
     }).finally(async () => {
       this.activeJobs.delete(jobId);
       // v10.0: Safety net — release any remaining tracked proxies for this job.
-      // This catches edge cases where executeJob returned/threw without releasing
-      // all proxies (e.g., early return on DB status check, or unhandled error paths).
       try {
         await proxyService.releaseAllForJob(jobId);
       } catch (err) {
@@ -565,6 +658,18 @@ class Orchestrator {
 
   isJobActive(jobId: number): boolean {
     return this.activeJobs.has(jobId);
+  }
+
+  /**
+   * v10.1: Retorna o estado atual do limitador global de concorrência.
+   * Útil para monitoramento e debug via logs.
+   */
+  getLimiterStatus(): { active: number; queued: number; max: number } {
+    return {
+      active: globalJobLimiter.getActive(),
+      queued: globalJobLimiter.getQueued(),
+      max: globalJobLimiter.getMax(),
+    };
   }
 
   /**
