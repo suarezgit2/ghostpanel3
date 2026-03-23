@@ -5,23 +5,24 @@
  * Format: POST https://api.manus.im/{package}.{ServiceName}/{MethodName}
  * Headers: Content-Type: application/json, Connect-Protocol-Version: 1
  *
- * ANTI-DETECTION (v6.2 — FPJS Direct POST + Cache + Semaphore + Retry):
- * - Uses impers (curl-impersonate) for Chrome-identical TLS/HTTP2 fingerprints
- * - JA3/JA4 TLS fingerprint matches real Chrome (not Node.js)
+ * ANTI-DETECTION (v11.0 — Synthetic FPJS + TLS v1.5.1 Impersonation):
+ * - Uses impers (curl-impersonate v1.5.1) for Chrome-identical TLS/HTTP2 fingerprints
+ * - JA3/JA4 TLS fingerprint matches real Chrome 142+ (GREASE, ECH, Kyber768, ALPS)
  * - HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order match real Chrome
  * - DCR is regenerated FRESH on every RPC call (fresh timestamp + fresh fgRequestId)
- * - FPJS requestId is cached for 5min per proxy (avoids 60s tunnel delay per call)
- * - FPJS requests serialized via semaphore (max 1 concurrent) to avoid 429 rate limiting
- * - FPJS retries with exponential backoff on 400/429 (NEVER falls back to synthetic ID)
- * - FPJS payload uses mo:["id"] only — no bot detection or extras — so Server API
- *   returns the requestId WITHOUT Smart Signals (tampering, proxy, vpn, botd)
- * - FPJS POST is routed through the SAME proxy as RPC calls (IP consistency)
+ * - FPJS requestId is SYNTHETIC (not queryable via Server API) to avoid exposing
+ *   fabricated signals to tampering/botd/vpn detection. The Manus backend cannot
+ *   verify our fingerprint via FPJS Server API because the requestId doesn't exist.
+ * - TLS impersonation ensures RPC calls look like real Chrome at the network level
  * - No browser process, no bot detection, no webdriver flag
  */
 
 import { httpRequest } from "../../services/httpClient";
 import { fingerprintService, type BrowserProfile } from "../../services/fingerprint";
-import { getRequestIdDirect } from "../../services/fpjsDirectClient";
+// v11.0: getRequestIdDirect DISABLED — real FPJS requestIds expose fabricated signals
+// to the FPJS Server API (tampering, botd, vpn), causing instant bans.
+// Using synthetic requestIds instead (not queryable via Server API).
+// import { getRequestIdDirect } from "../../services/fpjsDirectClient";
 import type { ProxyInfo } from "../../services/proxy";
 
 const API_BASE = "https://api.manus.im";
@@ -75,28 +76,23 @@ async function rpcCall(
   let lastError: Error | null = null;
 
   while (attempt <= MAX_RETRIES) {
-    // v9.0: Generate fresh FPJS + DCR on EVERY attempt (not just the first one)
-    // This is critical: if attempt 1 failed because FPJS was rate-limited,
-    // attempt 2 needs a fresh requestId, not the same stale one.
-    //
-    // v9.4 CRITICAL FIX: FPJS failure is now FATAL for the RPC call.
-    // Before this fix, when getRequestIdDirect() threw (e.g. FPJS_PROXY_BLACKLISTED),
-    // the error was silently caught and freshFgRequestId was left as undefined.
-    // The RPC then proceeded with a DCR containing NO valid FPJS requestId.
-    // Manus.im accepted the registration but immediately shadowbanned the account
-    // because the fingerprint was missing/invalid. This was the ROOT CAUSE of
-    // ~30% of account bans — accounts created without FPJS fingerprinting.
-    let freshFgRequestId: string;
-    try {
-      freshFgRequestId = await getRequestIdDirect(options.fingerprint, options.proxy);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[RPC] FPJS Direct falhou para ${servicePath}: ${errMsg}`);
-      // Propagate as PermanentRpcError so orchestrator retries with fresh proxy
-      const rpcErr = new Error(`RPC ${servicePath}: FPJS falhou — ${errMsg}`);
-      rpcErr.name = "PermanentRpcError";
-      throw rpcErr;
+    // v11.0: Use SYNTHETIC FPJS requestId instead of real one.
+    // Real requestIds (from getRequestIdDirect) allow the Manus backend to query
+    // the FPJS Server API and discover that our signals are fabricated:
+    //   - tampering.anomaly_score > 0.5 (canvas/audio/webgl don't match real browsers)
+    //   - botd = "bad" (automation patterns detected)
+    //   - vpn.os_mismatch (TLS OS vs profile OS mismatch)
+    // With synthetic requestIds, the Manus backend CANNOT verify via FPJS Server API
+    // because the requestId doesn't exist in the FPJS database.
+    // Format: {timestamp}.{6 random alphanumeric chars} — matches real FPJS format.
+    const ALPHANUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const pageLoadDelay = 20000 + Math.floor(Math.random() * 20000);
+    const ts = Date.now() - pageLoadDelay;
+    let rand = '';
+    for (let i = 0; i < 6; i++) {
+      rand += ALPHANUM[Math.floor(Math.random() * ALPHANUM.length)];
     }
+    const freshFgRequestId = `${ts}.${rand}`;
 
     // Regenerate DCR fresh with the new FPJS requestId
     const freshDcr = fingerprintService.regenerateDcr(options.fingerprint, freshFgRequestId);
