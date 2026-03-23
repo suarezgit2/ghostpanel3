@@ -5,11 +5,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
-import { Plus, Trash2, Zap, Calculator, CheckCircle2, ExternalLink, FolderOpen, Layers } from "lucide-react";
+import { Plus, Trash2, Zap, Calculator, CheckCircle2, ExternalLink, FolderOpen } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Link } from "wouter";
 
 const CREDITS_PER_ACCOUNT = 500;
+const MAX_JOBS_PER_CLIENT = 5;
 
 /** Extract invite code from a full invitation link or return as-is if already a code */
 function extractInviteCode(input: string): string {
@@ -26,7 +27,6 @@ interface Recipient {
   inviteCode: string;
   credits: string;
   label: string;
-  jobCount: string;
 }
 
 function calcAccounts(credits: string): number {
@@ -35,9 +35,26 @@ function calcAccounts(credits: string): number {
   return Math.floor(n / CREDITS_PER_ACCOUNT);
 }
 
+/** Calcula o número de jobs que serão criados automaticamente para um dado total de contas */
+function calcJobCount(totalAccounts: number): number {
+  return Math.min(totalAccounts, MAX_JOBS_PER_CLIENT);
+}
+
+/** Retorna a distribuição de contas por job (ex: [2, 2, 1] para 5 contas em 3 jobs) */
+function calcJobDistribution(totalAccounts: number): number[] {
+  const jobCount = calcJobCount(totalAccounts);
+  if (jobCount === 0) return [];
+  const base = Math.floor(totalAccounts / jobCount);
+  const extra = totalAccounts % jobCount;
+  return Array.from({ length: jobCount }, (_, i) => {
+    const isLastGroup = i >= jobCount - extra;
+    return base + (isLastGroup && extra > 0 ? 1 : 0);
+  });
+}
+
 export default function QuickJob() {
   const [recipients, setRecipients] = useState<Recipient[]>([
-    { id: crypto.randomUUID(), inviteCode: "", credits: "", label: "", jobCount: "1" },
+    { id: crypto.randomUUID(), inviteCode: "", credits: "", label: "" },
   ]);
   const [result, setResult] = useState<{ jobIds: number[]; folderIds: number[]; summary: string } | null>(null);
 
@@ -57,7 +74,7 @@ export default function QuickJob() {
   });
 
   function addRecipient() {
-    setRecipients(prev => [...prev, { id: crypto.randomUUID(), inviteCode: "", credits: "", label: "", jobCount: "1" }]);
+    setRecipients(prev => [...prev, { id: crypto.randomUUID(), inviteCode: "", credits: "", label: "" }]);
   }
 
   function removeRecipient(id: string) {
@@ -84,24 +101,15 @@ export default function QuickJob() {
         inviteCode: extractInviteCode(r.inviteCode),
         credits: parseInt(r.credits),
         label: r.label.trim() || undefined,
-        jobCount: parseInt(r.jobCount) || 1,
       })),
     });
   }
 
-  const totalAccounts = recipients.reduce((sum, r) => {
-    const accounts = calcAccounts(r.credits);
-    const jobCount = parseInt(r.jobCount) || 1;
-    return sum + accounts * jobCount;
-  }, 0);
-  const totalCredits = recipients.reduce((sum, r) => {
-    const credits = parseInt(r.credits) || 0;
-    const jobCount = parseInt(r.jobCount) || 1;
-    return sum + credits * jobCount;
-  }, 0);
+  // Cálculos do resumo — baseados na divisão automática
+  const totalAccounts = recipients.reduce((sum, r) => sum + calcAccounts(r.credits), 0);
+  const totalCredits = recipients.reduce((sum, r) => sum + (parseInt(r.credits) || 0), 0);
+  const totalJobs = recipients.reduce((sum, r) => sum + calcJobCount(calcAccounts(r.credits)), 0);
   const estimatedCost = totalAccounts * 0.0138;
-  const totalJobs = recipients.reduce((sum, r) => sum + (parseInt(r.jobCount) || 1), 0);
-  const hasFolders = recipients.some(r => (parseInt(r.jobCount) || 1) > 1);
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -111,8 +119,8 @@ export default function QuickJob() {
           Job Rápido
         </h1>
         <p className="text-muted-foreground mt-1">
-          Envie créditos para múltiplos destinatários. Cada conta envia {CREDITS_PER_ACCOUNT} créditos.
-          Se criar mais de 1 job por destinatário, uma pasta será criada automaticamente.
+          Envie créditos para múltiplos destinatários. Cada conta consome {CREDITS_PER_ACCOUNT} créditos.
+          Os jobs são divididos automaticamente em até {MAX_JOBS_PER_CLIENT} por cliente.
         </p>
       </div>
 
@@ -155,7 +163,7 @@ export default function QuickJob() {
                   variant="ghost"
                   onClick={() => {
                     setResult(null);
-                    setRecipients([{ id: crypto.randomUUID(), inviteCode: "", credits: "", label: "", jobCount: "1" }]);
+                    setRecipients([{ id: crypto.randomUUID(), inviteCode: "", credits: "", label: "" }]);
                   }}
                 >
                   Novo Job Rápido
@@ -170,15 +178,18 @@ export default function QuickJob() {
             <CardHeader>
               <CardTitle className="text-base">Destinatários</CardTitle>
               <CardDescription>
-                Informe o código de convite, a quantidade de créditos e o número de jobs por destinatário.
-                Se "Nº de Jobs" for maior que 1, uma pasta será criada com o nome do cliente.
+                Informe o código de convite, o nome do cliente e a quantidade de créditos.
+                Os jobs serão divididos automaticamente em até {MAX_JOBS_PER_CLIENT} por cliente.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               <AnimatePresence>
                 {recipients.map((recipient, index) => {
-                  const jobCount = parseInt(recipient.jobCount) || 1;
+                  const accounts = calcAccounts(recipient.credits);
+                  const distribution = calcJobDistribution(accounts);
+                  const jobCount = distribution.length;
                   const isMultiJob = jobCount > 1;
+
                   return (
                     <motion.div
                       key={recipient.id}
@@ -188,7 +199,7 @@ export default function QuickJob() {
                       transition={{ duration: 0.15 }}
                       className={`p-3 rounded-lg border transition-colors ${isMultiJob ? "bg-primary/5 border-primary/30" : "bg-ghost-surface-2 border-border"}`}
                     >
-                      {/* Row 1: Label, Invite Code, Credits, Remove */}
+                      {/* Row: Label, Invite Code, Credits, Remove */}
                       <div className="grid grid-cols-12 gap-3 items-end">
                         {/* Label */}
                         <div className="col-span-3">
@@ -202,7 +213,7 @@ export default function QuickJob() {
                         </div>
 
                         {/* Invite Code */}
-                        <div className="col-span-4">
+                        <div className="col-span-5">
                           {index === 0 && <Label className="text-xs mb-1.5 block text-muted-foreground">Código de convite *</Label>}
                           <Input
                             placeholder="Código ou link"
@@ -214,7 +225,7 @@ export default function QuickJob() {
                         </div>
 
                         {/* Credits */}
-                        <div className="col-span-2">
+                        <div className="col-span-3">
                           {index === 0 && <Label className="text-xs mb-1.5 block text-muted-foreground">Créditos *</Label>}
                           <div className="relative">
                             <Input
@@ -227,32 +238,11 @@ export default function QuickJob() {
                               className="h-9 text-sm pr-10"
                               required
                             />
-                            {calcAccounts(recipient.credits) > 0 && (
+                            {accounts > 0 && (
                               <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-primary font-medium">
-                                {calcAccounts(recipient.credits)}x
+                                {accounts}x
                               </span>
                             )}
-                          </div>
-                        </div>
-
-                        {/* Job Count */}
-                        <div className="col-span-2">
-                          {index === 0 && (
-                            <Label className="text-xs mb-1.5 flex items-center gap-1 text-muted-foreground">
-                              <Layers className="w-3 h-3" />
-                              Nº de Jobs
-                            </Label>
-                          )}
-                          <div className="relative">
-                            <Input
-                              type="number"
-                              placeholder="1"
-                              min={1}
-                              max={20}
-                              value={recipient.jobCount}
-                              onChange={(e) => updateRecipient(recipient.id, "jobCount", e.target.value)}
-                              className={`h-9 text-sm ${isMultiJob ? "border-primary/50 bg-primary/5 font-semibold text-primary" : ""}`}
-                            />
                           </div>
                         </div>
 
@@ -272,13 +262,14 @@ export default function QuickJob() {
                         </div>
                       </div>
 
-                      {/* Multi-job indicator */}
-                      {isMultiJob && (
+                      {/* Divisão automática de jobs */}
+                      {accounts > 0 && (
                         <div className="mt-2 flex items-center gap-1.5 text-xs text-primary">
                           <FolderOpen className="w-3.5 h-3.5" />
                           <span>
-                            Será criada uma pasta "{recipient.label || "Cliente"}" com {jobCount} jobs de {calcAccounts(recipient.credits)} conta{calcAccounts(recipient.credits) !== 1 ? "s" : ""} cada
-                            {calcAccounts(recipient.credits) > 0 && ` (${jobCount * calcAccounts(recipient.credits)} contas no total)`}
+                            {jobCount} job{jobCount !== 1 ? "s" : ""} automático{jobCount !== 1 ? "s" : ""}
+                            {" "}[{distribution.join(", ")} conta{accounts !== 1 ? "s" : ""}]
+                            {" "}→ pasta "{recipient.label || "Cliente"}"
                           </span>
                         </div>
                       )}
@@ -330,12 +321,10 @@ export default function QuickJob() {
                       <p className="text-xs text-muted-foreground">Custo estimado</p>
                     </div>
                   </div>
-                  {hasFolders && (
-                    <div className="mt-3 pt-3 border-t border-border flex items-center justify-center gap-1.5 text-xs text-primary">
-                      <FolderOpen className="w-3.5 h-3.5" />
-                      <span>Pastas serão criadas para destinatários com mais de 1 job</span>
-                    </div>
-                  )}
+                  <div className="mt-3 pt-3 border-t border-border flex items-center justify-center gap-1.5 text-xs text-primary">
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    <span>Cada cliente recebe uma pasta com até {MAX_JOBS_PER_CLIENT} jobs em sequência</span>
+                  </div>
                   <div className="mt-2 pt-2 border-t border-border">
                     <p className="text-xs text-muted-foreground text-center">
                       {totalCredits.toLocaleString()} créditos totais · {totalAccounts} contas × $0.0138/conta
