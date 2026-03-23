@@ -706,6 +706,30 @@ class Orchestrator {
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);
+
+        // INVITE_INVALID_CODE: código inválido/expirado — abortar o job inteiro
+        if (msg.startsWith("INVITE_INVALID_CODE:")) {
+          await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId));
+          await db.update(jobs).set({ failedAccounts: sql`${jobs.failedAccounts} + 1` }).where(eq(jobs.id, jobId));
+          await logger.error("orchestrator", `Job ${jobId} abortado: ${msg}`, { email }, jobId);
+          if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+          break; // Sai do loop — job será finalizado como failed
+        }
+
+        // INVITE_NOT_CONFIRMED: conta recebeu créditos insuficientes — descarta e retenta
+        // Não incrementa failedAccounts nem consecutiveFailures (não é falha de infra)
+        if (msg.startsWith("INVITE_NOT_CONFIRMED:")) {
+          await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId));
+          await logger.warn("orchestrator",
+            `Tentativa ${totalAttempts}: conta descartada (${msg}). Retentando com nova conta. ` +
+            `(sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
+            { email }, jobId
+          );
+          if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+          // Não incrementa consecutiveFailures — é falha do convite, não de infra
+          continue;
+        }
+
         await db.update(accounts).set({
           status: "failed",
           metadata: { error: msg },
@@ -739,22 +763,12 @@ class Orchestrator {
 
     const fj = finalJob[0];
 
-    let finalStatus: "completed" | "partial" | "failed";
+    let finalStatus: "completed" | "failed";
     if (fj && fj.completed >= fj.total) {
-      // Todas as contas foram criadas — mas verifica se o convite foi confirmado em todas
-      if (jobInviteCode && inviteConfirmedCount < successCount) {
-        finalStatus = "partial";
-        await logger.warn("orchestrator",
-          `Job ${jobId}: contas criadas mas convite não confirmado em todas ` +
-          `(${inviteConfirmedCount}/${successCount} com convite confirmado). Status: partial`,
-          {}, jobId
-        );
-      } else {
-        finalStatus = "completed";
-      }
+      finalStatus = "completed";
     } else if (totalAttempts >= maxAttempts && successCount < options.quantity) {
       // Atingiu o limite de tentativas sem completar a meta
-      finalStatus = successCount > 0 ? "partial" : "failed";
+      finalStatus = successCount > 0 ? "completed" : "failed";
       await logger.warn("orchestrator",
         `Job ${jobId} atingiu o limite de ${maxAttempts} tentativas. ` +
         `Conseguiu ${successCount}/${options.quantity} contas.`,

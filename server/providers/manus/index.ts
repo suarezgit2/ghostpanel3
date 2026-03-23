@@ -688,25 +688,30 @@ export class ManusProvider {
             lastInviteError?.includes("invalid invitation code");
 
           if (isInvalidCode) {
+            // Permanent failure — invalid/expired code, abort the whole job
             await logger.error("step_8_invite", `Código de convite INVÁLIDO: "${inviteCode.trim()}" — verifique se o código está correto e não expirou`, {
               email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
             }, jobId);
+            throw new Error(`INVITE_INVALID_CODE: "${inviteCode.trim()}"`);
           } else {
-            await logger.warn("step_8_invite", `Convite não confirmado após ${MAX_INVITE_RETRIES} tentativas. freeCredits=${inviteFreeCredits}`, {
-              email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits,
-            }, jobId);
+            // Temporary failure — conta recebeu créditos insuficientes (ex: 300 ao invés de 1500+).
+            // Descarta esta conta e sinaliza ao orchestrator para retentar com uma nova.
+            await logger.warn("step_8_invite",
+              `Conta descartada: convite não confirmado após ${MAX_INVITE_RETRIES} tentativas. ` +
+              `freeCredits=${inviteFreeCredits} (esperado >= 1500). Retentando com nova conta.`,
+              { email, inviteCode: inviteCode.trim(), freeCredits: inviteFreeCredits }, jobId);
+            throw new Error(`INVITE_NOT_CONFIRMED: freeCredits=${inviteFreeCredits}`);
           }
         }
       }
 
-      // SUCCESS — account was created and phone verified.
-      // inviteAccepted=false means invite failed but account is still usable.
+      // SUCCESS — account was created, phone verified and invite confirmed.
       return {
         email,
         password,
         token: jwtToken,
         status: "active",
-        inviteAccepted,
+        inviteAccepted: true,
         metadata: {
           userId: registerResult.userId,
           phoneNumber: smsResult.phoneNumber,
@@ -725,6 +730,13 @@ export class ManusProvider {
       // Re-throw AbortError so orchestrator handles it as cancellation, not as a failed account
       if (err instanceof DOMException && err.name === "AbortError") throw err;
       const errorMsg = err instanceof Error ? err.message : String(err);
+
+      // Re-throw invite errors so orchestrator can handle them specifically:
+      // - INVITE_NOT_CONFIRMED: discard account and retry with a new one
+      // - INVITE_INVALID_CODE: abort the entire job
+      if (errorMsg.startsWith("INVITE_NOT_CONFIRMED:") || errorMsg.startsWith("INVITE_INVALID_CODE:")) {
+        throw err;
+      }
 
       // v9.3: Classify the failure for better diagnostics
       const isBanned = err instanceof AccountBannedError;
