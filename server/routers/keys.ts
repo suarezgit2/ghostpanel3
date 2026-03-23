@@ -9,6 +9,7 @@ import { getDb } from "../db";
 import { keys } from "../../drizzle/schema";
 import crypto from "crypto";
 import { extractInviteCode } from "../utils/helpers";
+import { getSetting, setSetting } from "../utils/settings";
 
 function generateKeyCode(): string {
   // Format: GHOST-XXXX-XXXX-XXXX (uppercase alphanumeric, no ambiguous chars)
@@ -164,6 +165,14 @@ export const keysRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Serviço indisponível");
+
+      // ── MODO MANUTENÇÃO: bloquear novos resgates enquanto ativo ──
+      const maintenance = await getSetting("maintenance_mode");
+      if (maintenance === "true") {
+        throw new Error(
+          "Sistema em manutenção. Novos resgates estão temporariamente suspensos. Tente novamente em alguns minutos."
+        );
+      }
 
       const normalizedCode = input.code.toUpperCase().trim();
       const now = new Date();

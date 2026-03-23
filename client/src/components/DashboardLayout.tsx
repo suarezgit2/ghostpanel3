@@ -24,10 +24,14 @@ import {
   LogOut,
   Menu,
   X,
+  PauseCircle,
+  PlayCircle,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
 
 const NAV_ITEMS = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -60,6 +64,82 @@ export default function DashboardLayout({ children, onLogout }: DashboardLayoutP
   const [location] = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // ── Modo Manutenção ──
+  const { data: maintenanceData, refetch: refetchMaintenance } =
+    trpc.settings.getMaintenanceStatus.useQuery(undefined, {
+      refetchInterval: 30_000,
+    });
+  const maintenanceEnabled = maintenanceData?.enabled ?? false;
+
+  const toggleMaintenance = trpc.settings.toggleMaintenance.useMutation({
+    onSuccess: (data) => {
+      refetchMaintenance();
+      if (data.enabled) {
+        toast.warning("Modo Manutenção ativado — novos resgates de keys estão suspensos.");
+      } else {
+        toast.success("Modo Manutenção desativado — resgates de keys retomados.");
+      }
+    },
+    onError: (err) => {
+      toast.error(`Erro ao alterar modo manutenção: ${err.message}`);
+    },
+  });
+
+  const handleToggleMaintenance = () => {
+    toggleMaintenance.mutate({ enabled: !maintenanceEnabled });
+  };
+
+  // Botão de manutenção para sidebar expandido
+  const MaintenanceButtonFull = () => (
+    <button
+      onClick={handleToggleMaintenance}
+      disabled={toggleMaintenance.isPending}
+      className={cn(
+        "flex items-center gap-3 w-full px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+        maintenanceEnabled
+          ? "bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
+          : "text-muted-foreground hover:text-foreground hover:bg-ghost-surface-2"
+      )}
+    >
+      {maintenanceEnabled ? (
+        <PlayCircle className="w-[18px] h-[18px] shrink-0 text-amber-400" />
+      ) : (
+        <PauseCircle className="w-[18px] h-[18px] shrink-0" />
+      )}
+      <span>{maintenanceEnabled ? "Retomar Resgates" : "Suspender Resgates"}</span>
+      {maintenanceEnabled && (
+        <span className="ml-auto text-[10px] font-bold tracking-wider text-amber-400 uppercase">ON</span>
+      )}
+    </button>
+  );
+
+  // Botão de manutenção para sidebar colapsado
+  const MaintenanceButtonCollapsed = () => (
+    <Tooltip delayDuration={0}>
+      <TooltipTrigger asChild>
+        <button
+          onClick={handleToggleMaintenance}
+          disabled={toggleMaintenance.isPending}
+          className={cn(
+            "flex items-center justify-center w-full py-2 rounded-lg transition-colors",
+            maintenanceEnabled
+              ? "text-amber-400 bg-amber-500/15 hover:bg-amber-500/25"
+              : "text-muted-foreground hover:text-foreground hover:bg-ghost-surface-2"
+          )}
+        >
+          {maintenanceEnabled ? (
+            <PlayCircle className="w-4 h-4" />
+          ) : (
+            <PauseCircle className="w-4 h-4" />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right">
+        {maintenanceEnabled ? "Retomar Resgates" : "Suspender Resgates"}
+      </TooltipContent>
+    </Tooltip>
+  );
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -140,8 +220,12 @@ export default function DashboardLayout({ children, onLogout }: DashboardLayoutP
           })}
         </nav>
 
-        {/* Bottom: Logout + Collapse */}
+        {/* Bottom: Maintenance + Logout + Collapse */}
         <div className="p-3 border-t border-border space-y-1">
+          {/* Modo Manutenção */}
+          {collapsed ? <MaintenanceButtonCollapsed /> : <MaintenanceButtonFull />}
+
+          {/* Logout */}
           {onLogout && (
             collapsed ? (
               <Tooltip delayDuration={0}>
@@ -165,6 +249,8 @@ export default function DashboardLayout({ children, onLogout }: DashboardLayoutP
               </button>
             )
           )}
+
+          {/* Collapse toggle */}
           <button
             onClick={() => setCollapsed(!collapsed)}
             className="flex items-center justify-center w-full py-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-ghost-surface-2 transition-colors"
@@ -241,9 +327,31 @@ export default function DashboardLayout({ children, onLogout }: DashboardLayoutP
                 })}
               </nav>
 
-              {/* Drawer footer */}
-              {onLogout && (
-                <div className="p-3 border-t border-border">
+              {/* Drawer footer: Manutenção + Logout */}
+              <div className="p-3 border-t border-border space-y-1">
+                {/* Modo Manutenção no drawer */}
+                <button
+                  onClick={() => { handleToggleMaintenance(); setMobileMenuOpen(false); }}
+                  disabled={toggleMaintenance.isPending}
+                  className={cn(
+                    "flex items-center gap-3 w-full px-3 py-3 rounded-lg text-sm font-medium transition-all duration-200",
+                    maintenanceEnabled
+                      ? "bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
+                      : "text-muted-foreground hover:text-foreground hover:bg-ghost-surface-2"
+                  )}
+                >
+                  {maintenanceEnabled ? (
+                    <PlayCircle className="w-5 h-5 shrink-0 text-amber-400" />
+                  ) : (
+                    <PauseCircle className="w-5 h-5 shrink-0" />
+                  )}
+                  <span>{maintenanceEnabled ? "Retomar Resgates" : "Suspender Resgates"}</span>
+                  {maintenanceEnabled && (
+                    <span className="ml-auto text-[10px] font-bold tracking-wider text-amber-400 uppercase">ON</span>
+                  )}
+                </button>
+
+                {onLogout && (
                   <button
                     onClick={() => { onLogout(); setMobileMenuOpen(false); }}
                     className="flex items-center gap-3 w-full px-3 py-3 rounded-lg text-sm font-medium text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
@@ -251,8 +359,8 @@ export default function DashboardLayout({ children, onLogout }: DashboardLayoutP
                     <LogOut className="w-5 h-5 shrink-0" />
                     <span>Sair</span>
                   </button>
-                </div>
-              )}
+                )}
+              </div>
             </motion.div>
           </>
         )}
@@ -271,6 +379,12 @@ export default function DashboardLayout({ children, onLogout }: DashboardLayoutP
           <div className="flex items-center gap-2">
             <Ghost className="w-5 h-5 text-primary" />
             <span className="text-sm font-bold text-foreground">Ghost Panel</span>
+            {/* Indicador de manutenção no header mobile */}
+            {maintenanceEnabled && (
+              <span className="text-[10px] font-bold tracking-wider text-amber-400 uppercase bg-amber-500/15 px-1.5 py-0.5 rounded">
+                MANUTENÇÃO
+              </span>
+            )}
           </div>
           <div className="w-9" /> {/* spacer */}
         </header>
@@ -313,10 +427,13 @@ export default function DashboardLayout({ children, onLogout }: DashboardLayoutP
           {/* More button */}
           <button
             onClick={() => setMobileMenuOpen(true)}
-            className="flex-1 flex flex-col items-center justify-center py-2 gap-1 text-[10px] font-medium text-muted-foreground"
+            className={cn(
+              "flex-1 flex flex-col items-center justify-center py-2 gap-1 text-[10px] font-medium",
+              maintenanceEnabled ? "text-amber-400" : "text-muted-foreground"
+            )}
           >
             <Menu className="w-5 h-5" />
-            <span>Mais</span>
+            <span>{maintenanceEnabled ? "MANUTENÇÃO" : "Mais"}</span>
           </button>
         </nav>
       </div>

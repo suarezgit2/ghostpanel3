@@ -420,4 +420,31 @@ export const settingsRouter = router({
       return { success: false, message: `FPJS Direct falhou: ${err instanceof Error ? err.message : String(err)}` };
     }
   }),
+
+  // ============================================================
+  // Modo Manutenção — suspende novos resgates de keys
+  // ============================================================
+
+  /**
+   * Retorna o status atual do Modo Manutenção
+   */
+  getMaintenanceStatus: protectedProcedure.query(async () => {
+    const { getSetting } = await import("../utils/settings");
+    const value = await getSetting("maintenance_mode");
+    return { enabled: value === "true" };
+  }),
+
+  /**
+   * Ativa ou desativa o Modo Manutenção (suspende/retoma resgates de keys)
+   */
+  toggleMaintenance: protectedProcedure
+    .input(z.object({ enabled: z.boolean() }))
+    .mutation(async ({ input }) => {
+      await setSetting(
+        "maintenance_mode",
+        input.enabled ? "true" : "false",
+        "Modo Manutenção: suspende novos resgates de keys quando ativo"
+      );
+      return { enabled: input.enabled };
+    }),
 });
