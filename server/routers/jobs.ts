@@ -85,7 +85,8 @@ export const jobsRouter = router({
         inviteCode: z.string().min(1, "Código de convite obrigatório"),
         credits: z.number().min(500, "Mínimo 500 créditos").max(500000),
         label: z.string().optional(),
-        jobCount: z.number().min(1).max(20).optional().default(1),
+        // jobCount ignorado: a divisão é calculada automaticamente (máx 5 jobs por cliente)
+        jobCount: z.number().min(1).max(20).optional(),
       })).min(1).max(50),
     }))
     .mutation(async ({ input }) => {

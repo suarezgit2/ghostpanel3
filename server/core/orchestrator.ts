@@ -441,75 +441,63 @@ class Orchestrator {
   }
 
   /**
-   * Cria múltiplos jobs em paralelo para o Job Rápido (envio de créditos).
-   * Cada destinatário recebe um ou mais jobs com seu próprio invite code.
-   * Créditos / 500 = número de contas por job.
-   * Se jobCount > 1, cria uma pasta com o nome do cliente e os jobs dentro dela.
+   * v10.2: Cria jobs para múltiplos destinatários via Job Rápido.
+   *
+   * Aplica a mesma lógica inteligente do resgate de keys:
+   *   - Cada cliente recebe até 5 jobs (divisão automática dos créditos)
+   *   - Jobs rodam em sequência com stagger de 30s (via createClientJobs)
+   *   - Fila de clientes: máx 3 simultâneos (ClientQueueLimiter)
+   *   - Sempre cria pasta para agrupar os jobs do cliente
+   *
+   * O campo `jobCount` do input é ignorado — a divisão é calculada
+   * automaticamente a partir dos créditos.
+   *
+   * Tabela de divisão (CREDITS_PER_ACCOUNT = 500, MAX_JOBS = 5):
+   *   500cr   → 1 job  × 1 conta
+   *   1000cr  → 2 jobs × 1 conta
+   *   2500cr  → 5 jobs × 1 conta
+   *   5000cr  → 5 jobs × 2 contas
+   *   7500cr  → 5 jobs × 3 contas
+   *   10000cr → 5 jobs × 4 contas
    */
   async createQuickJobs(recipients: QuickJobRecipient[]): Promise<{ jobIds: number[]; folderIds: number[]; summary: string }> {
     const CREDITS_PER_ACCOUNT = 500;
+    const MAX_JOBS_PER_CLIENT = 5;
+
     const allJobIds: number[] = [];
     const allFolderIds: number[] = [];
     const summaryLines: string[] = [];
 
     for (const recipient of recipients) {
-      const quantity = Math.max(1, Math.floor(recipient.credits / CREDITS_PER_ACCOUNT));
-      const jobCount = Math.max(1, recipient.jobCount || 1);
-      const clientName = recipient.label || `${recipient.inviteCode.substring(0, 10)}...`;
+      const totalAccounts = Math.max(1, Math.floor(recipient.credits / CREDITS_PER_ACCOUNT));
+      const jobCount = Math.min(totalAccounts, MAX_JOBS_PER_CLIENT);
+      const clientName = recipient.label || recipient.inviteCode.substring(0, 12);
 
-      if (jobCount > 1) {
-        // Criar pasta para agrupar os jobs deste cliente
-        const db = await getDb();
-        if (!db) throw new Error("Database não disponível");
+      // Distribui as contas uniformemente entre os jobs.
+      // Os últimos `extraAccounts` jobs recebem 1 conta a mais.
+      const baseAccountsPerJob = Math.floor(totalAccounts / jobCount);
+      const extraAccounts = totalAccounts % jobCount;
+      const jobQuantities: number[] = Array.from({ length: jobCount }, (_, i) => {
+        const isLastGroup = i >= jobCount - extraAccounts;
+        return baseAccountsPerJob + (isLastGroup && extraAccounts > 0 ? 1 : 0);
+      });
 
-        const folderResult = await db.insert(jobFolders).values({
-          clientName,
-          inviteCode: recipient.inviteCode,
-          totalJobs: jobCount,
-        });
+      const { folderId, jobIds } = await this.createClientJobs({
+        provider: "manus",
+        inviteCode: recipient.inviteCode,
+        clientName,
+        keyCode: "QuickJob",
+        jobQuantities,
+      });
 
-        const folderId = folderResult[0].insertId;
-        allFolderIds.push(folderId);
+      allFolderIds.push(folderId);
+      allJobIds.push(...jobIds);
 
-        const instanceJobIds: number[] = [];
-        // v9.0: Increased stagger from 15s to 30s to avoid FPJS rate limiting.
-        // With 10 jobs, the old 15s stagger meant all jobs were active within 2.5min,
-        // causing cascading 429s. 30s gives FPJS more breathing room.
-        const STAGGER_DELAY_MS = 30_000; // 30s between each job start
-        for (let i = 0; i < jobCount; i++) {
-          if (i > 0) {
-            await logger.info("orchestrator", `Aguardando ${STAGGER_DELAY_MS / 1000}s antes de iniciar instância ${i + 1}/${jobCount}...`);
-            await sleep(STAGGER_DELAY_MS);
-          }
-          const label = `${clientName} — Instância ${i + 1}/${jobCount}`;
-          const jobId = await this.createJob({
-            provider: "manus",
-            quantity,
-            inviteCode: recipient.inviteCode,
-            label,
-            folderId,
-          });
-          instanceJobIds.push(jobId);
-          allJobIds.push(jobId);
-        }
-
-        summaryLines.push(
-          `📁 Pasta "${clientName}" (ID: ${folderId}): ${jobCount} jobs × ${quantity} contas = ${jobCount * quantity} contas totais\n` +
-          `   Jobs: ${instanceJobIds.map(id => `#${id}`).join(", ")}`
-        );
-      } else {
-        // Job único — comportamento anterior
-        const label = recipient.label || `${recipient.credits} créditos → ${recipient.inviteCode.substring(0, 10)}...`;
-        const jobId = await this.createJob({
-          provider: "manus",
-          quantity,
-          inviteCode: recipient.inviteCode,
-          label,
-        });
-
-        allJobIds.push(jobId);
-        summaryLines.push(`Job #${jobId}: ${quantity} contas para "${label}" (${recipient.credits} créditos)`);
-      }
+      summaryLines.push(
+        `📁 Pasta "${clientName}" (ID: ${folderId}): ` +
+        `${jobCount} job(s) × [${jobQuantities.join(", ")}] contas = ${totalAccounts} total\n` +
+        `   Jobs: ${jobIds.map(id => `#${id}`).join(", ")}`
+      );
     }
 
     return {
