@@ -221,23 +221,62 @@ export const keysRouter = router({
         throw new Error("Chave já foi resgatada");
       }
 
-      // ── ETAPA 3: Criar o job de entrega ──
+      // ── ETAPA 3: Criar os jobs de entrega com divisão inteligente ──
+      //
+      // Regras:
+      //   - Cada job entrega exatamente 1 conta (500 créditos)
+      //   - Máximo de 5 jobs por cliente
+      //   - Os créditos são distribuídos igualmente entre os jobs
+      //   - Se sobrar créditos (resto da divisão), o último job recebe a conta extra
+      //   - Sempre cria uma pasta para agrupar os jobs do cliente
+      //   - Exemplos:
+      //       500 cr  → 1 job  × 1 conta  (pasta com 1 job)
+      //       1000 cr → 2 jobs × 1 conta  (pasta com 2 jobs)
+      //       2500 cr → 5 jobs × 1 conta  (pasta com 5 jobs)
+      //       5000 cr → 5 jobs × 2 contas (pasta com 5 jobs)
+      //       7500 cr → 5 jobs × 3 contas (pasta com 5 jobs)
+      //
       const { orchestrator } = await import("../core/orchestrator");
+
       const CREDITS_PER_ACCOUNT = 500;
-      const quantity = Math.max(1, Math.floor(key.credits / CREDITS_PER_ACCOUNT));
+      const MAX_JOBS_PER_CLIENT = 5;
+
+      const totalAccounts = Math.max(1, Math.floor(key.credits / CREDITS_PER_ACCOUNT));
+
+      // Calcula o número de jobs: mínimo 1, máximo MAX_JOBS_PER_CLIENT
+      const jobCount = Math.min(totalAccounts, MAX_JOBS_PER_CLIENT);
+
+      // Distribui as contas entre os jobs
+      // base = contas por job (arredondado para baixo)
+      // extra = contas que sobram (distribuídas nos últimos jobs)
+      const baseAccountsPerJob = Math.floor(totalAccounts / jobCount);
+      const extraAccounts = totalAccounts % jobCount;
+
+      // Monta o array de quantidades por job
+      // Os últimos `extraAccounts` jobs recebem 1 conta a mais
+      const jobQuantities: number[] = Array.from({ length: jobCount }, (_, i) => {
+        const isLastGroup = i >= jobCount - extraAccounts;
+        return baseAccountsPerJob + (isLastGroup && extraAccounts > 0 ? 1 : 0);
+      });
 
       const cleanInviteCode = extractInviteCode(input.inviteCode);
+      const clientName = input.name
+        ? `${input.name} (${cleanInviteCode})`
+        : cleanInviteCode;
 
-      await orchestrator.createJob({
+      await orchestrator.createClientJobs({
         provider: "manus",
-        quantity,
         inviteCode: cleanInviteCode,
-        label: `Key ${key.code} → ${cleanInviteCode}`,
+        clientName,
+        keyCode: key.code,
+        jobQuantities,
       });
 
       return {
         success: true,
         credits: key.credits,
+        jobCount,
+        totalAccounts,
       };
     }),
 });

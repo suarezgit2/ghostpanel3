@@ -76,62 +76,92 @@ export interface QuickJobRecipient {
   jobCount?: number;
 }
 
+/**
+ * Opções para criação de jobs via resgate de key.
+ * Cada cliente recebe uma pasta com N jobs, onde N é determinado pela
+ * divisão inteligente dos créditos (máx 5 jobs por cliente).
+ */
+export interface CreateClientJobsOptions {
+  /** Provider a usar (ex: "manus") */
+  provider: string;
+  /** Invite code do cliente */
+  inviteCode: string;
+  /** Nome do cliente para a pasta (ex: "João (P3MUJV1Q)") */
+  clientName: string;
+  /** Código da key resgatada (para label) */
+  keyCode: string;
+  /** Array com a quantidade de contas de cada job (ex: [2, 2, 1] para 5 créditos) */
+  jobQuantities: number[];
+}
+
 // ============================================================
-// GLOBAL CONCURRENCY LIMITER (v10.1)
+// CLIENT QUEUE LIMITER (v10.2)
 // ============================================================
 //
-// Limita o número máximo de jobs rodando SIMULTANEAMENTE em todo o sistema.
-// Isso evita que um burst de resgates de keys (ex: 10 resgates em 1 segundo)
-// crie 10 jobs ao mesmo tempo, esgotando proxies e saldo de SMS de uma vez.
+// Controla a concorrência em dois níveis:
 //
-// O limite é configurado via setting "max_concurrent_jobs" (padrão: 3).
-// Quando o limite é atingido, novos jobs aguardam em fila (FIFO).
-// Cada job libera um slot ao finalizar (sucesso, falha ou cancelamento).
+//   1. Nível CLIENTE: máximo de MAX_CONCURRENT_CLIENTS clientes sendo
+//      processados simultaneamente (padrão: 3). Um "cliente" é o conjunto
+//      de jobs criados por um único resgate de key. Quando o limite é
+//      atingido, novos clientes aguardam em fila FIFO.
+//
+//   2. Nível JOB: dentro de um cliente, os jobs rodam em sequência (um
+//      por vez), com stagger de 30s entre eles. Isso evita que 5 jobs do
+//      mesmo cliente compitam pelos mesmos recursos ao mesmo tempo.
+//
+// Configuração via settings do banco:
+//   max_concurrent_clients: número máximo de clientes simultâneos (padrão: 3)
+//
+// Exemplo de fluxo com 5 clientes:
+//   Clientes 1, 2, 3 → iniciam imediatamente
+//   Clientes 4, 5   → aguardam na fila
+//   Quando cliente 1 termina todos os seus jobs → cliente 4 inicia
+//   Quando cliente 2 termina → cliente 5 inicia
 
-const DEFAULT_MAX_CONCURRENT_JOBS = 3;
+const DEFAULT_MAX_CONCURRENT_CLIENTS = 3;
+const DEFAULT_MAX_CONCURRENT_JOBS = 3; // Mantido para compatibilidade com getLimiterStatus
 
-class GlobalJobLimiter {
-  private activeCount = 0;
+class ClientQueueLimiter {
+  private activeClients = 0;
   private queue: Array<() => void> = [];
-  private maxConcurrent = DEFAULT_MAX_CONCURRENT_JOBS;
+  private maxClients = DEFAULT_MAX_CONCURRENT_CLIENTS;
 
   setMax(max: number): void {
-    this.maxConcurrent = Math.max(1, max);
+    this.maxClients = Math.max(1, max);
   }
 
-  getMax(): number { return this.maxConcurrent; }
-  getActive(): number { return this.activeCount; }
+  getMax(): number { return this.maxClients; }
+  getActive(): number { return this.activeClients; }
   getQueued(): number { return this.queue.length; }
 
   /**
-   * Aguarda um slot livre e o reserva.
-   * Retorna uma função `release` que deve ser chamada quando o job terminar.
+   * Aguarda um slot de cliente livre e o reserva.
+   * Retorna uma função `release` que deve ser chamada quando TODOS os
+   * jobs do cliente terminarem.
    */
-  async acquire(jobId: number): Promise<() => void> {
+  async acquire(clientName: string): Promise<() => void> {
     return new Promise((resolve) => {
       const tryAcquire = () => {
-        if (this.activeCount < this.maxConcurrent) {
-          this.activeCount++;
+        if (this.activeClients < this.maxClients) {
+          this.activeClients++;
           console.log(
-            `[GlobalJobLimiter] Job ${jobId} iniciou. Ativos: ${this.activeCount}/${this.maxConcurrent}, ` +
-            `Na fila: ${this.queue.length}`
+            `[ClientQueue] Cliente "${clientName}" iniciou. ` +
+            `Ativos: ${this.activeClients}/${this.maxClients}, Na fila: ${this.queue.length}`
           );
           const release = () => {
-            this.activeCount = Math.max(0, this.activeCount - 1);
+            this.activeClients = Math.max(0, this.activeClients - 1);
             console.log(
-              `[GlobalJobLimiter] Job ${jobId} liberou slot. Ativos: ${this.activeCount}/${this.maxConcurrent}, ` +
-              `Na fila: ${this.queue.length}`
+              `[ClientQueue] Cliente "${clientName}" concluíd. ` +
+              `Ativos: ${this.activeClients}/${this.maxClients}, Na fila: ${this.queue.length}`
             );
-            // Acorda o próximo job na fila
             const next = this.queue.shift();
             if (next) next();
           };
           resolve(release);
         } else {
-          // Sem slot livre — enfileira
           console.log(
-            `[GlobalJobLimiter] Job ${jobId} aguardando slot. Ativos: ${this.activeCount}/${this.maxConcurrent}, ` +
-            `Na fila: ${this.queue.length + 1}`
+            `[ClientQueue] Cliente "${clientName}" aguardando slot. ` +
+            `Ativos: ${this.activeClients}/${this.maxClients}, Na fila: ${this.queue.length + 1}`
           );
           this.queue.push(tryAcquire);
         }
@@ -141,7 +171,14 @@ class GlobalJobLimiter {
   }
 }
 
-const globalJobLimiter = new GlobalJobLimiter();
+const clientQueueLimiter = new ClientQueueLimiter();
+
+// Alias para compatibilidade com getLimiterStatus
+const globalJobLimiter = {
+  getActive: () => clientQueueLimiter.getActive(),
+  getQueued: () => clientQueueLimiter.getQueued(),
+  getMax: () => clientQueueLimiter.getMax(),
+};
 
 class Orchestrator {
   /** Maps jobId -> AbortController for immediate cancellation signaling */
@@ -158,17 +195,12 @@ class Orchestrator {
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
 
-    // v10.1: Atualiza o limite de concorrência global a partir da setting do banco.
-    const maxConcurrentRaw = await getSetting("max_concurrent_jobs");
-    const maxConcurrent = parseInt(maxConcurrentRaw || "") || DEFAULT_MAX_CONCURRENT_JOBS;
-    globalJobLimiter.setMax(maxConcurrent);
-
     // Find provider in DB
     const providerRows = await db.select().from(providers).where(eq(providers.slug, providerSlug)).limit(1);
     if (providerRows.length === 0) throw new Error(`Provider '${providerSlug}' não encontrado no banco`);
     const providerId = providerRows[0].id;
 
-    // Create job
+    // Create job record
     const result = await db.insert(jobs).values({
       providerId,
       status: "running",
@@ -196,54 +228,216 @@ class Orchestrator {
     const abortController = new AbortController();
     this.activeJobs.set(jobId, abortController);
 
-    // v10.1: Controle de concorrência global.
-    // O job aguarda um slot livre antes de iniciar o trabalho real.
-    // Isso evita que bursts de resgates de keys criem dezenas de jobs simultâneos.
-    const _runWithLimiter = async () => {
-      const releaseSlot = await globalJobLimiter.acquire(jobId);
-      try {
-        // Verifica se o job ainda está válido (pode ter sido cancelado enquanto aguardava na fila)
-        const currentJob = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
-        const currentStatus = currentJob[0]?.status;
-        if (!currentStatus || currentStatus === "cancelled") {
-          await logger.info("orchestrator",
-            `Job ${jobId} cancelado enquanto aguardava slot de concorrência. Ignorando.`,
-            {}, jobId
-          );
-          return;
-        }
-        if (globalJobLimiter.getQueued() > 0 || globalJobLimiter.getActive() > 1) {
-          await logger.info("orchestrator",
-            `Job ${jobId} iniciando execução (ativos: ${globalJobLimiter.getActive()}/${globalJobLimiter.getMax()}, ` +
-            `na fila: ${globalJobLimiter.getQueued()})`,
-            {}, jobId
-          );
-        }
-        await this.executeJob(jobId, provider, providerId, options, abortController.signal);
-      } finally {
-        releaseSlot();
-      }
+    this._runJob(jobId, provider, providerId, options, abortController);
+
+    return jobId;
+  }
+
+  /**
+   * Executa um job em background (sem aguardar na fila de clientes).
+   * Usado internamente pelo createJob e pelo createClientJobs.
+   * O controle de concorrência por cliente é feito no createClientJobs.
+   */
+  private _runJob(
+    jobId: number,
+    provider: ProviderInstance,
+    providerId: number,
+    options: CreateJobOptions,
+    abortController: AbortController
+  ): void {
+    const run = async () => {
+      await this.executeJob(jobId, provider, providerId, options, abortController.signal);
     };
 
-    _runWithLimiter().catch(async (err) => {
-      if (err instanceof Error && err.name === "AbortError") {
-        // Job was aborted — status already set by cancelJob/deleteJob
-        return;
-      }
+    run().catch(async (err) => {
+      if (err instanceof Error && err.name === "AbortError") return;
       await logger.error("orchestrator", `Job ${jobId} falhou: ${err}`, {}, jobId);
       const db2 = await getDb();
       if (db2) await db2.update(jobs).set({ status: "failed" }).where(eq(jobs.id, jobId));
     }).finally(async () => {
       this.activeJobs.delete(jobId);
-      // v10.0: Safety net — release any remaining tracked proxies for this job.
       try {
         await proxyService.releaseAllForJob(jobId);
       } catch (err) {
         console.warn(`[Orchestrator] Erro ao liberar proxies residuais do job ${jobId}:`, err);
       }
     });
+  }
 
-    return jobId;
+  /**
+   * v10.2: Cria jobs para um cliente via resgate de key.
+   *
+   * Fluxo:
+   *   1. Aguarda um slot de cliente livre (máx MAX_CONCURRENT_CLIENTS simultâneos)
+   *   2. Cria a pasta do cliente no banco
+   *   3. Cria e executa os jobs em SEQUÊNCIA com stagger de 30s entre eles
+   *   4. Libera o slot do cliente quando todos os jobs terminarem
+   *
+   * Os jobs rodam em sequência (não em paralelo) para evitar que 5 jobs do
+   * mesmo cliente compitam pelos mesmos proxies e saldo de SMS ao mesmo tempo.
+   */
+  async createClientJobs(options: CreateClientJobsOptions): Promise<{ folderId: number; jobIds: number[] }> {
+    const { provider: providerSlug, inviteCode, clientName, keyCode, jobQuantities } = options;
+
+    const provider = PROVIDERS[providerSlug];
+    if (!provider) throw new Error(`Provider '${providerSlug}' não encontrado`);
+
+    const db = await getDb();
+    if (!db) throw new Error("Database não disponível");
+
+    // Atualiza o limite de clientes simultâneos a partir da setting do banco
+    const maxClientsRaw = await getSetting("max_concurrent_clients");
+    const maxClients = parseInt(maxClientsRaw || "") || DEFAULT_MAX_CONCURRENT_CLIENTS;
+    clientQueueLimiter.setMax(maxClients);
+
+    // Find provider in DB
+    const providerRows = await db.select().from(providers).where(eq(providers.slug, providerSlug)).limit(1);
+    if (providerRows.length === 0) throw new Error(`Provider '${providerSlug}' não encontrado no banco`);
+    const providerId = providerRows[0].id;
+
+    const jobCount = jobQuantities.length;
+    const totalAccounts = jobQuantities.reduce((a, b) => a + b, 0);
+
+    await logger.info("orchestrator",
+      `Cliente "${clientName}" (Key ${keyCode}): ${jobCount} job(s), ${totalAccounts} conta(s) total. ` +
+      `Fila: ${clientQueueLimiter.getQueued()} aguardando, ${clientQueueLimiter.getActive()}/${clientQueueLimiter.getMax()} ativos.`
+    );
+
+    // Cria a pasta ANTES de aguardar na fila, para que o ID já exista no banco
+    const folderResult = await db.insert(jobFolders).values({
+      clientName,
+      inviteCode,
+      totalJobs: jobCount,
+    });
+    const folderId = folderResult[0].insertId;
+
+    // Cria os jobs no banco com status "pending" (aguardando slot de cliente)
+    const pendingJobIds: number[] = [];
+    for (let i = 0; i < jobCount; i++) {
+      const quantity = jobQuantities[i];
+      const label = jobCount > 1
+        ? `${clientName} — Job ${i + 1}/${jobCount}`
+        : clientName;
+
+      const result = await db.insert(jobs).values({
+        providerId,
+        status: "pending",
+        totalAccounts: quantity,
+        completedAccounts: 0,
+        failedAccounts: 0,
+        concurrency: 1,
+        folderId,
+        config: {
+          password: "auto",
+          delayMin: 3000,
+          delayMax: 10000,
+          region: "default",
+          inviteCode,
+          label,
+        },
+        startedAt: null,
+      });
+      pendingJobIds.push(result[0].insertId);
+      await logger.info("orchestrator",
+        `Job ${result[0].insertId} criado (pending): ${quantity} conta(s) para "${label}"`,
+        {}, result[0].insertId
+      );
+    }
+
+    // Executa os jobs em background, aguardando slot de cliente
+    const _runAllJobs = async () => {
+      // Aguarda slot de cliente livre
+      const releaseClient = await clientQueueLimiter.acquire(clientName);
+
+      try {
+        await logger.info("orchestrator",
+          `Cliente "${clientName}" iniciando (${clientQueueLimiter.getActive()}/${clientQueueLimiter.getMax()} ativos, ` +
+          `${clientQueueLimiter.getQueued()} na fila). Pasta #${folderId}, ${jobCount} job(s).`
+        );
+
+        const STAGGER_DELAY_MS = 30_000; // 30s entre jobs do mesmo cliente
+
+        for (let i = 0; i < pendingJobIds.length; i++) {
+          const jobId = pendingJobIds[i];
+          const quantity = jobQuantities[i];
+          const label = jobCount > 1
+            ? `${clientName} — Job ${i + 1}/${jobCount}`
+            : clientName;
+
+          // Verifica se o job foi cancelado enquanto aguardava
+          const currentJob = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, jobId)).limit(1);
+          if (!currentJob[0] || currentJob[0].status === "cancelled") {
+            await logger.info("orchestrator",
+              `Job ${jobId} cancelado antes de iniciar. Pulando.`,
+              {}, jobId
+            );
+            continue;
+          }
+
+          // Marca como running e inicia
+          await db.update(jobs).set({ status: "running", startedAt: new Date() }).where(eq(jobs.id, jobId));
+
+          const abortController = new AbortController();
+          this.activeJobs.set(jobId, abortController);
+
+          const jobOptions: CreateJobOptions = {
+            provider: providerSlug,
+            quantity,
+            inviteCode,
+            label,
+            folderId,
+          };
+
+          await logger.info("orchestrator",
+            `Job ${jobId} iniciando (${i + 1}/${jobCount} do cliente "${clientName}")`,
+            {}, jobId
+          );
+
+          // Aguarda o job terminar antes de iniciar o próximo
+          await new Promise<void>((resolve) => {
+            const run = async () => {
+              try {
+                await this.executeJob(jobId, provider, providerId, jobOptions, abortController.signal);
+              } catch (err) {
+                if (err instanceof Error && err.name === "AbortError") return;
+                await logger.error("orchestrator", `Job ${jobId} falhou: ${err}`, {}, jobId);
+                const db2 = await getDb();
+                if (db2) await db2.update(jobs).set({ status: "failed" }).where(eq(jobs.id, jobId));
+              } finally {
+                this.activeJobs.delete(jobId);
+                try { await proxyService.releaseAllForJob(jobId); } catch {}
+                resolve();
+              }
+            };
+            run();
+          });
+
+          // Stagger entre jobs (exceto após o último)
+          if (i < pendingJobIds.length - 1) {
+            await logger.info("orchestrator",
+              `Aguardando ${STAGGER_DELAY_MS / 1000}s antes do próximo job do cliente "${clientName}"...`
+            );
+            await sleep(STAGGER_DELAY_MS);
+          }
+        }
+
+        await logger.info("orchestrator",
+          `Cliente "${clientName}" concluído. Todos os ${jobCount} job(s) finalizados.`
+        );
+
+      } finally {
+        releaseClient();
+      }
+    };
+
+    // Dispara em background — não bloqueia o endpoint de resgate
+    _runAllJobs().catch(async (err) => {
+      await logger.error("orchestrator",
+        `Erro no processamento do cliente "${clientName}": ${err instanceof Error ? err.message : String(err)}`
+      );
+    });
+
+    return { folderId, jobIds: pendingJobIds };
   }
 
   /**
@@ -661,14 +855,15 @@ class Orchestrator {
   }
 
   /**
-   * v10.1: Retorna o estado atual do limitador global de concorrência.
+   * v10.2: Retorna o estado atual da fila de clientes.
    * Útil para monitoramento e debug via logs.
    */
-  getLimiterStatus(): { active: number; queued: number; max: number } {
+  getLimiterStatus(): { active: number; queued: number; max: number; label: string } {
     return {
-      active: globalJobLimiter.getActive(),
-      queued: globalJobLimiter.getQueued(),
-      max: globalJobLimiter.getMax(),
+      active: clientQueueLimiter.getActive(),
+      queued: clientQueueLimiter.getQueued(),
+      max: clientQueueLimiter.getMax(),
+      label: "clientes",
     };
   }
 
