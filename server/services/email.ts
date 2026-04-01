@@ -30,6 +30,9 @@
 
 import { getSetting, setSetting } from "../utils/settings";
 import { sleep, logger } from "../utils/helpers";
+import { getDb } from "../db";
+import { accounts as accountsTable } from "../../drizzle/schema";
+import { eq, and, or } from "drizzle-orm";
 
 const MS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0";
@@ -370,6 +373,10 @@ class OutlookEmailService {
    * Sempre usa alias +N (começando em +1), pois o email base já pode estar
    * cadastrado no Manus de tentativas anteriores.
    *
+   * CHECAGEM NO BANCO: antes de retornar um alias, verifica se ele já existe
+   * na tabela accounts com status 'active' ou 'failed' (com erro de email duplicado).
+   * Se já existe, avança o counter e tenta o próximo alias até encontrar um livre.
+   *
    * Exemplo com 2 contas cadastradas:
    *   conta1+1@outlook.com      (aliasCounter: 0→1, primeira vez)
    *   conta2+1@outlook.com      (aliasCounter: 0→1, primeira vez)
@@ -377,7 +384,7 @@ class OutlookEmailService {
    *   conta2+2@outlook.com      (aliasCounter: 1→2)
    *   ...
    *
-   * O aliasCounter representa o Último alias gerado e é persistido no banco.
+   * O aliasCounter representa o próximo alias a ser gerado e é persistido no banco.
    * Todos os emails com alias +N chegam na caixa de entrada do email base.
    */
   async pickNextAccount(): Promise<string> {
@@ -393,17 +400,61 @@ class OutlookEmailService {
     roundRobinIndex = (roundRobinIndex + 1) % allAccounts.length;
 
     const account = allAccounts[idx];
-    // Garante que o counter começa em 1 (nunca usa o email base como registro)
-    const counter = Math.max(account.aliasCounter ?? 0, 1);
+    const [localPart, domain] = account.email.split("@");
 
-    // Incrementa e persiste o contador desta conta
+    // Garante que o counter começa em 1 (nunca usa o email base como registro)
+    let counter = Math.max(account.aliasCounter ?? 0, 1);
+
+    // Checagem no banco: pula aliases que já foram usados (active ou failed permanente)
+    const db = await getDb();
+    if (db) {
+      const MAX_SKIP = 200; // limite de segurança para não loopar infinitamente
+      let skipped = 0;
+      while (skipped < MAX_SKIP) {
+        const alias = `${localPart}+${counter}@${domain}`;
+        // Verifica se este alias já existe no banco com status definitivo
+        const existing = await db
+          .select({ id: accountsTable.id, status: accountsTable.status })
+          .from(accountsTable)
+          .where(eq(accountsTable.email, alias))
+          .limit(1);
+
+        if (existing.length === 0) {
+          // Alias livre — pode usar
+          break;
+        }
+
+        const existingStatus = existing[0].status;
+        // 'unverified' = tentativa em andamento ou erro transitório — pode reutilizar
+        if (existingStatus === "unverified") {
+          break;
+        }
+
+        // 'active', 'failed', 'banned', 'suspended' = alias já consumido — pula
+        await logger.info(
+          "email",
+          `Alias ${alias} já usado (status: ${existingStatus}) — avançando para +${counter + 1}`,
+          {}
+        );
+        counter++;
+        skipped++;
+      }
+
+      if (skipped >= MAX_SKIP) {
+        await logger.warn(
+          "email",
+          `Conta ${account.email} atingiu limite de ${MAX_SKIP} aliases pulados. Usando counter=${counter} mesmo assim.`,
+          {}
+        );
+      }
+    }
+
+    // Persiste o próximo counter (counter+1 = próximo a ser gerado)
     account.aliasCounter = counter + 1;
     await saveOutlookAccounts(allAccounts);
 
-    // Sempre gera alias +N (nunca retorna o email base)
-    const [localPart, domain] = account.email.split("@");
+    // Retorna o alias escolhido
     const alias = `${localPart}+${counter}@${domain}`;
-
     return alias;
   }
 
