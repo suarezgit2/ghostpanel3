@@ -388,15 +388,14 @@ class OutlookEmailService {
     let consecutiveErrors = 0;
     let account = selectedAccount;
 
-    // Filtro OData: emails recentes do domínio remetente
+    // Filtro OData: apenas por data (contains() + $orderby causa InefficientFilter no Outlook pessoal)
+    // A filtragem por domínio remetente é feita em memória após receber os resultados
     const since = new Date(startTime - 60000).toISOString();
-    const filter = encodeURIComponent(
-      `contains(from/emailAddress/address, '${fromDomain}') and receivedDateTime ge ${since}`
-    );
+    const filter = encodeURIComponent(`receivedDateTime ge ${since}`);
     const graphPath =
       `/me/messages?$filter=${filter}` +
       `&$orderby=receivedDateTime desc` +
-      `&$top=10` +
+      `&$top=20` +
       `&$select=id,from,toRecipients,receivedDateTime,bodyPreview,body`;
 
     while (Date.now() - startTime < effectiveTimeoutMs) {
@@ -410,6 +409,13 @@ class OutlookEmailService {
           (data.value as Array<Record<string, unknown>>) || [];
 
         for (const msg of messages) {
+          // Filtrar por domínio remetente em memória (não pode ser feito via OData no Outlook pessoal)
+          const fromAddr = (
+            (msg.from as Record<string, Record<string, string>>)
+              ?.emailAddress?.address || ""
+          ).toLowerCase();
+          if (!fromAddr.includes(fromDomain.toLowerCase())) continue;
+
           // Verificar destinatário
           const toRecipients =
             (msg.toRecipients as Array<{
