@@ -43,6 +43,8 @@ export interface OutlookAccount {
   refreshToken: string;
   accessToken?: string;
   accessTokenExpiry?: number;
+  /** Contador de alias +N gerados para esta conta (persiste no banco) */
+  aliasCounter?: number;
 }
 
 async function loadOutlookAccounts(): Promise<OutlookAccount[]> {
@@ -56,8 +58,12 @@ async function loadOutlookAccounts(): Promise<OutlookAccount[]> {
 }
 
 async function saveOutlookAccounts(accounts: OutlookAccount[]): Promise<void> {
-  // Persistir apenas email + refreshToken (sem access tokens)
-  const toSave = accounts.map(({ email, refreshToken }) => ({ email, refreshToken }));
+  // Persistir email + refreshToken + aliasCounter (sem access tokens)
+  const toSave = accounts.map(({ email, refreshToken, aliasCounter }) => ({
+    email,
+    refreshToken,
+    aliasCounter: aliasCounter ?? 0,
+  }));
   await setSetting("outlook_accounts", JSON.stringify(toSave));
 }
 
@@ -346,9 +352,18 @@ class OutlookEmailService {
   }
 
   /**
-   * Retorna o próximo email Outlook disponível em round-robin.
-   * Usado pelo orchestrator para gerar o email de registro no Manus.
-   * Lança erro se não houver contas cadastradas.
+   * Retorna o próximo alias de email Outlook em round-robin com contador +N.
+   *
+   * Exemplo com 2 contas cadastradas:
+   *   conta1@outlook.com        (aliasCounter=0 → usa email base)
+   *   conta2@outlook.com        (aliasCounter=0 → usa email base)
+   *   conta1+1@outlook.com      (aliasCounter=1)
+   *   conta2+1@outlook.com      (aliasCounter=1)
+   *   conta1+2@outlook.com      (aliasCounter=2)
+   *   ...
+   *
+   * O aliasCounter é incrementado e persistido no banco a cada uso.
+   * Todos os emails com alias +N chegam na caixa de entrada do email base.
    */
   async pickNextAccount(): Promise<string> {
     const allAccounts = await loadOutlookAccounts();
@@ -357,9 +372,25 @@ class OutlookEmailService {
         "Nenhuma conta Outlook cadastrada. Adicione ao menos uma conta no painel → Configurações → Contas Outlook Autorizadas."
       );
     }
+
+    // Seleciona a conta em round-robin
     const idx = roundRobinIndex % allAccounts.length;
     roundRobinIndex = (roundRobinIndex + 1) % allAccounts.length;
-    return allAccounts[idx].email;
+
+    const account = allAccounts[idx];
+    const counter = account.aliasCounter ?? 0;
+
+    // Incrementa e persiste o contador desta conta
+    account.aliasCounter = counter + 1;
+    await saveOutlookAccounts(allAccounts);
+
+    // Gera o alias: email base na primeira vez (counter=0), +N nas seguintes
+    const [localPart, domain] = account.email.split("@");
+    const alias = counter === 0
+      ? account.email
+      : `${localPart}+${counter}@${domain}`;
+
+    return alias;
   }
 
   /**
