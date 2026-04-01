@@ -34,7 +34,7 @@ import { sleep, logger } from "../utils/helpers";
 const MS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
-export const MS_OAUTH_SCOPES = "Mail.Read offline_access";
+export const MS_OAUTH_SCOPES = "openid profile email Mail.Read offline_access";
 export const MS_AUTH_URL_BASE =
   "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
 
