@@ -60,7 +60,12 @@ interface CreateAccountResult {
   email: string;
   password: string;
   token?: string;
-  status: "active" | "failed";
+  /**
+   * - "active": conta criada com sucesso
+   * - "failed": falha permanente (email já cadastrado, ban, erro de negócio)
+   * - "retry": falha transitória (CAPTCHA, proxy, rede) — o email NÃO deve ser descartado
+   */
+  status: "active" | "failed" | "retry";
   error?: string;
   /** true se o convite foi confirmado com sucesso (freeCredits >= 1500) */
   inviteAccepted?: boolean;
@@ -270,7 +275,7 @@ export class ManusProvider {
         );
         
         if (proxyAttempt === MAX_PROXY_ATTEMPTS) {
-          return { email, password, status: "failed", error: `Proxy inacessível após ${MAX_PROXY_ATTEMPTS} tentativas`, metadata: {} };
+          return { email, password, status: "retry", error: `Proxy inacessível após ${MAX_PROXY_ATTEMPTS} tentativas`, metadata: {} };
         }
         
         try {
@@ -284,7 +289,7 @@ export class ManusProvider {
       }
       
       if (!proxyOk) {
-        return { email, password, status: "failed", error: "Falha crítica na resolução de proxy", metadata: {} };
+        return { email, password, status: "retry", error: "Falha crítica na resolução de proxy", metadata: {} };
       }
 
       // STEP 1: Solve Cloudflare Turnstile (WITH proxy — same IP as API calls)
@@ -738,9 +743,21 @@ export class ManusProvider {
         throw err;
       }
 
-      // v9.3: Classify the failure for better diagnostics
+      // v9.3+: Classificar falha — transitória (retry) vs permanente (failed)
       const isBanned = err instanceof AccountBannedError;
-      const failureType = isBanned ? "ACCOUNT_BANNED" : "GENERIC_FAILURE";
+      const isTransient = !isBanned && (
+        errorMsg.includes("code_1015") ||
+        errorMsg.includes("code_1715") ||
+        errorMsg.includes("CAPTCHA") ||
+        errorMsg.includes("captcha") ||
+        errorMsg.includes("ECONNREFUSED") ||
+        errorMsg.includes("ETIMEDOUT") ||
+        errorMsg.includes("ECONNRESET") ||
+        errorMsg.includes("fetch failed") ||
+        errorMsg.includes("network error") ||
+        errorMsg.includes("Network error")
+      );
+      const failureType = isBanned ? "ACCOUNT_BANNED" : isTransient ? "TRANSIENT_ERROR" : "GENERIC_FAILURE";
 
       await logger.error("failed", `Falha [${failureType}]: ${errorMsg}`, {
         email,
@@ -754,7 +771,9 @@ export class ManusProvider {
       return {
         email,
         password,
-        status: "failed" as const,  // v9.3: Use failureType in metadata to distinguish bans
+        // retry = erro transitório (CAPTCHA/proxy/rede) — email não deve ser descartado
+        // failed = erro permanente (ban, email já cadastrado, erro de negócio)
+        status: isTransient ? "retry" as const : "failed" as const,
         error: errorMsg,
         metadata: {
           failureType,

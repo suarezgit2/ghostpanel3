@@ -622,12 +622,16 @@ class Orchestrator {
         // Pass invite code directly to createAccount (no global setting mutation = no race condition)
         const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId, inviteCode: jobInviteCode, signal });
 
-        await db.update(accounts).set({
-          status: result.status,
-          token: result.token || null,
-          phone: (result.metadata?.phoneNumber as string) || null,
-          metadata: result.metadata || {},
-        }).where(eq(accounts.id, accountId));
+        // Mapeia o status do provider para o enum do banco:
+        // "active" → "active", "failed" → "failed", "retry" → não atualiza aqui (tratado abaixo)
+        if (result.status !== "retry") {
+          await db.update(accounts).set({
+            status: result.status as "active" | "failed",
+            token: result.token || null,
+            phone: (result.metadata?.phoneNumber as string) || null,
+            metadata: result.metadata || {},
+          }).where(eq(accounts.id, accountId));
+        }
 
         if (result.status === "active") {
           successCount++;
@@ -649,7 +653,27 @@ class Orchestrator {
           // Reset backoff on success
           consecutiveFailures = 0;
           currentBackoffMs = BACKOFF_CONFIG.initialBackoffMs;
+        } else if (result.status === "retry") {
+          // Erro transitório (CAPTCHA, proxy, rede) — NÃO descarta o email nem conta como falha permanente
+          // Marca como "unverified" (status temporário) com metadata indicando retry
+          await db.update(accounts).set({
+            status: "unverified",
+            token: null,
+            phone: null,
+            metadata: { error: result.error, retryReason: "transient" },
+          }).where(eq(accounts.id, accountId));
+          await logger.warn("orchestrator",
+            `Tentativa ${totalAttempts}: erro transitório (${result.error}) — email preservado para retentativa. ` +
+            `(sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
+            { email }, jobId
+          );
+          // Devolve o alias counter para não desperdiçar o alias
+          try { await emailService.decrementAliasCounter(email); } catch (_) { /* ignora */ }
+          // Release proxy for replacement
+          if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+          // Não incrementa consecutiveFailures nem failedAccounts — não é falha permanente
         } else {
+          // status === "failed" — falha permanente
           await db.update(jobs).set({
             failedAccounts: sql`${jobs.failedAccounts} + 1`,
           }).where(eq(jobs.id, jobId));

@@ -587,6 +587,37 @@ class OutlookEmailService {
       `Timeout: email não recebido em ${effectiveTimeoutMs / 1000}s`
     );
   }
+
+  /**
+   * Decrementa o aliasCounter da conta dona do email informado.
+   * Chamado pelo orchestrator quando um erro transitório ocorre (CAPTCHA/proxy),
+   * para que o alias não seja desperdiçado na próxima tentativa.
+   *
+   * @param email - O email alias que foi gerado (ex: conta+3@outlook.com)
+   */
+  async decrementAliasCounter(email: string): Promise<void> {
+    const allAccounts = await loadOutlookAccounts();
+    if (allAccounts.length === 0) return;
+
+    // Extrai o email base do alias (remove o sufixo +N se houver)
+    const baseEmail = email.replace(/\+\d+@/, "@");
+
+    const account = allAccounts.find(
+      (a) => a.email.toLowerCase() === baseEmail.toLowerCase()
+    );
+    if (!account) return;
+
+    const current = account.aliasCounter ?? 0;
+    if (current > 0) {
+      account.aliasCounter = current - 1;
+      await saveOutlookAccounts(allAccounts);
+      await logger.info(
+        "email",
+        `aliasCounter decrementado para ${account.email}: ${current} → ${current - 1} (erro transitório)`,
+        {}
+      );
+    }
+  }
 }
 
 export const emailService = new OutlookEmailService();
