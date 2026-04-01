@@ -386,19 +386,30 @@ class OutlookEmailService {
       );
     }
 
-    // Seleciona a conta em round-robin
-    const idx = roundRobinIndex % allAccounts.length;
-    roundRobinIndex = (roundRobinIndex + 1) % allAccounts.length;
-    const account = allAccounts[idx];
+    // Tenta reservar em round-robin, iterando por TODAS as contas antes de desistir.
+    // Se a conta selecionada estiver esgotada ou com problema, tenta a próxima.
+    const startIdx = roundRobinIndex % allAccounts.length;
+    for (let attempt = 0; attempt < allAccounts.length; attempt++) {
+      const idx = (startIdx + attempt) % allAccounts.length;
+      const account = allAccounts[idx];
 
-    const reserved = await aliasPoolService.reserveAlias(account.email, jobId);
-    if (!reserved) {
-      throw new Error(
-        `Conta ${account.email} esgotou todos os aliases disponíveis. Adicione mais contas Outlook.`
+      const reserved = await aliasPoolService.reserveAlias(account.email, jobId);
+      if (reserved) {
+        // Avança o round-robin para a próxima conta na próxima chamada
+        roundRobinIndex = (idx + 1) % allAccounts.length;
+        return reserved;
+      }
+
+      await logger.warn(
+        "email",
+        `Conta ${account.email} sem aliases disponíveis — tentando próxima conta (${attempt + 1}/${allAccounts.length})`,
+        {}
       );
     }
 
-    return reserved;
+    throw new Error(
+      `Todas as ${allAccounts.length} conta(s) Outlook estão esgotadas. Adicione mais contas Outlook.`
+    );
   }
 
   /**

@@ -88,11 +88,14 @@ export class AliasPoolService {
     //
     // Busca todos os aliases desta conta base na tabela accounts com status definitivo.
     // Extrai o índice N de emails no formato localPart+N@domain.
+    // Busca aliases históricos desta conta na tabela accounts (todas as runs anteriores).
+    // Inclui TODOS os status para sincronizar corretamente com o pool:
+    //   - active/failed/banned/suspended → consumidos permanentemente → pool status='used'
+    //   - unverified → tentativa anterior com erro transitório → pool status='free' (pode ser retentado)
     const accountsRows = await db.execute(sql`
       SELECT email, status
       FROM accounts
       WHERE email LIKE ${localPart + '+%@' + domain}
-        AND status IN ('active', 'failed', 'banned', 'suspended')
     `) as unknown as { email: string; status: string }[][];
 
     const aliasIndexRegex = new RegExp(`^${localPart.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\+(\\d+)@${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
@@ -101,14 +104,21 @@ export class AliasPoolService {
       if (match) {
         const idx = parseInt(match[1], 10);
         if (!isNaN(idx)) {
-          consumedSet.add(idx);
+          // Determina o status correto no pool baseado no status da conta
+          const isConsumed = ['active', 'failed', 'banned', 'suspended'].includes(row.status);
+          if (isConsumed) {
+            consumedSet.add(idx); // não será tentado novamente
+          }
           // Sincroniza com o pool para consistência futura (INSERT IGNORE)
+          // unverified → 'free' no pool (pode ser retentado)
+          // demais → 'used' no pool (consumido permanentemente)
+          const poolStatus = isConsumed ? 'used' : 'free';
           try {
             await db.execute(sql`
               INSERT IGNORE INTO outlook_alias_pool
                 (baseEmail, aliasIndex, aliasEmail, status, createdAt, updatedAt)
               VALUES
-                (${baseEmail}, ${idx}, ${row.email.toLowerCase()}, 'used', NOW(), NOW())
+                (${baseEmail}, ${idx}, ${row.email.toLowerCase()}, ${poolStatus}, NOW(), NOW())
             `);
           } catch { /* ignora conflito de unicidade */ }
         }

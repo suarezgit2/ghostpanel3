@@ -582,29 +582,35 @@ class Orchestrator {
 
       totalAttempts++;
 
-      // Reserva atomicamente o próximo alias disponível via AliasPoolService
-      // (UNIQUE constraint + INSERT ON DUPLICATE KEY UPDATE garante sem race condition)
-      const reservedAlias = await emailService.reserveNextAlias(jobId);
-      const email = reservedAlias.aliasEmail;
-      const aliasId = reservedAlias.id;
-      const password = options.password === "auto" || !options.password ? generatePassword(16) : options.password;
-
-      // Create account record
-      const accountResult = await db.insert(accounts).values({
-        jobId,
-        providerId,
-        email,
-        password,
-        status: "unverified",
-      });
-
-      const accountId = accountResult[0].insertId;
+      // v11.0: reserveNextAlias e db.insert movidos para dentro do try-catch interno.
+      // Antes estavam fora, então erros de reserva escapavam para o catch externo
+      // do createClientJobs e matavam o job inteiro sem retry.
+      let email: string;
+      let aliasId: number;
+      let accountId: number;
 
       // v9.1: Moved proxy/proxyReleased outside try block so the catch block can access them.
       // Before: catch referenced proxy/proxyReleased which were scoped inside try → ReferenceError crash.
       let proxy: Awaited<ReturnType<typeof proxyService.getProxy>> | null = null;
       let proxyReleased = false;
       try {
+        // Reserva atomicamente o próximo alias disponível via AliasPoolService
+        // (UNIQUE constraint + INSERT ON DUPLICATE KEY UPDATE garante sem race condition)
+        const reservedAlias = await emailService.reserveNextAlias(jobId);
+        email = reservedAlias.aliasEmail;
+        aliasId = reservedAlias.id;
+        const password = options.password === "auto" || !options.password ? generatePassword(16) : options.password;
+
+        // Create account record
+        const accountResult = await db.insert(accounts).values({
+          jobId,
+          providerId,
+          email,
+          password,
+          status: "unverified",
+        });
+        accountId = accountResult[0].insertId;
+
         proxy = await proxyService.getProxy(jobId);
         // Resolve geo-coherent region from proxy IP (falls back to job region or "default")
         const proxyRegion = proxy ? await getProxyRegion(proxy.host) : (region as Parameters<typeof fingerprintService.generateProfile>[0]);
@@ -704,12 +710,12 @@ class Orchestrator {
         // AbortError = job cancelled — bail out immediately
         if (err instanceof DOMException && err.name === "AbortError") {
           await logger.info("orchestrator", `Job ${jobId} abortado durante createAccount`, {}, jobId);
-          await db.update(accounts).set({ status: "failed", metadata: { error: "Job cancelado" } }).where(eq(accounts.id, accountId));
+          if (accountId!) await db.update(accounts).set({ status: "failed", metadata: { error: "Job cancelado" } }).where(eq(accounts.id, accountId!));
           // Libera o alias no pool (job cancelado — alias pode ser reutilizado)
-          try { await emailService.releaseAlias(aliasId); } catch (_) { /* ignora */ }
+          if (aliasId!) try { await emailService.releaseAlias(aliasId!); } catch (_) { /* ignora */ }
           // v9.8: Smart proxy handling on cancellation.
           if (proxy && !proxyReleased) {
-            const acct = await db.select({ token: accounts.token }).from(accounts).where(eq(accounts.id, accountId)).limit(1);
+            const acct = accountId! ? await db.select({ token: accounts.token }).from(accounts).where(eq(accounts.id, accountId!)).limit(1) : [];
             const wasRegistered = !!(acct[0]?.token);
             if (wasRegistered) {
               await logger.info("orchestrator", `Job ${jobId} cancelado APÓS registro — proxy ${proxy.host} queimado, enviando para replacement`, {}, jobId);
@@ -724,26 +730,39 @@ class Orchestrator {
         }
         const msg = err instanceof Error ? err.message : String(err);
 
+        // Erro de reserva de alias (banco indisponível, conta esgotada, etc)
+        // aliasId e accountId podem não ter sido atribuídos ainda
+        if (!aliasId! || !accountId!) {
+          await logger.error("orchestrator",
+            `ERRO na tentativa ${totalAttempts}: falha ao reservar alias — ${msg} ` +
+            `(sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
+            {}, jobId
+          );
+          if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+          consecutiveFailures++;
+          continue; // retenta na próxima iteração
+        }
+
         // INVITE_INVALID_CODE: código inválido/expirado — abortar o job inteiro
         if (msg.startsWith("INVITE_INVALID_CODE:")) {
-          await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId));
+          await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId!));
           await db.update(jobs).set({ failedAccounts: sql`${jobs.failedAccounts} + 1` }).where(eq(jobs.id, jobId));
           // Alias descartado permanentemente (falha de convite)
-          try { await emailService.markAliasFailed(aliasId, msg); } catch (_) { /* ignora */ }
-          await logger.error("orchestrator", `Job ${jobId} abortado: ${msg}`, { email }, jobId);
+          try { await emailService.markAliasFailed(aliasId!, msg); } catch (_) { /* ignora */ }
+          await logger.error("orchestrator", `Job ${jobId} abortado: ${msg}`, { email: email! }, jobId);
           if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
           break;
         }
 
         // INVITE_NOT_CONFIRMED: conta recebeu créditos insuficientes — descarta e retenta
         if (msg.startsWith("INVITE_NOT_CONFIRMED:")) {
-          await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId));
+          await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId!));
           // Alias descartado (conta foi criada mas convite não confirmado)
-          try { await emailService.markAliasFailed(aliasId, msg); } catch (_) { /* ignora */ }
+          try { await emailService.markAliasFailed(aliasId!, msg); } catch (_) { /* ignora */ }
           await logger.warn("orchestrator",
             `Tentativa ${totalAttempts}: conta descartada (${msg}). Retentando com nova conta. ` +
             `(sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
-            { email }, jobId
+            { email: email! }, jobId
           );
           if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
           continue;
@@ -752,18 +771,18 @@ class Orchestrator {
         await db.update(accounts).set({
           status: "failed",
           metadata: { error: msg },
-        }).where(eq(accounts.id, accountId));
+        }).where(eq(accounts.id, accountId!));
 
         await db.update(jobs).set({
           failedAccounts: sql`${jobs.failedAccounts} + 1`,
         }).where(eq(jobs.id, jobId));
 
         // Erro genérico: libera o alias (pode ser erro transitório de infra)
-        try { await emailService.releaseAlias(aliasId); } catch (_) { /* ignora */ }
+        try { await emailService.releaseAlias(aliasId!); } catch (_) { /* ignora */ }
 
         await logger.error("orchestrator",
           `ERRO na tentativa ${totalAttempts}: ${msg} (sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
-          { email }, jobId
+          { email: email! }, jobId
         );
         if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
         consecutiveFailures++;
