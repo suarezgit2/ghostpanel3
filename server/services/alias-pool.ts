@@ -70,7 +70,7 @@ export class AliasPoolService {
     const [localPart, domain] = baseEmail.split("@");
     const now = new Date();
 
-    // Busca todos os índices já consumidos (used/failed) para pular
+    // Busca todos os índices já consumidos no pool (used/failed)
     const consumedRows = await db.execute(sql`
       SELECT aliasIndex
       FROM outlook_alias_pool
@@ -80,7 +80,42 @@ export class AliasPoolService {
     `) as unknown as { aliasIndex: number }[][];
     const consumedSet = new Set<number>((consumedRows[0] || []).map((r: { aliasIndex: number }) => r.aliasIndex));
 
-    // Busca o menor índice livre ou reservado (pode ser retomado se o TTL expirou)
+    // MIGRAÇÃO HISTÓRICA: verifica também a tabela accounts para aliases de runs anteriores.
+    // A tabela outlook_alias_pool pode estar vazia (primeira run após migração), mas
+    // a tabela accounts já tem registros de runs anteriores com aliases +N que foram
+    // usados ou falharam permanentemente. Sem essa verificação, o sistema tentaria
+    // recriar aliases já cadastrados no Manus e receberia "Email já cadastrado".
+    //
+    // Busca todos os aliases desta conta base na tabela accounts com status definitivo.
+    // Extrai o índice N de emails no formato localPart+N@domain.
+    const accountsRows = await db.execute(sql`
+      SELECT email, status
+      FROM accounts
+      WHERE email LIKE ${localPart + '+%@' + domain}
+        AND status IN ('active', 'failed', 'banned', 'suspended')
+    `) as unknown as { email: string; status: string }[][];
+
+    const aliasIndexRegex = new RegExp(`^${localPart.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\+(\\d+)@${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    for (const row of (accountsRows[0] || []) as { email: string; status: string }[]) {
+      const match = row.email.match(aliasIndexRegex);
+      if (match) {
+        const idx = parseInt(match[1], 10);
+        if (!isNaN(idx)) {
+          consumedSet.add(idx);
+          // Sincroniza com o pool para consistência futura (INSERT IGNORE)
+          try {
+            await db.execute(sql`
+              INSERT IGNORE INTO outlook_alias_pool
+                (baseEmail, aliasIndex, aliasEmail, status, createdAt, updatedAt)
+              VALUES
+                (${baseEmail}, ${idx}, ${row.email.toLowerCase()}, 'used', NOW(), NOW())
+            `);
+          } catch { /* ignora conflito de unicidade */ }
+        }
+      }
+    }
+
+    // Busca o menor índice livre no pool
     const freeRows = await db.execute(sql`
       SELECT id, aliasIndex, aliasEmail, status
       FROM outlook_alias_pool
@@ -92,19 +127,21 @@ export class AliasPoolService {
     const freeRow = (freeRows[0] || [])[0] as { id: number; aliasIndex: number; aliasEmail: string; status: string } | undefined;
 
     // Determina o índice de partida
-    // Se há uma linha 'free', tenta ela primeiro; senão, calcula o próximo índice
+    // Se há uma linha 'free' no pool, tenta ela primeiro; senão, calcula o próximo índice
     let startIndex: number;
-    if (freeRow) {
+    if (freeRow && !consumedSet.has(freeRow.aliasIndex)) {
       startIndex = freeRow.aliasIndex;
     } else {
-      // Próximo índice = max(aliasIndex) + 1, ou 1 se não há nenhum
-      const maxRows = await db.execute(sql`
+      // Próximo índice = max de todos os consumidos + 1, ou 1 se nenhum
+      const maxConsumed = consumedSet.size > 0 ? Math.max(...Array.from(consumedSet)) : 0;
+      const maxPoolRows = await db.execute(sql`
         SELECT COALESCE(MAX(aliasIndex), 0) AS maxIdx
         FROM outlook_alias_pool
         WHERE baseEmail = ${baseEmail}
       `) as unknown as { maxIdx: number }[][];
-      const maxIdx = ((maxRows[0] || [])[0] as { maxIdx: number } | undefined)?.maxIdx ?? 0;
-      startIndex = Math.max(maxIdx + 1, 1);
+      const maxPool = ((maxPoolRows[0] || [])[0] as { maxIdx: number } | undefined)?.maxIdx ?? 0;
+      startIndex = Math.max(maxConsumed, maxPool) + 1;
+      if (startIndex < 1) startIndex = 1;
     }
 
     // Loop: tenta reservar a partir do startIndex, pulando consumidos
