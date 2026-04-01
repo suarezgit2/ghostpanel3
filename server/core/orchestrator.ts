@@ -27,6 +27,7 @@ import { proxyService, getProxyRegion } from "../services/proxy";
 import { fingerprintService } from "../services/fingerprint";
 import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extractInviteCode, checkAbort } from "../utils/helpers";
 import { getSetting } from "../utils/settings";
+import { emailService } from "../services/email";
 import { manusProvider, type ManusProvider } from "../providers/manus";
 
 type ProviderInstance = ManusProvider;
@@ -509,14 +510,6 @@ class Orchestrator {
    * v10.0: All early-return paths now release the current proxy before returning.
    */
   private async executeJob(jobId: number, provider: ProviderInstance, providerId: number, options: CreateJobOptions, signal?: AbortSignal): Promise<void> {
-    // Multi-domain rotation: email_domain can be a comma-separated list
-    // e.g. "lojasmesh.com, outrodominio.com, terceiro.com"
-    // Each account gets a randomly chosen domain to avoid batch-ban by domain
-    const emailDomainRaw = (await getSetting("email_domain")) || "lojasmesh.com";
-    const emailDomains = emailDomainRaw
-      .split(",")
-      .map((d) => d.trim())
-      .filter((d) => d.length > 0);
     const region = options.region || "default";
     const db = await getDb();
     if (!db) throw new Error("Database não disponível");
@@ -589,9 +582,8 @@ class Orchestrator {
 
       totalAttempts++;
 
-      // Pick a random domain from the list for each account
-      const emailDomain = emailDomains[Math.floor(Math.random() * emailDomains.length)];
-      const email = `${generateEmailPrefix(12)}@${emailDomain}`;
+      // Usa a próxima conta Outlook cadastrada em round-robin como email de registro
+      const email = await emailService.pickNextAccount();
       const password = options.password === "auto" || !options.password ? generatePassword(16) : options.password;
 
       // Create account record

@@ -213,6 +213,9 @@ function selectAccount(
   return accounts[hash % accounts.length];
 }
 
+// Contador global para round-robin entre contas (persiste em memória durante a sessão)
+let roundRobinIndex = 0;
+
 class OutlookEmailService {
   private clientId = "";
   private clientSecret = "";
@@ -340,6 +343,23 @@ class OutlookEmailService {
   async listAccounts(): Promise<Array<{ email: string }>> {
     const allAccounts = await loadOutlookAccounts();
     return allAccounts.map((a) => ({ email: a.email }));
+  }
+
+  /**
+   * Retorna o próximo email Outlook disponível em round-robin.
+   * Usado pelo orchestrator para gerar o email de registro no Manus.
+   * Lança erro se não houver contas cadastradas.
+   */
+  async pickNextAccount(): Promise<string> {
+    const allAccounts = await loadOutlookAccounts();
+    if (allAccounts.length === 0) {
+      throw new Error(
+        "Nenhuma conta Outlook cadastrada. Adicione ao menos uma conta no painel → Configurações → Contas Outlook Autorizadas."
+      );
+    }
+    const idx = roundRobinIndex % allAccounts.length;
+    roundRobinIndex = (roundRobinIndex + 1) % allAccounts.length;
+    return allAccounts[idx].email;
   }
 
   /**
