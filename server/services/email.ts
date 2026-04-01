@@ -207,11 +207,23 @@ function selectAccount(
 ): OutlookAccount | null {
   if (accounts.length === 0) return null;
 
+  // 1. Busca exata (email base sem alias)
   const exact = accounts.find(
     (a) => a.email.toLowerCase() === toEmail.toLowerCase()
   );
   if (exact) return exact;
 
+  // 2. Resolve alias +N para a conta base (ex: conta+3@outlook.com → conta@outlook.com)
+  //    Isso garante que emails enviados para aliases sejam lidos pela conta correta.
+  const baseEmail = toEmail.replace(/\+[^@]+@/, "@");
+  if (baseEmail !== toEmail) {
+    const byBase = accounts.find(
+      (a) => a.email.toLowerCase() === baseEmail.toLowerCase()
+    );
+    if (byBase) return byBase;
+  }
+
+  // 3. Fallback por hash (para domínios customizados sem conta direta)
   let hash = 0;
   for (let i = 0; i < toEmail.length; i++) {
     hash = (hash * 31 + toEmail.charCodeAt(i)) & 0x7fffffff;
