@@ -59,6 +59,26 @@ export async function runMigrations(): Promise<void> {
         MODIFY COLUMN \`status\` ENUM('pending','running','paused','completed','partial','failed','cancelled') NOT NULL DEFAULT 'pending'
     `);
 
+    // Migration 0007: outlook_alias_pool — pool de aliases +N com lock atômico
+    // Substitui o aliasCounter em settings por uma tabela dedicada com
+    // garantia de unicidade (UNIQUE baseEmail+aliasIndex) e SELECT FOR UPDATE.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS \`outlook_alias_pool\` (
+        \`id\`              int AUTO_INCREMENT NOT NULL,
+        \`baseEmail\`       varchar(320) NOT NULL,
+        \`aliasIndex\`      int NOT NULL,
+        \`aliasEmail\`      varchar(320) NOT NULL,
+        \`status\`          ENUM('free','reserved','used','failed') NOT NULL DEFAULT 'free',
+        \`reservedByJobId\` int NULL,
+        \`reservedAt\`      timestamp NULL,
+        \`failReason\`      varchar(512) NULL,
+        \`createdAt\`       timestamp NOT NULL DEFAULT (now()),
+        \`updatedAt\`       timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT \`outlook_alias_pool_pk\` PRIMARY KEY (\`id\`),
+        CONSTRAINT \`outlook_alias_pool_unique\` UNIQUE (\`baseEmail\`, \`aliasIndex\`)
+      )
+    `);
+
     console.log("[Migrations] DDL aplicado com sucesso");
   } catch (error) {
     console.error("[Migrations] Erro ao aplicar DDL:", error);

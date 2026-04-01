@@ -162,6 +162,46 @@ export type Key = typeof keys.$inferSelect;
 export type InsertKey = typeof keys.$inferInsert;
 
 /**
+ * Outlook Alias Pool - pool de aliases +N para registro no Manus.
+ *
+ * Cada linha representa um alias gerado a partir de uma conta Outlook cadastrada.
+ * O status controla o ciclo de vida:
+ *   free → reserved (job reserva) → used (sucesso) | failed (falha permanente)
+ *   reserved → free (erro transitório, TTL expirado)
+ *
+ * Garantias de consistência:
+ *   - UNIQUE(baseEmail, aliasIndex) impede duplicatas no banco
+ *   - SELECT ... FOR UPDATE garante lock atômico entre jobs concorrentes
+ *   - reservedAt + TTL de 30min libera aliases presos por jobs que travaram
+ */
+export const outlookAliasPool = mysqlTable("outlook_alias_pool", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Email base da conta Outlook (ex: conta@outlook.com) */
+  baseEmail: varchar("baseEmail", { length: 320 }).notNull(),
+  /** Índice do alias (ex: 3 → conta+3@outlook.com). Nunca 0 (email base nunca é usado). */
+  aliasIndex: int("aliasIndex").notNull(),
+  /** Email completo gerado (ex: conta+3@outlook.com) */
+  aliasEmail: varchar("aliasEmail", { length: 320 }).notNull(),
+  /**
+   * free     = disponível para uso
+   * reserved = reservado por um job em andamento (TTL: 30min)
+   * used     = alias já registrado com sucesso no Manus
+   * failed   = alias falhou permanentemente (email já cadastrado, ban, etc)
+   */
+  status: mysqlEnum("status", ["free", "reserved", "used", "failed"]).default("free").notNull(),
+  /** Job que reservou este alias (para rastreabilidade e TTL) */
+  reservedByJobId: int("reservedByJobId"),
+  /** Timestamp da reserva — usado para expirar reservas presas (TTL: 30min) */
+  reservedAt: timestamp("reservedAt"),
+  /** Motivo da falha (se status=failed) */
+  failReason: varchar("failReason", { length: 512 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+export type OutlookAliasPool = typeof outlookAliasPool.$inferSelect;
+export type InsertOutlookAliasPool = typeof outlookAliasPool.$inferInsert;
+
+/**
  * API Tokens - tokens para acesso programático à API
  */
 export const apiTokens = mysqlTable("api_tokens", {

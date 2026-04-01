@@ -30,9 +30,7 @@
 
 import { getSetting, setSetting } from "../utils/settings";
 import { sleep, logger } from "../utils/helpers";
-import { getDb } from "../db";
-import { accounts as accountsTable } from "../../drizzle/schema";
-import { eq, and, or } from "drizzle-orm";
+import { aliasPoolService, ReservedAlias } from "./alias-pool";
 
 const MS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0";
@@ -367,27 +365,20 @@ class OutlookEmailService {
   }
 
   /**
-   * Retorna o próximo alias de email Outlook em round-robin com contador +N.
+   * Reserva atomicamente o próximo alias disponível para uma conta Outlook.
    *
-   * IMPORTANTE: O email base NUNCA é usado como email de registro no Manus.
-   * Sempre usa alias +N (começando em +1), pois o email base já pode estar
-   * cadastrado no Manus de tentativas anteriores.
+   * Delega ao AliasPoolService, que usa a tabela `outlook_alias_pool` com:
+   *   - UNIQUE(baseEmail, aliasIndex) — unicidade garantida pelo banco
+   *   - INSERT ... ON DUPLICATE KEY UPDATE — reserva atômica sem race condition
+   *   - TTL de 30min — libera reservas presas por jobs travados
    *
-   * CHECAGEM NO BANCO: antes de retornar um alias, verifica se ele já existe
-   * na tabela accounts com status 'active' ou 'failed' (com erro de email duplicado).
-   * Se já existe, avança o counter e tenta o próximo alias até encontrar um livre.
+   * Seleciona a conta Outlook em round-robin entre as cadastradas.
+   * O email base NUNCA é usado como registro (sempre alias +N, começando em +1).
    *
-   * Exemplo com 2 contas cadastradas:
-   *   conta1+1@outlook.com      (aliasCounter: 0→1, primeira vez)
-   *   conta2+1@outlook.com      (aliasCounter: 0→1, primeira vez)
-   *   conta1+2@outlook.com      (aliasCounter: 1→2)
-   *   conta2+2@outlook.com      (aliasCounter: 1→2)
-   *   ...
-   *
-   * O aliasCounter representa o próximo alias a ser gerado e é persistido no banco.
-   * Todos os emails com alias +N chegam na caixa de entrada do email base.
+   * @param jobId - ID do job que está reservando o alias
+   * @returns     - Objeto com aliasEmail e aliasId para ciclo de vida posterior
    */
-  async pickNextAccount(): Promise<string> {
+  async reserveNextAlias(jobId: number): Promise<ReservedAlias> {
     const allAccounts = await loadOutlookAccounts();
     if (allAccounts.length === 0) {
       throw new Error(
@@ -398,64 +389,52 @@ class OutlookEmailService {
     // Seleciona a conta em round-robin
     const idx = roundRobinIndex % allAccounts.length;
     roundRobinIndex = (roundRobinIndex + 1) % allAccounts.length;
-
     const account = allAccounts[idx];
-    const [localPart, domain] = account.email.split("@");
 
-    // Garante que o counter começa em 1 (nunca usa o email base como registro)
-    let counter = Math.max(account.aliasCounter ?? 0, 1);
-
-    // Checagem no banco: pula aliases que já foram usados (active ou failed permanente)
-    const db = await getDb();
-    if (db) {
-      const MAX_SKIP = 200; // limite de segurança para não loopar infinitamente
-      let skipped = 0;
-      while (skipped < MAX_SKIP) {
-        const alias = `${localPart}+${counter}@${domain}`;
-        // Verifica se este alias já existe no banco com status definitivo
-        const existing = await db
-          .select({ id: accountsTable.id, status: accountsTable.status })
-          .from(accountsTable)
-          .where(eq(accountsTable.email, alias))
-          .limit(1);
-
-        if (existing.length === 0) {
-          // Alias livre — pode usar
-          break;
-        }
-
-        const existingStatus = existing[0].status;
-        // 'unverified' = tentativa em andamento ou erro transitório — pode reutilizar
-        if (existingStatus === "unverified") {
-          break;
-        }
-
-        // 'active', 'failed', 'banned', 'suspended' = alias já consumido — pula
-        await logger.info(
-          "email",
-          `Alias ${alias} já usado (status: ${existingStatus}) — avançando para +${counter + 1}`,
-          {}
-        );
-        counter++;
-        skipped++;
-      }
-
-      if (skipped >= MAX_SKIP) {
-        await logger.warn(
-          "email",
-          `Conta ${account.email} atingiu limite de ${MAX_SKIP} aliases pulados. Usando counter=${counter} mesmo assim.`,
-          {}
-        );
-      }
+    const reserved = await aliasPoolService.reserveAlias(account.email, jobId);
+    if (!reserved) {
+      throw new Error(
+        `Conta ${account.email} esgotou todos os aliases disponíveis. Adicione mais contas Outlook.`
+      );
     }
 
-    // Persiste o próximo counter (counter+1 = próximo a ser gerado)
-    account.aliasCounter = counter + 1;
-    await saveOutlookAccounts(allAccounts);
+    return reserved;
+  }
 
-    // Retorna o alias escolhido
-    const alias = `${localPart}+${counter}@${domain}`;
-    return alias;
+  /**
+   * Marca o alias como usado com sucesso (conta criada no Manus).
+   * @param aliasId - ID da linha na tabela outlook_alias_pool
+   */
+  async markAliasUsed(aliasId: number): Promise<void> {
+    await aliasPoolService.markUsed(aliasId);
+  }
+
+  /**
+   * Marca o alias como falho permanentemente (email já cadastrado, ban, etc).
+   * O alias nunca mais será tentado.
+   * @param aliasId - ID da linha na tabela outlook_alias_pool
+   * @param reason  - Motivo da falha (para auditoria)
+   */
+  async markAliasFailed(aliasId: number, reason: string): Promise<void> {
+    await aliasPoolService.markFailed(aliasId, reason);
+  }
+
+  /**
+   * Libera o alias de volta para 'free' após erro transitório (CAPTCHA, proxy, rede).
+   * O alias poderá ser reservado novamente na próxima tentativa.
+   * @param aliasId - ID da linha na tabela outlook_alias_pool
+   */
+  async releaseAlias(aliasId: number): Promise<void> {
+    await aliasPoolService.releaseAlias(aliasId);
+  }
+
+  /**
+   * @deprecated Use reserveNextAlias() + markAliasUsed/markAliasFailed/releaseAlias
+   * Mantido apenas para compatibilidade durante transição.
+   */
+  async decrementAliasCounter(_email: string): Promise<void> {
+    // No-op: a lógica foi migrada para o AliasPoolService
+    await logger.info("email", "decrementAliasCounter chamado (no-op — migrado para AliasPoolService)", {});
   }
 
   /**
@@ -653,45 +632,6 @@ class OutlookEmailService {
     );
   }
 
-  /**
-   * Decrementa o aliasCounter da conta dona do email informado.
-   * Chamado pelo orchestrator quando um erro transitório ocorre (CAPTCHA/proxy),
-   * para que o alias não seja desperdiçado na próxima tentativa.
-   *
-   * @param email - O email alias que foi gerado (ex: conta+3@outlook.com)
-   */
-  async decrementAliasCounter(email: string): Promise<void> {
-    const allAccounts = await loadOutlookAccounts();
-    if (allAccounts.length === 0) return;
-
-    // Extrai o email base do alias (remove o sufixo +N se houver)
-    const baseEmail = email.replace(/\+\d+@/, "@");
-
-    const account = allAccounts.find(
-      (a) => a.email.toLowerCase() === baseEmail.toLowerCase()
-    );
-    if (!account) return;
-
-    const current = account.aliasCounter ?? 1;
-    // Mínimo é 1: nunca reverte para 0 (que usaria o email base) nem abaixo do alias atual
-    // O decremento só acontece se o counter está acima de 1, garantindo que o alias
-    // seja reutilizado na próxima tentativa sem avançar desnecessariamente.
-    if (current > 1) {
-      account.aliasCounter = current - 1;
-      await saveOutlookAccounts(allAccounts);
-      await logger.info(
-        "email",
-        `aliasCounter decrementado para ${account.email}: ${current} → ${current - 1} (erro transitório)`,
-        {}
-      );
-    } else {
-      await logger.info(
-        "email",
-        `aliasCounter mantido em ${current} para ${account.email} (mínimo=1, não reverte para email base)`,
-        {}
-      );
-    }
-  }
 }
 
 export const emailService = new OutlookEmailService();

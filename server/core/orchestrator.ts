@@ -582,8 +582,11 @@ class Orchestrator {
 
       totalAttempts++;
 
-      // Usa a próxima conta Outlook cadastrada em round-robin como email de registro
-      const email = await emailService.pickNextAccount();
+      // Reserva atomicamente o próximo alias disponível via AliasPoolService
+      // (UNIQUE constraint + INSERT ON DUPLICATE KEY UPDATE garante sem race condition)
+      const reservedAlias = await emailService.reserveNextAlias(jobId);
+      const email = reservedAlias.aliasEmail;
+      const aliasId = reservedAlias.id;
       const password = options.password === "auto" || !options.password ? generatePassword(16) : options.password;
 
       // Create account record
@@ -641,6 +644,8 @@ class Orchestrator {
           await db.update(jobs).set({
             completedAccounts: sql`${jobs.completedAccounts} + 1`,
           }).where(eq(jobs.id, jobId));
+          // Marca alias como usado com sucesso no pool
+          try { await emailService.markAliasUsed(aliasId); } catch (_) { /* ignora */ }
           await logger.info("orchestrator",
             `SUCESSO! Conta ${successCount}/${options.quantity} criada (tentativa ${totalAttempts})` +
             (result.inviteAccepted === false ? " [convite NÃO confirmado]" : ""),
@@ -654,26 +659,28 @@ class Orchestrator {
           consecutiveFailures = 0;
           currentBackoffMs = BACKOFF_CONFIG.initialBackoffMs;
         } else if (result.status === "retry") {
-          // Erro transitório (CAPTCHA, proxy, rede) — NÃO descarta o email nem conta como falha permanente
-          // Marca como "unverified" (status temporário) com metadata indicando retry
+          // Erro transitório (CAPTCHA, proxy, rede) — libera o alias de volta para 'free'
+          // para que possa ser reservado novamente na próxima tentativa
           await db.update(accounts).set({
             status: "unverified",
             token: null,
             phone: null,
             metadata: { error: result.error, retryReason: "transient" },
           }).where(eq(accounts.id, accountId));
+          // Libera o alias no pool (volta para 'free')
+          try { await emailService.releaseAlias(aliasId); } catch (_) { /* ignora */ }
           await logger.warn("orchestrator",
-            `Tentativa ${totalAttempts}: erro transitório (${result.error}) — email preservado para retentativa. ` +
+            `Tentativa ${totalAttempts}: erro transitório (${result.error}) — alias liberado para retentativa. ` +
             `(sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
             { email }, jobId
           );
-          // Devolve o alias counter para não desperdiçar o alias
-          try { await emailService.decrementAliasCounter(email); } catch (_) { /* ignora */ }
           // Release proxy for replacement
           if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
           // Não incrementa consecutiveFailures nem failedAccounts — não é falha permanente
         } else {
           // status === "failed" — falha permanente
+          // Marca alias como falho no pool (nunca mais será tentado)
+          try { await emailService.markAliasFailed(aliasId, result.error || "falha permanente"); } catch (_) { /* ignora */ }
           await db.update(jobs).set({
             failedAccounts: sql`${jobs.failedAccounts} + 1`,
           }).where(eq(jobs.id, jobId));
@@ -698,27 +705,21 @@ class Orchestrator {
         if (err instanceof DOMException && err.name === "AbortError") {
           await logger.info("orchestrator", `Job ${jobId} abortado durante createAccount`, {}, jobId);
           await db.update(accounts).set({ status: "failed", metadata: { error: "Job cancelado" } }).where(eq(accounts.id, accountId));
+          // Libera o alias no pool (job cancelado — alias pode ser reutilizado)
+          try { await emailService.releaseAlias(aliasId); } catch (_) { /* ignora */ }
           // v9.8: Smart proxy handling on cancellation.
-          // Check if the account was actually registered (has a token in DB).
-          // If NOT registered, the proxy IP was never associated with a real account
-          // on the target platform, so it can be safely recycled back to the pool
-          // instead of being wasted on a replacement.
           if (proxy && !proxyReleased) {
             const acct = await db.select({ token: accounts.token }).from(accounts).where(eq(accounts.id, accountId)).limit(1);
             const wasRegistered = !!(acct[0]?.token);
             if (wasRegistered) {
-              // Account was registered — proxy IP is burned, send for replacement
               await logger.info("orchestrator", `Job ${jobId} cancelado APÓS registro — proxy ${proxy.host} queimado, enviando para replacement`, {}, jobId);
               proxyService.releaseProxy(proxy.host, jobId);
             } else {
-              // Account was NOT registered — proxy IP is clean, recycle it
               await logger.info("orchestrator", `Job ${jobId} cancelado ANTES do registro — proxy ${proxy.host} não foi queimado, reciclando`, {}, jobId);
               await proxyService.recycleProxy(proxy.host, jobId);
             }
             proxyReleased = true;
           }
-          // v10.0: Any remaining proxies (from provider internal swaps) will be
-          // released by the .finally() block in createJob via releaseAllForJob()
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);
@@ -727,22 +728,24 @@ class Orchestrator {
         if (msg.startsWith("INVITE_INVALID_CODE:")) {
           await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId));
           await db.update(jobs).set({ failedAccounts: sql`${jobs.failedAccounts} + 1` }).where(eq(jobs.id, jobId));
+          // Alias descartado permanentemente (falha de convite)
+          try { await emailService.markAliasFailed(aliasId, msg); } catch (_) { /* ignora */ }
           await logger.error("orchestrator", `Job ${jobId} abortado: ${msg}`, { email }, jobId);
           if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
-          break; // Sai do loop — job será finalizado como failed
+          break;
         }
 
         // INVITE_NOT_CONFIRMED: conta recebeu créditos insuficientes — descarta e retenta
-        // Não incrementa failedAccounts nem consecutiveFailures (não é falha de infra)
         if (msg.startsWith("INVITE_NOT_CONFIRMED:")) {
           await db.update(accounts).set({ status: "failed", metadata: { error: msg } }).where(eq(accounts.id, accountId));
+          // Alias descartado (conta foi criada mas convite não confirmado)
+          try { await emailService.markAliasFailed(aliasId, msg); } catch (_) { /* ignora */ }
           await logger.warn("orchestrator",
             `Tentativa ${totalAttempts}: conta descartada (${msg}). Retentando com nova conta. ` +
             `(sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
             { email }, jobId
           );
           if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
-          // Não incrementa consecutiveFailures — é falha do convite, não de infra
           continue;
         }
 
@@ -755,11 +758,13 @@ class Orchestrator {
           failedAccounts: sql`${jobs.failedAccounts} + 1`,
         }).where(eq(jobs.id, jobId));
 
+        // Erro genérico: libera o alias (pode ser erro transitório de infra)
+        try { await emailService.releaseAlias(aliasId); } catch (_) { /* ignora */ }
+
         await logger.error("orchestrator",
           `ERRO na tentativa ${totalAttempts}: ${msg} (sucesso: ${successCount}/${options.quantity}, restam ${maxAttempts - totalAttempts} tentativas)`,
           { email }, jobId
         );
-        // v9.1: Safe proxy release — proxy may be null if getProxy() itself threw
         if (proxy && !proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
         consecutiveFailures++;
       }
