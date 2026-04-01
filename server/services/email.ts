@@ -263,15 +263,39 @@ class OutlookEmailService {
 
     const accessToken = data.access_token as string;
     const refreshToken = data.refresh_token as string;
+    const idToken = data.id_token as string | undefined;
 
-    // Buscar o email da conta via Graph API /me
-    const meResp = await fetch(
-      `${MS_GRAPH_BASE}/me?$select=mail,userPrincipalName`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    const meData = (await meResp.json()) as Record<string, unknown>;
-    const email =
-      (meData.mail as string) || (meData.userPrincipalName as string) || "";
+    // 1ª tentativa: extrair email do id_token JWT (mais confiável para contas pessoais)
+    let email = "";
+    if (idToken) {
+      try {
+        const payload = JSON.parse(
+          Buffer.from(idToken.split(".")[1], "base64url").toString("utf8")
+        ) as Record<string, unknown>;
+        email =
+          (payload.email as string) ||
+          (payload.preferred_username as string) ||
+          (payload.upn as string) ||
+          "";
+      } catch {
+        // ignora erros de parse do JWT
+      }
+    }
+
+    // 2ª tentativa: Graph API /me
+    if (!email) {
+      try {
+        const meResp = await fetch(
+          `${MS_GRAPH_BASE}/me?$select=mail,userPrincipalName`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        const meData = (await meResp.json()) as Record<string, unknown>;
+        email =
+          (meData.mail as string) || (meData.userPrincipalName as string) || "";
+      } catch {
+        // ignora erros de rede
+      }
+    }
 
     if (!email) {
       throw new Error(
