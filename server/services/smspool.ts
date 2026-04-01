@@ -888,12 +888,25 @@ class SMSPoolProvider {
           };
         }
 
-        // 5. Timeout — cancelar e retornar falha (não tenta outro número em timeout)
+        // 5. Timeout — cancelar e tentar outro número (se ainda há tentativas)
+        await logger.warn("smspool",
+          `Timeout: SMS não recebido em ${opts.waitTimeMs / 1000}s (orderId: ${numberData.orderId})`,
+          {}, opts.jobId
+        );
         await logger.warn("smspool",
           `SMS não recebido (timeout). Cancelando pedido ${numberData.orderId}...`,
           {}, opts.jobId
         );
         await this.cancelSMS(numberData.orderId, opts.jobId);
+
+        if (numberAttempt < MAX_NUMBER_RETRIES) {
+          await logger.info("smspool",
+            `Tentando outro número SMSPool (${numberAttempt + 1}/${MAX_NUMBER_RETRIES})...`,
+            {}, opts.jobId
+          );
+          continue; // Tenta comprar outro número
+        }
+
         return {
           success: false,
           cost: 0,

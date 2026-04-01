@@ -1095,19 +1095,33 @@ class SmsService {
           signal,
         });
         if (smsPoolResult) return smsPoolResult;
+
+        // SMSPool retornou null (sem resultado) — não cai no SMSBower
+        await logger.warn("sms",
+          `SMSPool (primary) não retornou número válido. Abortando — SMSBower desativado quando SMSPool é primary.`,
+          {}, jobId
+        );
+        throw new Error("SMSPool: Nenhum número disponível após todas as tentativas");
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") throw err;
-        // Erros fatais (account banned, etc.) — re-throw
+        // Erros fatais (account banned, ban, saldo, etc.) — re-throw sem tentar SMSBower
         if (err instanceof Error && (
           err.message.includes("user is blocked") ||
           err.message.includes("USER_IS_BLOCKED") ||
-          err.name === "AccountBannedError"
+          err.name === "AccountBannedError" ||
+          err.message.includes("Saldo insuficiente") ||
+          err.message.includes("API key inválida") ||
+          err.message.includes("Bloqueado por") ||
+          err.message.includes("bloqueado por excesso") ||
+          err.message.startsWith("SMSPool:")
         )) throw err;
+        // Qualquer outro erro do SMSPool — também não cai no SMSBower
         const msg = err instanceof Error ? err.message : String(err);
         await logger.warn("sms",
-          `SMSPool (primary) falhou: ${msg}. Continuando com SMSBower...`,
+          `SMSPool (primary) falhou: ${msg}. Não tentando SMSBower (SMSPool é primary).`,
           {}, jobId
         );
+        throw new Error(`SMSPool falhou: ${msg}`);
       }
     }
 
