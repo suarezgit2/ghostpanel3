@@ -13,10 +13,8 @@ const ENV_FALLBACKS: Record<string, string> = {
   capsolver_api_key: ENV.capsolverApiKey,
   smsbower_api_key: ENV.smsbowerApiKey,
   webshare_api_key: ENV.webshareApiKey,
-  zoho_client_id: ENV.zohoClientId,
-  zoho_client_secret: ENV.zohoClientSecret,
-  zoho_refresh_token: ENV.zohoRefreshToken,
-  zoho_account_id: ENV.zohoAccountId,
+  ms_client_id: ENV.msClientId,
+  ms_client_secret: ENV.msClientSecret,
   email_domain: "lojasmesh.com",
 };
 

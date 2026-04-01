@@ -170,7 +170,7 @@ Para uso local e Oracle Cloud, use `LOCAL_AUTH=true`.
 | CapSolver | Resolver Turnstile (fallback) | `CAPSOLVER_API_KEY` | ~$0.003/solve |
 | SMSBower | Receber códigos SMS (Indonésia) | `SMSBOWER_API_KEY` | $0.01/número |
 | Webshare | Pool de proxies rotativos | `WEBSHARE_API_KEY` | Plano variável |
-| Zoho Mail | Leitura de emails (catch-all) | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN`, `ZOHO_ACCOUNT_ID` | Gratuito |
+| Microsoft Graph | Leitura de emails de verificação | `MS_CLIENT_ID`, `MS_CLIENT_SECRET` + contas via painel | Gratuito |
 
 O provedor de captcha pode ser selecionado em **Configurações > Provedor de Captcha**. Se o provedor selecionado não tiver API key configurada, o sistema automaticamente usa o outro como fallback.
 

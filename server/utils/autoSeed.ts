@@ -43,6 +43,9 @@ export async function autoSeedDefaults(): Promise<void> {
   // Seed default settings
   const defaultSettings = [
     { key: "email_domain", value: "lojasmesh.com", description: "Domínio catch-all para emails" },
+    { key: "ms_client_id", value: "", description: "Microsoft App: Client ID (Azure Portal)" },
+    { key: "ms_client_secret", value: "", description: "Microsoft App: Client Secret (Azure Portal)" },
+    { key: "outlook_accounts", value: "[]", description: "Pool de contas Outlook autorizadas (JSON gerenciado pelo painel)" },
     { key: "sms_country", value: "6", description: "Código do país SMS (6=Indonesia)" },
     { key: "sms_service", value: "ot", description: "Código do serviço SMS (ot=Other)" },
     { key: "sms_max_price", value: "0.01", description: "Preço máximo por número SMS ($)" },

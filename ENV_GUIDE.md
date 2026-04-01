@@ -38,19 +38,20 @@ O serviço usa números da Indonésia (país 6, serviço "ot") com preço máxim
 
 Os proxies são sincronizados automaticamente do Webshare. Use o botão "Sincronizar" na página de Proxies para importar manualmente.
 
-## Zoho Mail (Email catch-all)
+## Microsoft Outlook (Email de verificação)
 
-O Zoho Mail é usado para ler os emails de verificação enviados pelo manus.im. É necessário configurar um domínio catch-all (ex: `@lojasmesh.com`) no Zoho para receber emails de qualquer endereço nesse domínio.
+O sistema usa a **Microsoft Graph API** para ler emails de verificação de contas pessoais `@outlook.com` / `@hotmail.com` / `@live.com`.
+
+### Arquitetura multi-conta
+
+Um único App Azure é registrado **uma vez** e pode autorizar **N contas** Outlook. Cada conta gera seu próprio `refresh_token`, mas todas usam o mesmo `MS_CLIENT_ID` e `MS_CLIENT_SECRET`.
 
 | Variável | Descrição |
 |----------|-----------|
-| `ZOHO_CLIENT_ID` | Client ID do OAuth2 |
-| `ZOHO_CLIENT_SECRET` | Client Secret do OAuth2 |
-| `ZOHO_REFRESH_TOKEN` | Refresh Token do OAuth2 (escopo: `ZohoMail.messages.READ ZohoMail.accounts.READ`) |
-| `ZOHO_ACCOUNT_ID` | ID numérico da conta Zoho Mail |
+| `MS_CLIENT_ID` | Client ID do App Azure (Azure Portal → App Registrations) |
+| `MS_CLIENT_SECRET` | Client Secret do App Azure |
 
-Para configurar o OAuth2 do Zoho, acesse https://api-console.zoho.com/ e crie um "Self Client" com os escopos `ZohoMail.messages.READ` e `ZohoMail.accounts.READ`. Gere um refresh token com esses escopos.
-
+Contas Outlook são gerenciadas pelo painel (Configurações → Contas Outlook Autorizadas). Não é necessário configurar tokens manualmente.
 ## TLS Impersonation (opcional, recomendado)
 
 O sistema usa `impers` (curl-impersonate) para fazer requisições HTTP com fingerprint TLS/HTTP2 idêntico ao Google Chrome real. Isso impede que o Cloudflare ou o servidor do manus.im detecte que as requisições vêm de Node.js.
@@ -110,11 +111,9 @@ SMSBOWER_API_KEY=sua-chave-smsbower
 # === Proxies ===
 WEBSHARE_API_KEY=sua-chave-webshare
 
-# === Zoho Mail ===
-ZOHO_CLIENT_ID=1000.XXXX
-ZOHO_CLIENT_SECRET=xxxx
-ZOHO_REFRESH_TOKEN=1000.xxxx.xxxx
-ZOHO_ACCOUNT_ID=1410307000000008002
+# === Microsoft Outlook ===
+MS_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+MS_CLIENT_SECRET=xxxx~xxxx
 
 # === TLS Impersonation (opcional, recomendado) ===
 LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so
@@ -137,6 +136,6 @@ O `DATABASE_URL` deve apontar para um MySQL 8+ ou TiDB. Para desenvolvimento loc
 
 O `JWT_SECRET` deve ser uma string aleatória longa (mínimo 32 caracteres). Nunca compartilhe ou commite este valor.
 
-O `ZOHO_REFRESH_TOKEN` expira se não for usado por um período longo. Se o serviço de email parar de funcionar, gere um novo refresh token no console do Zoho.
+O `refresh_token` de cada conta Outlook expira após **90 dias sem uso**. Se o serviço de email parar de funcionar para uma conta específica, re-autorize essa conta no painel (Configurações → Contas Outlook Autorizadas → Adicionar Conta).
 
 As configurações de SMS (país, serviço, preço máximo, número de retries) podem ser ajustadas dinamicamente pela interface web em **Configurações**, sem necessidade de reiniciar o servidor.

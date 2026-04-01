@@ -25,6 +25,7 @@ const Keys = lazy(() => import("./pages/Keys"));
 const ApiDocs = lazy(() => import("./pages/ApiDocs"));
 const ApiTokens = lazy(() => import("./pages/ApiTokens"));
 const RedeemKey = lazy(() => import("./pages/RedeemKey"));
+const OutlookCallback = lazy(() => import("./pages/OutlookCallback"));
 
 // Loading spinner para Suspense
 function PageLoader() {
@@ -49,6 +50,7 @@ function Router({ onLogout }: { onLogout: () => void }) {
           <Route path="/proxies" component={Proxies} />
           <Route path="/logs" component={Logs} />
           <Route path="/settings" component={SettingsPage} />
+          <Route path="/settings/outlook-callback" component={OutlookCallback} />
           <Route path="/keys" component={Keys} />
           <Route path="/api-docs" component={ApiDocs} />
           <Route path="/api-tokens" component={ApiTokens} />
@@ -83,6 +85,10 @@ function App() {
                 <p className="text-sm text-muted-foreground">Carregando...</p>
               </div>
             </div>
+          ) : window.location.pathname === "/settings/outlook-callback" ? (
+            <Suspense fallback={<PageLoader />}>
+              <OutlookCallback />
+            </Suspense>
           ) : window.location.pathname === "/redeem" ? (
             <Suspense fallback={<PageLoader />}>
               <RedeemKey />

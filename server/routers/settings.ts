@@ -10,6 +10,7 @@ import { getDb } from "../db";
 import { settings, providers } from "../../drizzle/schema";
 import { getAllSettings, setSetting, clearSettingsCache } from "../utils/settings";
 import { smsService, CountryConfig, KNOWN_COUNTRIES } from "../services/sms";
+import { emailService, MS_AUTH_URL_BASE, MS_OAUTH_SCOPES } from "../services/email";
 // v6.0: FPJS Direct Client (HTTP POST) replaces Puppeteer-based fpjsService
 // import { fpjsService } from "../services/fpjs";
 
@@ -20,9 +21,9 @@ const SENSITIVE_KEYS = new Set([
   "smsbower_api_key",
   "smspool_api_key",
   "webshare_api_key",
-  "zoho_client_id",
-  "zoho_client_secret",
-  "zoho_refresh_token",
+  "ms_client_id",
+  "ms_client_secret",
+  "outlook_accounts",
   "admin_password_hash",
 ]);
 
@@ -354,6 +355,9 @@ export const settingsRouter = router({
     // Seed default settings
     const defaultSettings = [
       { key: "email_domain", value: "lojasmesh.com", description: "Domínio catch-all para emails" },
+      { key: "ms_client_id", value: "", description: "Microsoft App: Client ID (Azure Portal)" },
+      { key: "ms_client_secret", value: "", description: "Microsoft App: Client Secret (Azure Portal)" },
+      { key: "outlook_accounts", value: "[]", description: "Pool de contas Outlook autorizadas (JSON gerenciado pelo painel)" },
       { key: "sms_country", value: "6", description: "Código do país SMS (6=Indonesia)" },
       { key: "sms_service", value: "ot", description: "Código do serviço SMS (ot=Other)" },
       { key: "sms_max_price", value: "0.01", description: "Preço máximo por número SMS ($)" },
@@ -446,5 +450,64 @@ export const settingsRouter = router({
         "Modo Manutenção: suspende novos resgates de keys quando ativo"
       );
       return { enabled: input.enabled };
+    }),
+
+  // ============================================================
+  // Outlook / Microsoft Graph — gerenciamento de contas de email
+  // ============================================================
+
+  /**
+   * Lista todas as contas Outlook cadastradas (sem expor tokens).
+   */
+  listOutlookAccounts: protectedProcedure.query(async () => {
+    return emailService.listAccounts();
+  }),
+
+  /**
+   * Gera a URL de autorização OAuth2 para adicionar uma nova conta Outlook.
+   * O usuário deve acessar essa URL, fazer login e autorizar o App.
+   * Após autorizar, a Microsoft redireciona para redirectUri com um `code`.
+   */
+  getOutlookAuthUrl: protectedProcedure
+    .input(z.object({ redirectUri: z.string() }))
+    .query(async ({ input }) => {
+      const clientId = (await import("../utils/settings")).getSetting("ms_client_id");
+      const resolvedClientId = await clientId;
+      if (!resolvedClientId) {
+        throw new Error("ms_client_id não configurado. Adicione o Client ID do App Azure no painel.");
+      }
+      const params = new URLSearchParams({
+        client_id: resolvedClientId,
+        response_type: "code",
+        redirect_uri: input.redirectUri,
+        scope: MS_OAUTH_SCOPES,
+        response_mode: "query",
+        prompt: "select_account",
+      });
+      return { url: `${MS_AUTH_URL_BASE}?${params.toString()}` };
+    }),
+
+  /**
+   * Troca o authorization_code retornado pela Microsoft por tokens
+   * e salva a conta no pool.
+   */
+  exchangeOutlookCode: protectedProcedure
+    .input(z.object({ code: z.string(), redirectUri: z.string() }))
+    .mutation(async ({ input }) => {
+      const result = await emailService.exchangeCodeForTokens(
+        input.code,
+        input.redirectUri
+      );
+      return { success: true, email: result.email };
+    }),
+
+  /**
+   * Remove uma conta Outlook do pool.
+   */
+  removeOutlookAccount: protectedProcedure
+    .input(z.object({ email: z.string() }))
+    .mutation(async ({ input }) => {
+      await emailService.removeAccount(input.email);
+      return { success: true };
     }),
 });

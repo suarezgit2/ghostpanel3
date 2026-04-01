@@ -55,10 +55,8 @@ SMSBOWER_API_KEY=
 WEBSHARE_API_KEY=
 
 # Zoho Mail (opcional)
-ZOHO_CLIENT_ID=
-ZOHO_CLIENT_SECRET=
-ZOHO_REFRESH_TOKEN=
-ZOHO_ACCOUNT_ID=
+MS_CLIENT_ID=
+MS_CLIENT_SECRET=
 EOF
 
     echo "✅ Arquivo .env criado com JWT_SECRET gerado automaticamente"

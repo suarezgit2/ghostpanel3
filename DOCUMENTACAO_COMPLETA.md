@@ -815,10 +815,10 @@ job_folders (1) ──── (N) jobs
 
 | Variável | Descrição | Exemplo |
 |----------|-----------|---------|
-| `ZOHO_CLIENT_ID` | Client ID OAuth2 | `1000.XXXX` |
-| `ZOHO_CLIENT_SECRET` | Client Secret OAuth2 | `xxxx` |
-| `ZOHO_REFRESH_TOKEN` | Refresh Token (escopo: ZohoMail.messages.READ ZohoMail.accounts.READ) | `1000.xxxx.xxxx` |
-| `ZOHO_ACCOUNT_ID` | ID numérico da conta Zoho | `1410307000000008002` |
+| `MS_CLIENT_ID` | Client ID do App Azure | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
+| `MS_CLIENT_SECRET` | Client Secret do App Azure | `xxxx~xxxx` |
+
+Contas Outlook são adicionadas via painel (Configurações → Contas Outlook Autorizadas).
 
 ### 6.6 TLS Impersonation (opcional, recomendado)
 
@@ -865,10 +865,8 @@ SMSBOWER_API_KEY=sua-chave-smsbower
 WEBSHARE_API_KEY=sua-chave-webshare
 
 # === Zoho Mail ===
-ZOHO_CLIENT_ID=1000.XXXX
-ZOHO_CLIENT_SECRET=xxxx
-ZOHO_REFRESH_TOKEN=1000.xxxx.xxxx
-ZOHO_ACCOUNT_ID=1410307000000008002
+MS_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+MS_CLIENT_SECRET=xxxx~xxxx
 
 # === TLS Impersonation (opcional, recomendado) ===
 LIBCURL_IMPERSONATE_PATH=/opt/curl-impersonate/libcurl-impersonate-chrome.so

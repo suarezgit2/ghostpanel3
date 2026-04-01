@@ -15,10 +15,8 @@ export const ENV = {
   capsolverApiKey: process.env.CAPSOLVER_API_KEY ?? "",
   smsbowerApiKey: process.env.SMSBOWER_API_KEY ?? "",
   webshareApiKey: process.env.WEBSHARE_API_KEY ?? "",
-  zohoClientId: process.env.ZOHO_CLIENT_ID ?? "",
-  zohoClientSecret: process.env.ZOHO_CLIENT_SECRET ?? "",
-  zohoRefreshToken: process.env.ZOHO_REFRESH_TOKEN ?? "",
-  zohoAccountId: process.env.ZOHO_ACCOUNT_ID ?? "",
+  msClientId: process.env.MS_CLIENT_ID ?? "",
+  msClientSecret: process.env.MS_CLIENT_SECRET ?? "",
   twocaptchaApiKey: process.env.TWOCAPTCHA_API_KEY ?? "",
   captchaProvider: process.env.CAPTCHA_PROVIDER ?? "capsolver",
   // TLS Impersonation (curl-impersonate)

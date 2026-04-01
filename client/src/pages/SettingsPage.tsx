@@ -85,14 +85,12 @@ const API_KEY_GROUPS: SettingGroup[] = [
     ],
   },
   {
-    title: "Zoho Mail",
+    title: "Microsoft App (Azure)",
     icon: Mail,
-    description: "Leitura de emails de verificação",
+    description: "App Azure registrado uma vez — autoriza todas as contas Outlook",
     keys: [
-      { key: "zoho_client_id", label: "Client ID", sensitive: false, placeholder: "1000.XXX" },
-      { key: "zoho_client_secret", label: "Client Secret", sensitive: true, placeholder: "Client secret" },
-      { key: "zoho_refresh_token", label: "Refresh Token", sensitive: true, placeholder: "1000.XXX" },
-      { key: "zoho_account_id", label: "Account ID", sensitive: false, placeholder: "1410307000000008002" },
+      { key: "ms_client_id", label: "Client ID", sensitive: false, placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
+      { key: "ms_client_secret", label: "Client Secret", sensitive: true, placeholder: "Client secret do App Azure" },
       { key: "email_domain", label: "Domínio(s) do Email", sensitive: false, placeholder: "dominio1.com, dominio2.com, dominio3.com", description: "Separe múltiplos domínios por vírgula. Cada conta usará um domínio aleatório — evita ban em lote por domínio compartilhado." },
     ],
   },
@@ -219,6 +217,138 @@ function FieldWithHelp({
       </div>
       {children}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Componente: Gerenciamento de Contas Outlook                        */
+/* ------------------------------------------------------------------ */
+
+function OutlookAccountsSection() {
+  const { data: accounts, refetch } = trpc.settings.listOutlookAccounts.useQuery();
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [loadingAuth, setLoadingAuth] = useState(false);
+  const [removingEmail, setRemovingEmail] = useState<string | null>(null);
+
+  const getAuthUrlQuery = trpc.settings.getOutlookAuthUrl.useQuery(
+    { redirectUri: `${window.location.origin}/settings/outlook-callback` },
+    { enabled: false }
+  );
+
+  const removeMutation = trpc.settings.removeOutlookAccount.useMutation({
+    onSuccess: () => {
+      toast.success("Conta removida");
+      setRemovingEmail(null);
+      refetch();
+    },
+    onError: (err) => toast.error("Erro ao remover conta", { description: err.message }),
+  });
+
+  const handleAddAccount = async () => {
+    setLoadingAuth(true);
+    try {
+      const result = await getAuthUrlQuery.refetch();
+      if (result.data?.url) {
+        window.open(result.data.url, "_blank", "width=500,height=700");
+        setAuthUrl(result.data.url);
+      }
+    } catch (err: any) {
+      toast.error("Erro ao gerar URL de autorização", { description: err.message });
+    } finally {
+      setLoadingAuth(false);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.24 }}
+      className="rounded-xl border border-border bg-card"
+    >
+      <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-ghost-surface-2">
+            <Mail className="w-4 h-4 text-muted-foreground" />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">Contas Outlook Autorizadas</h2>
+            <p className="text-xs text-muted-foreground">
+              Pool de contas @outlook.com / @hotmail.com para leitura de emails de verificação
+            </p>
+          </div>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleAddAccount}
+          disabled={loadingAuth}
+          className="gap-2 text-xs"
+        >
+          {loadingAuth ? (
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Key className="w-3.5 h-3.5" />
+          )}
+          Adicionar Conta
+        </Button>
+      </div>
+      <div className="p-6">
+        {!accounts || accounts.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-8 gap-3 text-center">
+            <Mail className="w-8 h-8 text-muted-foreground/30" />
+            <p className="text-sm text-muted-foreground">Nenhuma conta Outlook cadastrada</p>
+            <p className="text-xs text-muted-foreground/60">
+              Clique em "Adicionar Conta" para autorizar uma conta @outlook.com ou @hotmail.com
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {accounts.map((account) => (
+              <div
+                key={account.email}
+                className="flex items-center justify-between px-4 py-3 rounded-lg bg-ghost-surface-2 border border-border"
+              >
+                <div className="flex items-center gap-3">
+                  <CheckCircle className="w-4 h-4 text-green-500" />
+                  <span className="text-sm font-mono text-foreground">{account.email}</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setRemovingEmail(account.email);
+                    removeMutation.mutate({ email: account.email });
+                  }}
+                  disabled={removingEmail === account.email}
+                  className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                >
+                  {removingEmail === account.email ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-3.5 h-3.5" />
+                  )}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        {authUrl && (
+          <div className="mt-4 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+            <p className="text-xs text-blue-400">
+              Uma janela de autorização foi aberta. Faça login na conta Outlook desejada e autorize o App.
+              Após autorizar, a conta aparecerá automaticamente na lista acima.
+            </p>
+            <button
+              className="text-xs text-blue-300 underline mt-1"
+              onClick={() => { refetch(); setAuthUrl(null); }}
+            >
+              Já autorizei — atualizar lista
+            </button>
+          </div>
+        )}
+      </div>
+    </motion.div>
   );
 }
 
@@ -386,9 +516,8 @@ export default function SettingsPage() {
     "smsbower_api_key",
     "smspool_api_key",
     "webshare_api_key",
-    "zoho_client_id",
-    "zoho_client_secret",
-    "zoho_refresh_token",
+    "ms_client_id",
+    "ms_client_secret",
     "admin_password_hash",
   ]);
 
@@ -411,6 +540,8 @@ export default function SettingsPage() {
     "smspool_max_price",
     "smspool_pool",
     "smspool_priority",
+    // outlook_accounts é gerenciado pelos endpoints listOutlookAccounts/removeOutlookAccount
+    "outlook_accounts",
   ]);
 
   const saveSettings = async () => {
@@ -565,6 +696,11 @@ export default function SettingsPage() {
               </div>
             </motion.div>
           ))}
+          {/* ============================================================ */}
+          {/*  Seção: Contas Outlook (gerenciamento via OAuth)              */}
+          {/* ============================================================ */}
+          <OutlookAccountsSection />
+
         </div>
       )}
 
