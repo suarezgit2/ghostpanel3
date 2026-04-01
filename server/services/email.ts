@@ -366,15 +366,18 @@ class OutlookEmailService {
   /**
    * Retorna o próximo alias de email Outlook em round-robin com contador +N.
    *
+   * IMPORTANTE: O email base NUNCA é usado como email de registro no Manus.
+   * Sempre usa alias +N (começando em +1), pois o email base já pode estar
+   * cadastrado no Manus de tentativas anteriores.
+   *
    * Exemplo com 2 contas cadastradas:
-   *   conta1@outlook.com        (aliasCounter=0 → usa email base)
-   *   conta2@outlook.com        (aliasCounter=0 → usa email base)
-   *   conta1+1@outlook.com      (aliasCounter=1)
-   *   conta2+1@outlook.com      (aliasCounter=1)
-   *   conta1+2@outlook.com      (aliasCounter=2)
+   *   conta1+1@outlook.com      (aliasCounter: 0→1, primeira vez)
+   *   conta2+1@outlook.com      (aliasCounter: 0→1, primeira vez)
+   *   conta1+2@outlook.com      (aliasCounter: 1→2)
+   *   conta2+2@outlook.com      (aliasCounter: 1→2)
    *   ...
    *
-   * O aliasCounter é incrementado e persistido no banco a cada uso.
+   * O aliasCounter representa o Último alias gerado e é persistido no banco.
    * Todos os emails com alias +N chegam na caixa de entrada do email base.
    */
   async pickNextAccount(): Promise<string> {
@@ -390,17 +393,16 @@ class OutlookEmailService {
     roundRobinIndex = (roundRobinIndex + 1) % allAccounts.length;
 
     const account = allAccounts[idx];
-    const counter = account.aliasCounter ?? 0;
+    // Garante que o counter começa em 1 (nunca usa o email base como registro)
+    const counter = Math.max(account.aliasCounter ?? 0, 1);
 
     // Incrementa e persiste o contador desta conta
     account.aliasCounter = counter + 1;
     await saveOutlookAccounts(allAccounts);
 
-    // Gera o alias: email base na primeira vez (counter=0), +N nas seguintes
+    // Sempre gera alias +N (nunca retorna o email base)
     const [localPart, domain] = account.email.split("@");
-    const alias = counter === 0
-      ? account.email
-      : `${localPart}+${counter}@${domain}`;
+    const alias = `${localPart}+${counter}@${domain}`;
 
     return alias;
   }
@@ -619,13 +621,22 @@ class OutlookEmailService {
     );
     if (!account) return;
 
-    const current = account.aliasCounter ?? 0;
-    if (current > 0) {
+    const current = account.aliasCounter ?? 1;
+    // Mínimo é 1: nunca reverte para 0 (que usaria o email base) nem abaixo do alias atual
+    // O decremento só acontece se o counter está acima de 1, garantindo que o alias
+    // seja reutilizado na próxima tentativa sem avançar desnecessariamente.
+    if (current > 1) {
       account.aliasCounter = current - 1;
       await saveOutlookAccounts(allAccounts);
       await logger.info(
         "email",
         `aliasCounter decrementado para ${account.email}: ${current} → ${current - 1} (erro transitório)`,
+        {}
+      );
+    } else {
+      await logger.info(
+        "email",
+        `aliasCounter mantido em ${current} para ${account.email} (mínimo=1, não reverte para email base)`,
         {}
       );
     }
