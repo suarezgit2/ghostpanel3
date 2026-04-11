@@ -293,8 +293,12 @@ class ProxyService {
     const MAX_RETRIES = 5;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      // Build conditions: enabled=true (available proxies)
-      let conditions = eq(proxies.enabled, true);
+      // Build conditions: enabled=true (available proxies) AND never used (lastUsedAt IS NULL)
+      // v10.6: Explicitly exclude proxies that were used or recycled recently to ensure rotation
+      let conditions = and(
+        eq(proxies.enabled, true),
+        isNull(proxies.lastUsedAt)
+      )!;
 
       if (blockedCountries.length > 0) {
         const blockedList = blockedCountries.map(c => `'${c}'`).join(",");
@@ -419,16 +423,18 @@ class ProxyService {
       const db = await getDb();
       if (!db) return;
 
+      // v10.6: Improved recycle logic to ensure the proxy is truly available for rotation
       const result = await db
         .update(proxies)
         .set({
           enabled: true,
-          lastUsedAt: null,
+          lastUsedAt: null, // Clear lastUsedAt so getProxy can pick it up again
+          failCount: sql`${proxies.failCount} + 1` // Increment failCount so it's deprioritized in the next pick
         })
         .where(
           and(
             eq(proxies.host, ip),
-            eq(proxies.enabled, false) // Only recycle if it's currently disabled
+            eq(proxies.enabled, false)
           )
         );
 
