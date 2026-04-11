@@ -355,11 +355,13 @@ class Orchestrator {
       try {
         await logger.info("orchestrator",
           `Cliente "${clientName}" iniciando (${clientQueueLimiter.getActive()}/${clientQueueLimiter.getMax()} ativos, ` +
-          `${clientQueueLimiter.getQueued()} na fila). Pasta #${folderId}, ${jobCount} job(s) em paralelo.`
+          `${clientQueueLimiter.getQueued()} na fila). Pasta #${folderId}, ${jobCount} job(s) em sequência.`
         );
 
-        // Dispara todos os jobs do cliente em PARALELO
-        const jobPromises = pendingJobIds.map(async (jobId, i) => {
+        // v10.5: Alterado de paralelo (Promise.all) para SEQUENCIAL (for...of)
+        // Isso evita que múltiplos jobs esgotem o pool de proxies simultaneamente.
+        for (let i = 0; i < pendingJobIds.length; i++) {
+          const jobId = pendingJobIds[i];
           const quantity = jobQuantities[i];
           const label = jobCount > 1
             ? `${clientName} — Job ${i + 1}/${jobCount}`
@@ -372,7 +374,7 @@ class Orchestrator {
               `Job ${jobId} cancelado antes de iniciar. Pulando.`,
               {}, jobId
             );
-            return;
+            continue;
           }
 
           // Marca como running e inicia
@@ -397,7 +399,7 @@ class Orchestrator {
           try {
             await this.executeJob(jobId, provider, providerId, jobOptions, abortController.signal);
           } catch (err) {
-            if (err instanceof Error && err.name === "AbortError") return;
+            if (err instanceof Error && err.name === "AbortError") continue;
             await logger.error("orchestrator", `Job ${jobId} falhou: ${err}`, {}, jobId);
             const db2 = await getDb();
             if (db2) await db2.update(jobs).set({ status: "failed" }).where(eq(jobs.id, jobId));
@@ -405,10 +407,12 @@ class Orchestrator {
             this.activeJobs.delete(jobId);
             try { await proxyService.releaseAllForJob(jobId); } catch {}
           }
-        });
 
-        // Aguarda todos os jobs do cliente terminarem
-        await Promise.all(jobPromises);
+          // Pequeno delay entre jobs do mesmo cliente para dar tempo ao pool de respirar
+          if (i < pendingJobIds.length - 1) {
+            await sleep(5000);
+          }
+        }
 
         await logger.info("orchestrator",
           `Cliente "${clientName}" concluído. Todos os ${jobCount} job(s) finalizados.`

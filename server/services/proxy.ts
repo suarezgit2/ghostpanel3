@@ -187,9 +187,14 @@ class ProxyService {
         return await this.syncFromWebshare(jobId);
       }
 
+      // v10.5: Implementada preferência por proxies dos Estados Unidos (US) para substituição total
       const replacePayload = {
         to_replace: { type: "ip_address", ip_addresses: ipAddresses },
-        replace_with: [{ type: "any", count: ipAddresses.length }],
+        replace_with: [{ 
+          type: "any", 
+          count: ipAddresses.length,
+          countries: ["US"] // Prioriza proxies dos Estados Unidos
+        }],
         dry_run: false,
       };
 
@@ -554,9 +559,15 @@ class ProxyService {
 
           this.isReplacing = true;
 
+          // v10.5: Implementada preferência por proxies dos Estados Unidos (US)
+          // Se o usuário desejar mudar a região, pode alterar o campo 'countries' abaixo.
           const replacePayload = {
             to_replace: { type: "ip_address", ip_addresses: ipsToReplace },
-            replace_with: [{ type: "any", count: ipsToReplace.length }],
+            replace_with: [{ 
+              type: "any", 
+              count: ipsToReplace.length,
+              countries: ["US"] // Prioriza proxies dos Estados Unidos
+            }],
             dry_run: false,
           };
 

@@ -204,7 +204,7 @@ async function solveTurnstileWithRetry(proxy: ProxyInfo | null, jobId?: number):
 // Cache de proxies verificados: proxy key → timestamp do último check OK
 const proxyHealthCache = new Map<string, number>();
 const PROXY_HEALTH_CACHE_TTL_MS = 60_000; // 60s
-const PROXY_CHECK_TIMEOUT_S = 8;         // 8s timeout para o ping
+const PROXY_CHECK_TIMEOUT_S = 15;        // v10.5: Aumentado de 8s para 15s para evitar falsos-negativos
 const MAX_PROXY_RETRIES = 3;             // Máximo de proxies a tentar antes de desistir
 
 /**
@@ -221,22 +221,31 @@ async function checkProxyHealth(proxy: ProxyInfo | null, jobId?: number, profile
     return true; // Proxy verificado recentemente
   }
 
-  try {
-    // v8.0: Use the SAME User-Agent as the profile to avoid WAF detecting
-    // two different UAs from the same IP in quick succession
-    await httpRequest({
-      method: "GET",
-      url: "https://manus.im/login",
-      headers: { "User-Agent": profileUA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" },
-      proxy,
-      timeout: PROXY_CHECK_TIMEOUT_S,
-    });
-    proxyHealthCache.set(key, Date.now());
-    return true;
-  } catch {
-    proxyHealthCache.delete(key);
-    return false;
+  // v10.5: Adicionado retry interno (2x) para o ping de saúde
+  // Isso evita descartar um proxy bom por causa de um micro-timeout de rede.
+  for (let i = 0; i < 2; i++) {
+    try {
+      // v8.0: Use the SAME User-Agent as the profile to avoid WAF detecting
+      // two different UAs from the same IP in quick succession
+      await httpRequest({
+        method: "GET",
+        url: "https://manus.im/login",
+        headers: { "User-Agent": profileUA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" },
+        proxy,
+        timeout: PROXY_CHECK_TIMEOUT_S,
+      });
+      proxyHealthCache.set(key, Date.now());
+      return true;
+    } catch (err) {
+      if (i === 0) {
+        await sleep(2000); // Pequena pausa antes de tentar o segundo ping
+        continue;
+      }
+      proxyHealthCache.delete(key);
+      return false;
+    }
   }
+  return false;
 }
 
 export class ManusProvider {
@@ -251,8 +260,10 @@ export class ManusProvider {
       // Build authCommandCmd from fingerprint (locale, timezone, tzOffset DST-aware, firstEntry randomized, fbp)
       const authCommandCmd = buildAuthCommandCmd(fingerprint);
 
-      // SUSPEITA 4 REATIVADA: Proxy health check com 15 tentativas
-      const MAX_PROXY_ATTEMPTS = 15;
+      // v10.5: Reduzido de 15 para 3 tentativas para evitar exaustão rápida do pool.
+      // Se o proxy falhar no health-check (Step 0), ele é RECICLADO (devolvido ao pool)
+      // em vez de ser enviado para replacement, pois o erro pode ser instabilidade temporária.
+      const MAX_PROXY_ATTEMPTS = 3;
       let proxyOk = false;
       
       for (let proxyAttempt = 1; proxyAttempt <= MAX_PROXY_ATTEMPTS; proxyAttempt++) {
@@ -270,12 +281,17 @@ export class ManusProvider {
         }
         
         await logger.warn("step_0_proxy",
-          `Proxy ${proxyLabel} inacessível. Trocando proxy...`,
+          `Proxy ${proxyLabel} inacessível. Reciclando e trocando proxy...`,
           {}, jobId
         );
         
+        // v10.5: Recicla o proxy que falhou no health-check (não foi "queimado" no registro)
+        if (proxy) {
+          await proxyService.recycleProxy(proxy.host, jobId);
+        }
+
         if (proxyAttempt === MAX_PROXY_ATTEMPTS) {
-          return { email, password, status: "retry", error: `Proxy inacessível após ${MAX_PROXY_ATTEMPTS} tentativas`, metadata: {} };
+          return { email, password, status: "failed", error: `Proxy inacessível após ${MAX_PROXY_ATTEMPTS} tentativas`, metadata: {} };
         }
         
         try {
