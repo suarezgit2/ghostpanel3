@@ -86,8 +86,9 @@ async function rpcCall(
     // because the requestId doesn't exist in the FPJS database.
     // Format: {timestamp}.{6 random alphanumeric chars} — matches real FPJS format.
     const ALPHANUM = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    const pageLoadDelay = 20000 + Math.floor(Math.random() * 20000);
-    const ts = Date.now() - pageLoadDelay;
+    // v10.8: Reduced pageLoadDelay to 5-10s. 
+    // 20-40s was too long and might make the requestId look "stale" to the Manus backend.
+    const ts = Date.now() - (5000 + Math.floor(Math.random() * 5000));
     let rand = '';
     for (let i = 0; i < 6; i++) {
       rand += ALPHANUM[Math.floor(Math.random() * ALPHANUM.length)];

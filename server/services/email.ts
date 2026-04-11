@@ -534,11 +534,17 @@ class OutlookEmailService {
           );
           if (!isForUs) continue;
 
-          // Verificar se é recente
+          // v10.8: Improved recency check.
+          // When retrying, we MUST only accept emails received AFTER the current polling started.
+          // This prevents picking up a code from a previous failed attempt/retry.
           const receivedAt = new Date(
             (msg.receivedDateTime as string) || 0
           ).getTime();
-          if (receivedAt < startTime - 60000) continue;
+          
+          // Allow 10s buffer for clock skew, but otherwise must be after startTime
+          if (receivedAt < startTime - 10000) {
+            continue;
+          }
 
           // Tentar extrair do bodyPreview (mais rápido, sem body completo)
           const preview = (msg.bodyPreview as string) || "";

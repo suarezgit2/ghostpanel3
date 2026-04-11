@@ -305,7 +305,8 @@ function buildDcrPayload(params: {
       width: params.viewportWidth,
       height: params.viewportHeight,
     },
-    timestamp: Date.now() - (1000 + Math.floor(Math.random() * 9000)),
+    // v10.8: Removed timestamp skew. Use Date.now() directly to match real browser behavior.
+    timestamp: Date.now(),
     timezoneOffset: params.timezoneOffset,
   };
   return JSON.stringify(payload);
