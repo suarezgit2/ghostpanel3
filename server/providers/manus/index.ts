@@ -204,7 +204,7 @@ async function solveTurnstileWithRetry(proxy: ProxyInfo | null, jobId?: number):
 // Cache de proxies verificados: proxy key → timestamp do último check OK
 const proxyHealthCache = new Map<string, number>();
 const PROXY_HEALTH_CACHE_TTL_MS = 60_000; // 60s
-const PROXY_CHECK_TIMEOUT_S = 15;        // v10.5: Aumentado de 8s para 15s para evitar falsos-negativos
+const PROXY_CHECK_TIMEOUT_S = 30;        // v10.7: Aumentado de 15s para 30s para eliminar falsos-negativos de rede lenta
 const MAX_PROXY_RETRIES = 3;             // Máximo de proxies a tentar antes de desistir
 
 /**
@@ -227,10 +227,25 @@ async function checkProxyHealth(proxy: ProxyInfo | null, jobId?: number, profile
     try {
       // v8.0: Use the SAME User-Agent as the profile to avoid WAF detecting
       // two different UAs from the same IP in quick succession
+      // v10.7: Adicionados headers de navegador real para o teste de saúde
       await httpRequest({
         method: "GET",
         url: "https://manus.im/login",
-        headers: { "User-Agent": profileUA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" },
+        headers: { 
+          "User-Agent": profileUA || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache",
+          "Sec-Ch-Ua": '"Not(A:Brand";v="99", "Google Chrome";v="142", "Chromium";v="142"',
+          "Sec-Ch-Ua-Mobile": "?0",
+          "Sec-Ch-Ua-Platform": '"Windows"',
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "none",
+          "Sec-Fetch-User": "?1",
+          "Upgrade-Insecure-Requests": "1"
+        },
         proxy,
         timeout: PROXY_CHECK_TIMEOUT_S,
       });
@@ -238,7 +253,8 @@ async function checkProxyHealth(proxy: ProxyInfo | null, jobId?: number, profile
       return true;
     } catch (err) {
       if (i === 0) {
-        await sleep(2000); // Pequena pausa antes de tentar o segundo ping
+        // v10.7: Aumentado o delay de warm-up para 3s para dar tempo ao proxy de estabilizar
+        await sleep(3000); 
         continue;
       }
       proxyHealthCache.delete(key);

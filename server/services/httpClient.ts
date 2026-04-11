@@ -190,6 +190,7 @@ async function impersRequest(options: HttpRequestOptions): Promise<HttpResponse>
   const requestOptions: Record<string, unknown> = {
     impersonate: target,
     headers: options.headers,
+    // v10.7: Timeout padrão aumentado para 30s para reduzir falsos-negativos em proxies lentos
     timeout: options.timeout || 30,
   };
 
