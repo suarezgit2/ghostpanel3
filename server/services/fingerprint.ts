@@ -289,6 +289,13 @@ function buildDcrPayload(params: {
   realFgRequestId?: string;
 }): string {
   const fgRequestId = params.realFgRequestId || generateFgRequestId();
+  
+  // DEBUG: Log do FPJS requestId
+  if (params.realFgRequestId) {
+    console.log('[DCR-DEBUG] FPJS realFgRequestId:', params.realFgRequestId);
+  } else {
+    console.log('[DCR-DEBUG] FPJS realFgRequestId NAO FOI FORNECIDO, usando fallback:', fgRequestId);
+  }
 
   const payload = {
     ua: params.ua,
@@ -309,7 +316,10 @@ function buildDcrPayload(params: {
     timestamp: Date.now(),
     timezoneOffset: params.timezoneOffset,
   };
-  return JSON.stringify(payload);
+  
+  const payloadStr = JSON.stringify(payload);
+  console.log('[DCR-DEBUG] Payload DCR completo:', payloadStr);
+  return payloadStr;
 }
 
 // ============================================================

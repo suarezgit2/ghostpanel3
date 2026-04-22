@@ -116,6 +116,19 @@ async function rpcCall(
       Object.assign(headers, extraHeaders);
     }
 
+    // DEBUG: Log detalhado do RPC
+    console.log('[RPC-DEBUG] Chamada RPC:', {
+      servicePath,
+      url,
+      attempt,
+      freshFgRequestId,
+      freshDcr: freshDcr.substring(0, 100) + '...',
+      payload,
+      headersKeys: Object.keys(headers),
+      'x-client-dcr': headers['x-client-dcr']?.substring(0, 100) + '...',
+      proxy: options.proxy ? `${options.proxy.host}:${options.proxy.port}` : 'nenhum',
+    });
+
     try {
       const response = await httpRequest({
         method: "POST",
@@ -128,6 +141,13 @@ async function rpcCall(
       });
 
       const text = response.text;
+      
+      // DEBUG: Log da resposta RPC
+      console.log('[RPC-DEBUG] Resposta RPC:', {
+        servicePath,
+        status: response.status,
+        responseText: text.substring(0, 200),
+      });
 
       let data: Record<string, unknown>;
       try {

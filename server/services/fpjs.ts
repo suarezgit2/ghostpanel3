@@ -308,18 +308,34 @@ class FpjsService {
       const requestId = await page.evaluate(
         async (config: { apiKey: string; endpoint: string; scriptUrl: string }) => {
           return new Promise<string>((resolve) => {
-            const timer = setTimeout(() => resolve(""), 15000);
+            const timer = setTimeout(() => {
+              console.log('[FPJS-DEBUG] Timeout na geração do requestId');
+              resolve("");
+            }, 15000);
 
             const script = document.createElement("script");
             script.src = config.scriptUrl;
             script.onload = async () => {
               try {
+                console.log('[FPJS-DEBUG] Script carregado, procurando FP...');
                 const FP = (window as any).__fpjs_p_l_b;
-                if (!FP) { clearTimeout(timer); resolve(""); return; }
+                if (!FP) { 
+                  console.log('[FPJS-DEBUG] FP não encontrado em __fpjs_p_l_b');
+                  clearTimeout(timer); 
+                  resolve(""); 
+                  return; 
+                }
 
+                console.log('[FPJS-DEBUG] FP encontrado, procurando loadFn...');
                 const loadFn = FP.load || FP.Ay?.load || FP.default?.load;
-                if (!loadFn) { clearTimeout(timer); resolve(""); return; }
+                if (!loadFn) { 
+                  console.log('[FPJS-DEBUG] loadFn não encontrado');
+                  clearTimeout(timer); 
+                  resolve(""); 
+                  return; 
+                }
 
+                console.log('[FPJS-DEBUG] Chamando agent.get() com endpoint:', config.endpoint);
                 const agent = await loadFn({
                   apiKey: config.apiKey,
                   endpoint: [config.endpoint],
@@ -327,14 +343,20 @@ class FpjsService {
                 });
 
                 const result = await agent.get();
+                console.log('[FPJS-DEBUG] Resultado do agent.get():', JSON.stringify(result));
                 clearTimeout(timer);
                 resolve(result.requestId || "");
-              } catch {
+              } catch (err) {
+                console.log('[FPJS-DEBUG] Erro ao gerar requestId:', err);
                 clearTimeout(timer);
                 resolve("");
               }
             };
-            script.onerror = () => { clearTimeout(timer); resolve(""); };
+            script.onerror = (err) => { 
+              console.log('[FPJS-DEBUG] Erro ao carregar script:', err);
+              clearTimeout(timer); 
+              resolve(""); 
+            };
             document.head.appendChild(script);
           });
         },
@@ -356,8 +378,18 @@ class FpjsService {
         await logger.warn("fpjs", `Falha ao limpar cookies: ${cookieErr}`, {}, jobId);
       }
 
+      // Log console output para debug
+      const consoleOutput = await page.evaluate(() => {
+        return (window as any).__consoleOutput || [];
+      }).catch(() => []);
+      if (consoleOutput.length > 0) {
+        await logger.info("fpjs", `Console output: ${JSON.stringify(consoleOutput)}`, {}, jobId);
+      }
+
       if (requestId) {
-        await logger.info("fpjs", `RequestId gerado via proxy ${proxy ? `${proxy.host}:${proxy.port}` : 'direto'}: ${requestId}`, {}, jobId);
+        await logger.info("fpjs", `✅ RequestId gerado via proxy ${proxy ? `${proxy.host}:${proxy.port}` : 'direto'}: ${requestId}`, {}, jobId);
+      } else {
+        await logger.warn("fpjs", `❌ RequestId VAZIO! Endpoint: ${FPJS_CONFIG.endpoint}, ApiKey: ${FPJS_CONFIG.apiKey}`, {}, jobId);
         return requestId;
       } else {
         await logger.error("fpjs", "FPJS SDK retornou vazio", {}, jobId);
