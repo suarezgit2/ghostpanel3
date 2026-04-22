@@ -40,7 +40,7 @@ puppeteer.use(StealthPlugin());
 
 const FPJS_CONFIG = {
   apiKey: "nG226lNwQWNTTWzOzKbF",
-  endpoint: "https://metrics.manus.im",
+  endpoint: "https://api.fpjs.io",  // ✅ CORRIGIDO: endpoint público do Fingerprint.js Pro (Global region)
   scriptUrl: "https://files.manuscdn.com/assets/js/fpm_loader_v3.11.8.js",
   pageUrl: "https://manus.im/login",
   timeout: 30000,
