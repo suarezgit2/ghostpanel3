@@ -37,6 +37,23 @@ const RESERVATION_TTL_MS = 30 * 60 * 1000;
 /** Máximo de índices a tentar antes de desistir (segurança contra loop) */
 const MAX_INDEX_SEARCH = 500;
 
+/** Lista de palavras para gerar aliases humanos em vez de números sequenciais */
+const ALIAS_WORDS = [
+  "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+  "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi",
+  "rho", "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega",
+  "aurora", "blaze", "cosmic", "dragon", "eclipse", "falcon", "galaxy", "horizon",
+  "inferno", "jester", "knight", "lunar", "mystic", "nebula", "oracle", "phantom",
+  "quantum", "raven", "stellar", "titan", "ultra", "vortex", "whisper", "xenon",
+  "zodiac", "apex", "beacon", "cipher", "divine", "essence", "forge", "gryphon",
+  "haven", "infuse", "jade", "karma", "legacy", "matrix", "nexus", "opulent",
+  "prism", "quartz", "radiant", "shadow", "thunder", "unity", "valor", "wisdom",
+  "xanadu", "yonder", "zenith", "anchor", "bliss", "crown", "dawn", "ember",
+  "frost", "glow", "halo", "iris", "jewel", "kinetic", "light", "mirror",
+  "noble", "opal", "pulse", "quest", "realm", "spark", "twilight", "unity",
+  "verse", "wave", "xylem", "yonder", "zephyr"
+];
+
 export interface ReservedAlias {
   id: number;
   baseEmail: string;
@@ -98,12 +115,14 @@ export class AliasPoolService {
       WHERE email LIKE ${localPart + '+%@' + domain}
     `) as unknown as { email: string; status: string }[][];
 
-    const aliasIndexRegex = new RegExp(`^${localPart.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\+(\\d+)@${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    // Regex para extrair palavras (não apenas números) após o +
+    const aliasWordRegex = new RegExp(`^${localPart.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\+([a-z]+)@${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
     for (const row of (accountsRows[0] || []) as { email: string; status: string }[]) {
-      const match = row.email.match(aliasIndexRegex);
+      const match = row.email.match(aliasWordRegex);
       if (match) {
-        const idx = parseInt(match[1], 10);
-        if (!isNaN(idx)) {
+        const word = match[1].toLowerCase();
+        const idx = ALIAS_WORDS.indexOf(word) + 1; // Converte palavra para índice (1-based)
+        if (idx > 0) {
           // Determina o status correto no pool baseado no status da conta
           const isConsumed = ['active', 'failed', 'banned', 'suspended'].includes(row.status);
           if (isConsumed) {
@@ -152,6 +171,7 @@ export class AliasPoolService {
       const maxPool = ((maxPoolRows[0] || [])[0] as { maxIdx: number } | undefined)?.maxIdx ?? 0;
       startIndex = Math.max(maxConsumed, maxPool) + 1;
       if (startIndex < 1) startIndex = 1;
+      if (startIndex > ALIAS_WORDS.length) startIndex = 1; // Volta ao início se exceder lista
     }
 
     // Loop: tenta reservar a partir do startIndex, pulando consumidos
@@ -160,8 +180,14 @@ export class AliasPoolService {
 
       // Pula índices já consumidos permanentemente
       while (consumedSet.has(idx)) idx++;
+      
+      // Garante que idx está dentro dos limites da lista de palavras
+      if (idx > ALIAS_WORDS.length) idx = 1;
+      if (idx < 1) idx = 1;
 
-      const aliasEmail = `${localPart}+${idx}@${domain}`;
+      // Usa palavra em vez de número
+      const aliasWord = ALIAS_WORDS[idx - 1]; // idx é 1-based
+      const aliasEmail = `${localPart}+${aliasWord}@${domain}`;
 
       // Tentativa de reserva atômica via INSERT ... ON DUPLICATE KEY UPDATE
       // Se a linha não existe → INSERT com status='reserved'
