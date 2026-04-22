@@ -142,12 +142,26 @@ async function rpcCall(
 
       const text = response.text;
       
-      // DEBUG: Log da resposta RPC
-      console.log('[RPC-DEBUG] Resposta RPC:', {
+      // DEBUG: Log da resposta RPC - DETALHADO
+      console.log('[RPC-DEBUG] Resposta RPC COMPLETA:', {
         servicePath,
         status: response.status,
-        responseText: text.substring(0, 200),
+        statusType: typeof response.status,
+        text: text,
+        textLength: text.length,
+        textType: typeof text,
+        responseKeys: Object.keys(response),
+        responseText: text.substring(0, 500),
       });
+      
+      // DEBUG: Log adicional se status ou text estiverem undefined
+      if (!response.status || !text) {
+        console.log('[RPC-DEBUG] AVISO: Status ou text undefined!', {
+          hasStatus: !!response.status,
+          hasText: !!text,
+          response: response,
+        });
+      }
 
       let data: Record<string, unknown>;
       try {
@@ -195,7 +209,23 @@ async function rpcCall(
       return data;
       
     } catch (err) {
+      // DEBUG: Log de erro detalhado
+      console.log('[RPC-DEBUG] Erro capturado:', {
+        error: err,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        errorName: err instanceof Error ? err.name : 'unknown',
+        errorStack: err instanceof Error ? err.stack : 'no stack',
+        attempt,
+      });
+      
       lastError = err instanceof Error ? err : new Error(String(err));
+      
+      // DEBUG: Log antes de verificar PermanentRpcError
+      console.log('[RPC-DEBUG] Verificando erro:', {
+        errorName: lastError.name,
+        errorMessage: lastError.message,
+        isPermanent: lastError.name === "PermanentRpcError",
+      });
       
       if (lastError.name === "PermanentRpcError") {
         throw lastError;
