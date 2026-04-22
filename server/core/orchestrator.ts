@@ -628,6 +628,10 @@ class Orchestrator {
           }, jobId
         );
 
+        // Adicionar delay aleatório para evitar detecção de bot (2-8 segundos)
+        const randomDelay = 2000 + Math.random() * 6000;
+        await sleep(randomDelay, signal);
+        
         // Pass invite code directly to createAccount (no global setting mutation = no race condition)
         const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId, inviteCode: jobInviteCode, signal });
 
@@ -662,6 +666,10 @@ class Orchestrator {
 
           // Release proxy for replacement now that the attempt is done
           if (!proxyReleased) { proxyService.releaseProxy(proxy.host, jobId); proxyReleased = true; }
+
+          // Adicionar delay aleatório após sucesso para evitar detecção de bot (3-10 segundos)
+          const postSuccessDelay = 3000 + Math.random() * 7000;
+          await sleep(postSuccessDelay, signal);
 
           // Reset backoff on success
           consecutiveFailures = 0;

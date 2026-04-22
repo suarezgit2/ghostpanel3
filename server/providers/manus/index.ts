@@ -400,6 +400,8 @@ export class ManusProvider {
       await STEP_DELAYS.afterEmailCheck(signal);
 
       // STEP 3: Send email verification code
+      // Adicionar delay aleatório antes de enviar email (1-3 segundos)
+      await sleep(1000 + Math.random() * 2000, signal);
       await logger.info("step_3_send_email", "Enviando código de verificação...", { email, hasTempToken: !!tempToken }, jobId);
       await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, tempToken, rpcOptions);
       checkAbort(signal);
@@ -448,6 +450,9 @@ export class ManusProvider {
       checkAbort(signal);
       await STEP_DELAYS.afterEmailCodeReceived(signal);
 
+      // Adicionar delay aleatório antes de registrar (2-5 segundos)
+      await sleep(2000 + Math.random() * 3000, signal);
+      
       // STEP 5: Register account with authCommandCmd
       await logger.info("step_5_register", "Registrando conta...", { email, authCommandCmd }, jobId);
 
@@ -455,6 +460,10 @@ export class ManusProvider {
       const jwtToken = registerResult.token;
 
       if (!jwtToken) throw new Error("Registro falhou: nenhum token retornado");
+      
+      // Adicionar delay aleatório após registro bem-sucedido (3-8 segundos)
+      // Isso é crítico para evitar detecção de bot no SMS
+      await sleep(3000 + Math.random() * 5000, signal);
 
       // === DIAGNOSTIC LOG: Profile snapshot for ban analysis ===
       // This log captures the FULL profile used for this account.
