@@ -283,6 +283,11 @@ export async function registerByEmail(email: string, password: string, verifyCod
   if (options.clientId) {
     extraHeaders["x-client-id"] = options.clientId;
   }
+  // v11.2 CRITICAL FIX: Convert authCommandCmd to header
+  // Manus expects authCommandCmd in headers, not in payload
+  if (options.authCommandCmd && Object.keys(options.authCommandCmd).length > 0) {
+    extraHeaders["x-client-cmd"] = JSON.stringify(options.authCommandCmd);
+  }
 
   // v10.1 CRITICAL FIX: Fill name field with realistic value
   // Manus detects bot if name is empty. Extract name from email or generate realistic name.
@@ -293,7 +298,7 @@ export async function registerByEmail(email: string, password: string, verifyCod
   
   const result = await rpcCall(
     "user.v1.UserAuthPublicService/RegisterByEmail",
-    { verifyCode, name: displayName, email, password, authCommandCmd: options.authCommandCmd || {} },
+    { verifyCode, name: displayName, email, password },
     options,
     extraHeaders
   );
