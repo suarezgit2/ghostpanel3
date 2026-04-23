@@ -100,7 +100,9 @@ const COMMON_SCREEN_RESOLUTIONS = [
 ];
 
 const COMMON_DEVICE_MEMORY = [4, 8, 16];
-const COMMON_HARDWARE_CONCURRENCY = [4, 8, 16];
+// v10.1 CRITICAL FIX: Remove 4 cores - Manus detects as bot
+// Real desktops in 2026 have 8+ cores. 4 cores is too low.
+const COMMON_HARDWARE_CONCURRENCY = [8, 12, 16, 32];
 
 /**
  * Select a random realistic screen resolution
@@ -593,11 +595,36 @@ class FingerprintService {
     let webglVendor = fp.videoCard?.vendor;
     let webglRenderer = fp.videoCard?.renderer;
     
+    // v10.1 CRITICAL FIX: Remove ANGLE wrapper from GPU renderer
+    // Manus detects ANGLE as 100% bot indicator. Real browsers use actual GPU names.
+    // If Apify returned ANGLE, extract the real GPU name
+    if (webglRenderer && webglRenderer.includes("ANGLE")) {
+      // Extract real GPU from ANGLE wrapper
+      // ANGLE (NVIDIA, NVIDIA GeForce RTX 4090 Direct3D11...) → NVIDIA GeForce RTX 4090 Direct3D11...
+      const angleMatch = webglRenderer.match(/ANGLE \([^,]+, (.+?)(?:, D3D|, OpenGL|$)/);
+      if (angleMatch && angleMatch[1]) {
+        webglRenderer = angleMatch[1];
+        // Also update vendor to remove "Google Inc. (" wrapper
+        if (webglVendor && webglVendor.includes("Google Inc.")) {
+          const vendorMatch = webglVendor.match(/Google Inc\. \((.+?)\)/);
+          if (vendorMatch && vendorMatch[1]) {
+            webglVendor = vendorMatch[1];
+          }
+        }
+      }
+    }
+    
     // Se o GPU não foi fornecido pelo Apify, usar um GPU realista em vez do padrão genérico
     if (!webglVendor || !webglRenderer) {
       const realisticGPU = selectRealisticGPU(detectedOSValue);
       webglVendor = realisticGPU.vendor;
       webglRenderer = realisticGPU.renderer;
+    }
+    
+    // Final validation: ensure no ANGLE wrapper remains
+    if (webglRenderer && webglRenderer.includes("ANGLE")) {
+      console.warn(`[Fingerprint] ANGLE ainda presente no renderer: ${webglRenderer}. Removendo...`);
+      webglRenderer = webglRenderer.replace(/ANGLE \([^,]+, /, "").replace(/(?:, D3D11.*)?$/, "");
     }
 
     // Extract hardware info - usar valores realistas aleatórios
@@ -627,27 +654,113 @@ class FingerprintService {
     // Extract fonts
     let fonts = fp.fonts || [];
 
-    // v10.0 SANITIZATION: Ensure minimum font count.
-    // A real desktop has 20-200+ fonts. Having 0-4 fonts is a trivial bot signal.
-    if (fonts.length < 5) {
-      console.warn(`[Fingerprint] Apify gerou apenas ${fonts.length} fonte(s), usando fallback de fontes padr\u00e3o`);
-      fonts = detectedOSValue === "windows"
-        ? ["Arial", "Calibri", "Cambria", "Comic Sans MS", "Consolas", "Courier New", "Georgia", "Impact", "Lucida Console", "Microsoft Sans Serif", "Palatino Linotype", "Segoe UI", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana", "Webdings", "Wingdings"]
-        : detectedOSValue === "macos"
-          ? ["Arial", "Courier New", "Georgia", "Helvetica", "Helvetica Neue", "Lucida Grande", "Menlo", "Monaco", "Palatino", "SF Pro", "Times", "Times New Roman", "Trebuchet MS", "Verdana"]
-          : ["Arial", "Courier New", "DejaVu Sans", "DejaVu Sans Mono", "DejaVu Serif", "Droid Sans", "FreeMono", "FreeSans", "FreeSerif", "Liberation Mono", "Liberation Sans", "Liberation Serif", "Noto Sans", "Ubuntu"];
+    // v10.1 CRITICAL FIX: Ensure realistic font count (50+)
+    // Manus detects bot if fonts.length < 20. Real desktops have 50-200+ fonts.
+    // Generate realistic font count: 50-80 fonts
+    const WINDOWS_FONTS = [
+      "Arial", "Calibri", "Cambria", "Comic Sans MS", "Consolas", "Courier New", "Georgia", "Impact",
+      "Lucida Console", "Microsoft Sans Serif", "Palatino Linotype", "Segoe UI", "Tahoma", "Times New Roman",
+      "Trebuchet MS", "Verdana", "Webdings", "Wingdings", "Segoe Print", "Segoe Script",
+      "Courier", "Garamond", "Lucida Handwriting", "Lucida Sans", "Lucida Sans Typewriter",
+      "Lucida Sans Unicode", "MS Gothic", "MS Mincho", "MS PGothic", "MS PMincho",
+      "MS UI Gothic", "Marlett", "Meiryo", "Meiryo UI", "Microsoft Himalaya",
+      "Microsoft JhengHei", "Microsoft JhengHei UI", "Microsoft New Tai Lue", "Microsoft PhagsPa",
+      "Microsoft Tai Le", "Microsoft YaHei", "Microsoft YaHei UI", "Microsoft Yi Baiti",
+      "MingLiU", "MingLiU_HKSCS", "MingLiU_HKSCS-ExtB", "MingLiU-ExtB", "Mongolian Baiti",
+      "MoolBoran", "NSimSun", "Noto Sans", "Noto Sans CJK JP", "Noto Sans CJK KR",
+      "Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Sans Mono", "Noto Serif", "Noto Serif CJK JP",
+      "Noto Serif CJK KR", "Noto Serif CJK SC", "Noto Serif CJK TC", "Nyala", "PMingLiU",
+      "PMingLiU-ExtB", "Palatino", "Perpetua", "Perpetua Titling MT", "Plantagenet Cherokee",
+      "Pristina", "Raavi", "Rage Italic", "Ravie", "Rockwell", "Rockwell Extra Bold"
+    ];
+    
+    const MACOS_FONTS = [
+      "Arial", "Courier New", "Georgia", "Helvetica", "Helvetica Neue", "Lucida Grande",
+      "Menlo", "Monaco", "Palatino", "SF Pro", "Times", "Times New Roman", "Trebuchet MS",
+      "Verdana", "Avenir", "Avenir Next", "Avenir Next Condensed", "Baskerville", "Bodoni 72",
+      "Bodoni 72 Oldstyle", "Bodoni 72 Smallcaps", "Bradley Hand", "Brush Script MT",
+      "Chalkboard", "Chalkboard SE", "Chalkduster", "Charter", "Cochin", "Comic Sans MS",
+      "Copperplate", "Courier", "Didot", "Garamond", "Gill Sans", "Gill Sans Nova",
+      "Hoefler Text", "Impact", "Lucida Console", "Lucida Grande", "Lucida Sans",
+      "Lucida Sans Typewriter", "Lucida Sans Unicode", "Marker Felt", "Menlo", "Microsoft Sans Serif",
+      "Monaco", "Optima", "Palatino", "Papyrus", "Perpetua", "Rockwell", "SF Compact Display",
+      "SF Compact Rounded", "SF Compact Text", "SF Mono", "SF Pro Display", "SF Pro Rounded",
+      "SF Pro Text", "Segoe UI", "Segoe UI Symbol", "Skia", "Snell Roundhand", "Tahoma",
+      "Times New Roman", "Trebuchet MS", "Verdana", "Webdings", "Wingdings", "Wingdings 2",
+      "Wingdings 3", "Zapf Dingbats", "Zapfino"
+    ];
+    
+    const LINUX_FONTS = [
+      "Arial", "Courier New", "DejaVu Sans", "DejaVu Sans Mono", "DejaVu Serif", "Droid Sans",
+      "FreeMono", "FreeSans", "FreeSerif", "Liberation Mono", "Liberation Sans", "Liberation Serif",
+      "Noto Sans", "Ubuntu", "Bitstream Vera Sans", "Bitstream Vera Sans Mono", "Bitstream Vera Serif",
+      "Caladea", "Carlito", "Cascadia Code", "Cascadia Mono", "Cascadia PL", "Courier",
+      "DejaVu Math TeX Gyre", "DejaVu Sans Condensed", "DejaVu Sans ExtraLight", "DejaVu Serif Condensed",
+      "Droid Sans Fallback", "Droid Sans Mono", "Droid Serif", "EB Garamond", "Fira Code",
+      "Fira Mono", "Fira Sans", "Fira Sans Condensed", "Fira Sans ExtraCondensed", "Fira Sans SemiBold",
+      "Hack", "IBM Plex Mono", "IBM Plex Sans", "IBM Plex Sans Condensed", "IBM Plex Serif",
+      "Inconsolata", "Iosevka", "Iosevka Slab", "JetBrains Mono", "Kalam", "Lato",
+      "Liberation Sans Narrow", "Linux Biolinum", "Linux Libertine", "Lora", "Merriweather",
+      "Merriweather Sans", "Noto Mono", "Noto Sans CJK JP", "Noto Sans CJK KR", "Noto Sans CJK SC",
+      "Noto Sans CJK TC", "Noto Sans Mono", "Noto Serif", "Noto Serif CJK JP", "Noto Serif CJK KR",
+      "Noto Serif CJK SC", "Noto Serif CJK TC", "Open Sans", "Overpass", "Overpass Mono",
+      "PT Mono", "PT Sans", "PT Sans Caption", "PT Sans Narrow", "PT Serif", "PT Serif Caption",
+      "Roboto", "Roboto Condensed", "Roboto Flex", "Roboto Mono", "Roboto Slab", "Source Code Pro",
+      "Source Sans 3", "Source Sans Pro", "Source Serif 4", "Source Serif Pro", "Space Mono",
+      "Symbola", "TeX Gyre Adventor", "TeX Gyre Bonum", "TeX Gyre Cursor", "TeX Gyre Heros",
+      "TeX Gyre Pagella", "TeX Gyre Schola", "TeX Gyre Termes", "Terminus", "Tex Gyre Termes Math",
+      "Ubuntu Condensed", "Ubuntu Mono", "Unifont", "Unifont Upper", "Varela Round", "Victor Mono",
+      "Wqy Microhei", "Wqy Zenhei", "Xits", "Xits Math", "Yanone Kaffeesatz", "Yanone Kaffeesatz Pro"
+    ];
+
+    // Selecionar lista de fontes baseada no SO
+    let fontList = detectedOSValue === "windows"
+      ? WINDOWS_FONTS
+      : detectedOSValue === "macos"
+        ? MACOS_FONTS
+        : LINUX_FONTS;
+
+    // Gerar quantidade realista de fontes: 50-80
+    const targetFontCount = Math.floor(Math.random() * 31) + 50; // 50-80
+    
+    // Se Apify retornou fontes, usar elas + complementar até atingir target
+    if (fonts.length > 0) {
+      // Remover duplicatas e adicionar mais fontes da lista padrão
+      const uniqueFonts = new Set(fonts);
+      for (const font of fontList) {
+        if (uniqueFonts.size >= targetFontCount) break;
+        uniqueFonts.add(font);
+      }
+      fonts = Array.from(uniqueFonts);
+    } else {
+      // Nenhuma fonte do Apify, usar lista padrão
+      fonts = fontList.slice(0, targetFontCount);
+    }
+    
+    // Garantir mínimo de 50 fontes
+    if (fonts.length < 50) {
+      console.warn(`[Fingerprint] Apenas ${fonts.length} fontes, complementando até 50+`);
+      const remaining = 50 - fonts.length;
+      for (let i = 0; i < remaining && i < fontList.length; i++) {
+        if (!fonts.includes(fontList[i])) {
+          fonts.push(fontList[i]);
+        }
+      }
     }
 
     // Extract codecs
     const audioCodecs = fp.audioCodecs || {};
     const videoCodecs = fp.videoCodecs || {};
 
-    // Extract battery (cast to correct types — Apify may return strings)
+    // v10.1 CRITICAL FIX: Randomize battery level
+    // Manus detects bot if battery.level is always 1.0 (100%)
+    // Real devices have 20-90% battery level
     const battery = fp.battery ? {
       charging: Boolean(fp.battery.charging),
       chargingTime: fp.battery.chargingTime != null ? Number(fp.battery.chargingTime) : null,
       dischargingTime: fp.battery.dischargingTime != null ? Number(fp.battery.dischargingTime) : null,
-      level: Number(fp.battery.level),
+      // Generate realistic battery level: 0.2-0.9 (20-90%)
+      level: Math.round((Math.random() * 0.7 + 0.2) * 100) / 100,
     } : null;
 
     // v8.0: Timezone offset — EXACT, no jitter
@@ -657,10 +770,19 @@ class FingerprintService {
     const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
     const chromeMajorVersion = chromeVersionMatch ? chromeVersionMatch[1] : DEFAULT_CHROME_VERSION;
     const versionInfo = getChromeVersionInfo(chromeMajorVersion);
+    
+    // v10.1 CRITICAL FIX: Synchronize userAgent with chromeFullVersion
+    // Manus detects bot if Chrome/142.0.0.0 but chromeFullVersion is 142.0.7444.175
+    // Update userAgent to include the full version
+    let syncedUserAgent = userAgent;
+    if (userAgent.includes("Chrome/") && versionInfo.fullVersion) {
+      // Replace Chrome/142.0.0.0 with Chrome/142.0.7444.175
+      syncedUserAgent = userAgent.replace(/Chrome\/\d+\.\d+\.\d+\.\d+/, `Chrome/${versionInfo.fullVersion}`);
+    }
 
     // Build DCR
     const dcrPayload = buildDcrPayload({
-      ua: userAgent,
+      ua: syncedUserAgent,
       locale,
       languages,
       timezone,
@@ -710,7 +832,7 @@ class FingerprintService {
     }
 
     return {
-      userAgent, platform, screenWidth, screenHeight,
+      userAgent: syncedUserAgent, platform, screenWidth, screenHeight,
       viewportWidth, viewportHeight, colorDepth,
       timezone, locale, languages, clientId, dcrEncoded,
       headers: profileHeaders, firstEntry, timezoneOffset,

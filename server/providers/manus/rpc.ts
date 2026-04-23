@@ -284,11 +284,16 @@ export async function registerByEmail(email: string, password: string, verifyCod
     extraHeaders["x-client-id"] = options.clientId;
   }
 
-  // IMPORTANT: The real frontend always sends name: "" in the payload.
-  // Reverse-engineered from chunk 40513: registerByEmail({verifyCode:D, name:"", email:V||"", password:P||"", authCommandCmd:{...}})
+  // v10.1 CRITICAL FIX: Fill name field with realistic value
+  // Manus detects bot if name is empty. Extract name from email or generate realistic name.
+  // Extract name from email: "wells607092john+nu@outlook.com" -> "wells607092john"
+  let displayName = email.split("@")[0].split("+")[0]; // Remove domain and alias suffix
+  // Capitalize first letter for realism
+  displayName = displayName.charAt(0).toUpperCase() + displayName.slice(1);
+  
   const result = await rpcCall(
     "user.v1.UserAuthPublicService/RegisterByEmail",
-    { verifyCode, name: "", email, password, authCommandCmd: options.authCommandCmd || {} },
+    { verifyCode, name: displayName, email, password, authCommandCmd: options.authCommandCmd || {} },
     options,
     extraHeaders
   );
