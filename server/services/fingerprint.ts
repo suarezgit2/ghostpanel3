@@ -85,6 +85,52 @@ export function getChromeVersionInfo(majorVersion: string): ChromeVersionInfo {
 }
 
 // ============================================================
+// GPU Profiles (realistic GPU strings for different platforms)
+// ============================================================
+
+/**
+ * Realistic GPU vendor and renderer strings for different platforms.
+ * These are actual GPU strings from real browsers, not generic/suspicious ones.
+ * Microsoft Basic Render Driver is a VM/bot indicator and should be avoided.
+ */
+const GPU_PROFILES = {
+  windows: [
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4090 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 7900 XTX Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  ],
+  macos: [
+    { vendor: "Apple Inc.", renderer: "Apple M2 Max" },
+    { vendor: "Apple Inc.", renderer: "Apple M2 Pro" },
+    { vendor: "Apple Inc.", renderer: "Apple M1 Max" },
+    { vendor: "Apple Inc.", renderer: "Apple M1 Pro" },
+    { vendor: "Apple Inc.", renderer: "Apple M1" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) Iris(R) Plus Graphics 640 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  ],
+  linux: [
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 4090 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+    { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 7900 XTX Direct3D11 vs_5_0 ps_5_0, D3D11)" },
+  ],
+};
+
+/**
+ * Select a random realistic GPU profile for the given OS.
+ */
+function selectRealisticGPU(detectedOS: string): { vendor: string; renderer: string } {
+  const osKey = detectedOS.toLowerCase() as keyof typeof GPU_PROFILES;
+  const gpuList = GPU_PROFILES[osKey] || GPU_PROFILES.windows;
+  return gpuList[Math.floor(Math.random() * gpuList.length)];
+}
+
+// ============================================================
 // Synthetic fallback (used only if Apify fails)
 // ============================================================
 
@@ -503,8 +549,15 @@ class FingerprintService {
     const detectedOSValue = detectOS(platform);
 
     // Extract GPU info
-    const webglVendor = fp.videoCard?.vendor || "Google Inc. (Intel)";
-    const webglRenderer = fp.videoCard?.renderer || "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+    let webglVendor = fp.videoCard?.vendor;
+    let webglRenderer = fp.videoCard?.renderer;
+    
+    // Se o GPU não foi fornecido pelo Apify, usar um GPU realista em vez do padrão genérico
+    if (!webglVendor || !webglRenderer) {
+      const realisticGPU = selectRealisticGPU(detectedOSValue);
+      webglVendor = realisticGPU.vendor;
+      webglRenderer = realisticGPU.renderer;
+    }
 
     // Extract hardware info
     let deviceMemory = fp.navigator.deviceMemory ?? 8;
@@ -714,9 +767,14 @@ class FingerprintService {
       screenWidth, screenHeight, viewportWidth, viewportHeight,
       colorDepth, timezone, locale, languages, clientId, dcrEncoded,
       headers: profileHeaders, firstEntry, timezoneOffset,
-      // Legacy defaults for Apify fields
-      webglVendor: "Google Inc. (NVIDIA)",
-      webglRenderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+      // Legacy defaults for Apify fields — usar GPU realista em vez de padrão
+      ...(() => {
+        const realisticGPU = selectRealisticGPU(detectedOSValue);
+        return {
+          webglVendor: realisticGPU.vendor,
+          webglRenderer: realisticGPU.renderer,
+        };
+      })(),
       deviceMemory: 8,
       hardwareConcurrency: 8,
       maxTouchPoints: 0,
