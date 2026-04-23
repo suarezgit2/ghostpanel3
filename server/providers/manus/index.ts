@@ -570,21 +570,23 @@ export class ManusProvider {
                 }, jobId
               );
 
-              // FALLBACK STRATEGY: Se a conta foi banida, pode ser por causa do fingerprint.
-              // Tenta com um novo fingerprint (novo clientId, novo screen, novo GPU, etc)
+              // FALLBACK STRATEGY: Reutilizar MESMO fingerprint
+              // O Manus valida se o DCR enviado no SMS bate com o DCR do registro
+              // Se regenerarmos fingerprint, o DCR muda e causa bloqueio novamente
               if (attempt < 2) {
                 await logger.info("step_6_sms",
-                  `[FALLBACK] Gerando novo fingerprint e tentando novamente...`,
-                  { attempt }, jobId
+                  `[FALLBACK] Tentando novamente com MESMO fingerprint (DCR deve ser consistente)...`,
+                  { attempt, clientId: fingerprint.clientId }, jobId
                 );
                 
-                // Gerar novo fingerprint com novo clientId
-                authedRpcOptions.fingerprint = fingerprintService.generateProfile(getProxyRegion(proxy));
+                // NÃO regenerar fingerprint - usar o MESMO da sessão
+                // O DCR será regenerado automaticamente no rpc.ts com novo timestamp
+                // mas o clientId e fingerprint base permanecerão iguais
                 
-                // Adicionar delay antes de tentar novamente
-                await sleep(5000 + Math.random() * 10000, signal);
+                // Adicionar delay maior antes de tentar novamente
+                await sleep(8000 + Math.random() * 12000, signal);
                 
-                // Tentar novamente com novo fingerprint
+                // Tentar novamente com MESMO fingerprint
                 continue;
               }
 
