@@ -126,14 +126,16 @@ function buildAuthCommandCmd(fingerprint: BrowserProfile): Record<string, unknow
   }
 
   // fbp: Facebook Pixel cookie — generate realistic value when firstEntry is Facebook
+  // CRITICAL FIX: Only include fbp if firstEntry is Facebook
+  // Sending fbp="" (empty string) may trigger bot detection on Manus backend
+  // Real browser behavior: omit fbp entirely if not from Facebook
   if (fingerprint.firstEntry?.includes("facebook.com")) {
     // Format: fb.1.<creation_timestamp_ms>.<random_10_digits>
     const fbTimestamp = Date.now() - Math.floor(Math.random() * 86400000 * 30); // 0-30 days ago
     const fbRandom = Math.floor(Math.random() * 9000000000) + 1000000000;
     cmd.fbp = `fb.1.${fbTimestamp}.${fbRandom}`;
-  } else {
-    cmd.fbp = "";
   }
+  // Note: fbp is NOT included if firstEntry is not Facebook (matches real behavior)
 
   return cmd;
 }
