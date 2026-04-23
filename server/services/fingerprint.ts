@@ -28,6 +28,14 @@
 
 import { encodeDCR, generateClientId } from "../utils/helpers";
 import { FingerprintGenerator } from "fingerprint-generator";
+import {
+  seededRng,
+  generateBatteryDeterministic,
+  generateFontsCountDeterministic,
+  generateMaxTouchPointsDeterministic,
+  generateDevicePixelRatioDeterministic,
+  generateColorDepthDeterministic,
+} from "../utils/seededRandom";
 
 // ============================================================
 // Apify Fingerprint Generator (singleton)
@@ -576,15 +584,11 @@ class FingerprintService {
     if (viewportWidth > screenWidth) viewportWidth = screenWidth;
     if (viewportHeight > screenHeight) viewportHeight = screenHeight - chromeUiHeight;
 
-    const colorDepth = fp.screen.colorDepth || 24;
+    // v10.2: Usar seed determinístico para colorDepth (baseado em clientId)
+    const colorDepth = generateColorDepthDeterministic(clientId);
 
-    // v10.0 SANITIZATION: Clamp devicePixelRatio to realistic desktop values (1-2).
-    // Values like 2.75 are mobile-only and suspicious on desktop.
-    let devicePixelRatio = fp.screen.devicePixelRatio || 1;
-    if (devicePixelRatio > 2) {
-      console.warn(`[Fingerprint] Apify gerou devicePixelRatio=${devicePixelRatio} (m\u00f3vel), corrigindo para 1`);
-      devicePixelRatio = 1;
-    }
+    // v10.2: Usar seed determinístico para devicePixelRatio (baseado em clientId)
+    let devicePixelRatio = generateDevicePixelRatioDeterministic(clientId);
 
     // Use Apify's user agent (it's consistent with the generated fingerprint)
     const userAgent = fp.navigator.userAgent;
@@ -631,7 +635,8 @@ class FingerprintService {
     // Isso evita padrão de bot (sempre 8GB/8 cores)
     let deviceMemory = selectRealisticDeviceMemory();
     let hardwareConcurrency = selectRealisticHardwareConcurrency();
-    const maxTouchPoints = fp.navigator.maxTouchPoints ?? 0;
+    // v10.2: Usar seed determinístico para maxTouchPoints (baseado em clientId)
+    const maxTouchPoints = generateMaxTouchPointsDeterministic(clientId);
 
     // v10.0 SANITIZATION: Force minimum deviceMemory to 2 GB.
     // Real Chrome reports 0.25, 0.5, 1, 2, 4, 8 — but 0 is impossible and
@@ -720,8 +725,8 @@ class FingerprintService {
         ? MACOS_FONTS
         : LINUX_FONTS;
 
-    // Gerar quantidade realista de fontes: 50-80
-    const targetFontCount = Math.floor(Math.random() * 31) + 50; // 50-80
+    // v10.2: Usar seed determinístico para fontsCount (baseado em clientId)
+    const targetFontCount = generateFontsCountDeterministic(clientId);
     
     // Se Apify retornou fontes, usar elas + complementar até atingir target
     if (fonts.length > 0) {
@@ -755,13 +760,8 @@ class FingerprintService {
     // v10.1 CRITICAL FIX: Randomize battery level
     // Manus detects bot if battery.level is always 1.0 (100%)
     // Real devices have 20-90% battery level
-    const battery = fp.battery ? {
-      charging: Boolean(fp.battery.charging),
-      chargingTime: fp.battery.chargingTime != null ? Number(fp.battery.chargingTime) : null,
-      dischargingTime: fp.battery.dischargingTime != null ? Number(fp.battery.dischargingTime) : null,
-      // Generate realistic battery level: 0.2-0.9 (20-90%)
-      level: Math.round((Math.random() * 0.7 + 0.2) * 100) / 100,
-    } : null;
+    // v10.2: Usar seed determinístico para battery (baseado em clientId)
+    const battery = fp.battery ? generateBatteryDeterministic(clientId) : null;
 
     // v8.0: Timezone offset — EXACT, no jitter
     const timezoneOffset = getRealTimezoneOffset(timezone);
