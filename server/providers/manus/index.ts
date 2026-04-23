@@ -54,6 +54,8 @@ interface CreateAccountOptions {
   inviteCode?: string;
   /** AbortSignal for cooperative cancellation — checked between steps */
   signal?: AbortSignal;
+  /** v10.2: ProfileSnapshotSession para reutilizar campos críticos */
+  profileSession?: any; // ProfileSnapshotSession
 }
 
 interface CreateAccountResult {

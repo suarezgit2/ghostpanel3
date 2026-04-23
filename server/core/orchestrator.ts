@@ -29,6 +29,7 @@ import { logger, generateEmailPrefix, generatePassword, STEP_DELAYS, sleep, extr
 import { getSetting } from "../utils/settings";
 import { emailService } from "../services/email";
 import { manusProvider, type ManusProvider } from "../providers/manus";
+import { ProfileSnapshotSession } from "./ProfileSnapshotSession";
 
 type ProviderInstance = ManusProvider;
 
@@ -617,6 +618,19 @@ class Orchestrator {
 
         // FPJS real ID agora é gerado por chamada RPC dentro de rpc.ts (v5.4)
         const fingerprint = fingerprintService.generateProfile(proxyRegion);
+        
+        // v10.2: Criar ProfileSnapshotSession para reutilizar campos críticos
+        const profileSession = new ProfileSnapshotSession(fingerprint, fingerprint.clientId);
+        
+        // Validar snapshot
+        const validation = profileSession.validate();
+        if (!validation.valid) {
+          await logger.error("orchestrator",
+            `ProfileSnapshot inválido: ${validation.errors.join(", ")}`,
+            { clientId: fingerprint.clientId }, jobId
+          );
+          continue;
+        }
 
         await logger.info("orchestrator",
           `Tentativa ${totalAttempts}/${maxAttempts} (sucesso: ${successCount}/${options.quantity}): ${email}`,
@@ -633,7 +647,8 @@ class Orchestrator {
         await sleep(randomDelay, signal);
         
         // Pass invite code directly to createAccount (no global setting mutation = no race condition)
-        const result = await provider.createAccount({ email, password, proxy, fingerprint, jobId, inviteCode: jobInviteCode, signal });
+        // v10.2: Passar profileSession para reutilizar campos críticos
+        const result = await provider.createAccount({ email, password, proxy, fingerprint, profileSession, jobId, inviteCode: jobInviteCode, signal });
 
         if (result.status === "active") {
           // Insere o account no banco somente quando criado com sucesso
