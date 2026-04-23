@@ -400,8 +400,8 @@ export class ManusProvider {
       await STEP_DELAYS.afterEmailCheck(signal);
 
       // STEP 3: Send email verification code
-      // Adicionar delay aleatório antes de enviar email (1-3 segundos)
-      await sleep(1000 + Math.random() * 2000, signal);
+      // Adicionar delay aleatório antes de enviar email (3-8 segundos)
+      await sleep(3000 + Math.random() * 5000, signal);
       await logger.info("step_3_send_email", "Enviando código de verificação...", { email, hasTempToken: !!tempToken }, jobId);
       await rpc.sendEmailVerifyCodeWithCaptcha(email, EmailVerifyCodeAction.REGISTER, tempToken, rpcOptions);
       checkAbort(signal);
@@ -450,8 +450,8 @@ export class ManusProvider {
       checkAbort(signal);
       await STEP_DELAYS.afterEmailCodeReceived(signal);
 
-      // Adicionar delay aleatório antes de registrar (2-5 segundos)
-      await sleep(2000 + Math.random() * 3000, signal);
+      // Adicionar delay aleatório antes de registrar (5-12 segundos)
+      await sleep(5000 + Math.random() * 7000, signal);
       
       // STEP 5: Register account with authCommandCmd
       await logger.info("step_5_register", "Registrando conta...", { email, authCommandCmd }, jobId);
@@ -461,9 +461,9 @@ export class ManusProvider {
 
       if (!jwtToken) throw new Error("Registro falhou: nenhum token retornado");
       
-      // Adicionar delay aleatório após registro bem-sucedido (3-8 segundos)
-      // Isso é crítico para evitar detecção de bot no SMS
-      await sleep(3000 + Math.random() * 5000, signal);
+      // Adicionar delay aleatório após registro bem-sucedido (10-25 segundos)
+      // Isso é MUITO crítico para evitar detecção de bot no SMS
+      await sleep(10000 + Math.random() * 15000, signal);
 
       // === DIAGNOSTIC LOG: Profile snapshot for ban analysis ===
       // This log captures the FULL profile used for this account.
@@ -558,9 +558,9 @@ export class ManusProvider {
               consecutiveBanErrors++;
               accountBannedDetected = true;
 
-              await logger.error("step_6_sms",
+              await logger.warn("step_6_sms",
                 `[CONTA BANIDA] SendPhoneVerificationCode retornou "user is blocked" ` +
-                `(tentativa ${attempt}). Abortando imediatamente — conta suspensa pelo anti-bot do Manus.`,
+                `(tentativa ${attempt}). Tentando fallback: novo fingerprint + novo clientId...`,
                 {
                   errorType: "ACCOUNT_BANNED",
                   rpcError: rpcMsg,
@@ -569,6 +569,24 @@ export class ManusProvider {
                   attempt,
                 }, jobId
               );
+
+              // FALLBACK STRATEGY: Se a conta foi banida, pode ser por causa do fingerprint.
+              // Tenta com um novo fingerprint (novo clientId, novo screen, novo GPU, etc)
+              if (attempt < 2) {
+                await logger.info("step_6_sms",
+                  `[FALLBACK] Gerando novo fingerprint e tentando novamente...`,
+                  { attempt }, jobId
+                );
+                
+                // Gerar novo fingerprint com novo clientId
+                authedRpcOptions.fingerprint = fingerprintService.generateProfile(getProxyRegion(proxy));
+                
+                // Adicionar delay antes de tentar novamente
+                await sleep(5000 + Math.random() * 10000, signal);
+                
+                // Tentar novamente com novo fingerprint
+                continue;
+              }
 
               throw new AccountBannedError(
                 `Conta banida pelo Manus ("user is blocked" na tentativa ${attempt}). ` +

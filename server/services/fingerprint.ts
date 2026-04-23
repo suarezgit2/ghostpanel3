@@ -85,6 +85,45 @@ export function getChromeVersionInfo(majorVersion: string): ChromeVersionInfo {
 }
 
 // ============================================================
+// Common Screen Resolutions (realistic desktop resolutions)
+// ============================================================
+
+const COMMON_SCREEN_RESOLUTIONS = [
+  { width: 1920, height: 1080 },
+  { width: 1366, height: 768 },
+  { width: 1440, height: 900 },
+  { width: 1536, height: 864 },
+  { width: 2560, height: 1440 },
+  { width: 1280, height: 800 },
+  { width: 1600, height: 900 },
+  { width: 1024, height: 768 },
+];
+
+const COMMON_DEVICE_MEMORY = [4, 8, 16];
+const COMMON_HARDWARE_CONCURRENCY = [4, 8, 16];
+
+/**
+ * Select a random realistic screen resolution
+ */
+function selectRealisticScreenResolution(): { width: number; height: number } {
+  return COMMON_SCREEN_RESOLUTIONS[Math.floor(Math.random() * COMMON_SCREEN_RESOLUTIONS.length)];
+}
+
+/**
+ * Select a random realistic device memory
+ */
+function selectRealisticDeviceMemory(): number {
+  return COMMON_DEVICE_MEMORY[Math.floor(Math.random() * COMMON_DEVICE_MEMORY.length)];
+}
+
+/**
+ * Select a random realistic hardware concurrency
+ */
+function selectRealisticHardwareConcurrency(): number {
+  return COMMON_HARDWARE_CONCURRENCY[Math.floor(Math.random() * COMMON_HARDWARE_CONCURRENCY.length)];
+}
+
+// ============================================================
 // GPU Profiles (realistic GPU strings for different platforms)
 // ============================================================
 
@@ -504,9 +543,11 @@ class FingerprintService {
         operatingSystems: osConstraint,
       });
 
-    // Extract screen dimensions from Apify
-    let screenWidth = fp.screen.width;
-    let screenHeight = fp.screen.height;
+    // Extract screen dimensions from Apify, mas usar resolução realista aleatória
+    // Isso evita padrão de bot (sempre mesma resolução)
+    const screenResolution = selectRealisticScreenResolution();
+    let screenWidth = screenResolution.width;
+    let screenHeight = screenResolution.height;
 
     // v10.0 SANITIZATION: Reject portrait-mode screens on desktop (e.g. 777x1164).
     // Real desktop monitors are always landscape or square. Portrait screens are
@@ -559,9 +600,10 @@ class FingerprintService {
       webglRenderer = realisticGPU.renderer;
     }
 
-    // Extract hardware info
-    let deviceMemory = fp.navigator.deviceMemory ?? 8;
-    let hardwareConcurrency = fp.navigator.hardwareConcurrency || 8;
+    // Extract hardware info - usar valores realistas aleatórios
+    // Isso evita padrão de bot (sempre 8GB/8 cores)
+    let deviceMemory = selectRealisticDeviceMemory();
+    let hardwareConcurrency = selectRealisticHardwareConcurrency();
     const maxTouchPoints = fp.navigator.maxTouchPoints ?? 0;
 
     // v10.0 SANITIZATION: Force minimum deviceMemory to 2 GB.
@@ -767,7 +809,7 @@ class FingerprintService {
       screenWidth, screenHeight, viewportWidth, viewportHeight,
       colorDepth, timezone, locale, languages, clientId, dcrEncoded,
       headers: profileHeaders, firstEntry, timezoneOffset,
-      // Legacy defaults for Apify fields — usar GPU realista em vez de padrão
+      // Legacy defaults for Apify fields — usar GPU realista e variação
       ...(() => {
         const realisticGPU = selectRealisticGPU(detectedOSValue);
         return {
@@ -775,8 +817,8 @@ class FingerprintService {
           webglRenderer: realisticGPU.renderer,
         };
       })(),
-      deviceMemory: 8,
-      hardwareConcurrency: 8,
+      deviceMemory: selectRealisticDeviceMemory(),
+      hardwareConcurrency: selectRealisticHardwareConcurrency(),
       maxTouchPoints: 0,
       fonts: [],
       audioCodecs: {},
