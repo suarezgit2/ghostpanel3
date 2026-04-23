@@ -620,7 +620,7 @@ class Orchestrator {
         const fingerprint = fingerprintService.generateProfile(proxyRegion);
         
         // v10.2: Criar ProfileSnapshotSession para reutilizar campos críticos
-        const profileSession = new ProfileSnapshotSession(fingerprint, fingerprint.clientId);
+        const profileSession = new ProfileSnapshotSession(fingerprint, fingerprint.clientId, proxy);
         
         // Validar snapshot
         const validation = profileSession.validate();

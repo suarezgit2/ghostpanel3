@@ -54,8 +54,33 @@ export class ProfileSnapshotSession {
   private snapshot: ProfileSnapshot;
   private clientId: string;
   
-  constructor(snapshot: ProfileSnapshot, clientId: string) {
-    this.snapshot = snapshot;
+  constructor(fingerprint: any, clientId: string, proxy?: { host: string; port: number }) {
+    // Mapear fingerprint para ProfileSnapshot
+    this.snapshot = {
+      clientId: fingerprint.clientId || clientId,
+      userAgent: fingerprint.userAgent,
+      screen: `${fingerprint.screenWidth}x${fingerprint.screenHeight}`,
+      timezone: fingerprint.timezone,
+      locale: fingerprint.locale,
+      proxy: proxy ? `${proxy.host}:${proxy.port}` : "unknown",
+      greaseBrand: fingerprint.greaseBrand,
+      greaseVersion: fingerprint.greaseVersion,
+      chromeVersion: fingerprint.chromeMajorVersion?.toString() || "142",
+      battery: fingerprint.battery || { charging: false, chargingTime: null, dischargingTime: null, level: 0.5 },
+      fontsCount: fingerprint.fonts?.length || 60,
+      viewport: `${fingerprint.viewportWidth}x${fingerprint.viewportHeight}`,
+      colorDepth: fingerprint.colorDepth,
+      devicePixelRatio: fingerprint.devicePixelRatio,
+      maxTouchPoints: fingerprint.maxTouchPoints,
+      languages: fingerprint.languages,
+      firstEntry: fingerprint.firstEntry,
+      platform: fingerprint.platform,
+      hardwareConcurrency: fingerprint.hardwareConcurrency,
+      deviceMemory: fingerprint.deviceMemory,
+      webglVendor: fingerprint.webglVendor,
+      webglRenderer: fingerprint.webglRenderer,
+      createdAt: Date.now(),
+    };
     this.clientId = clientId;
   }
   
