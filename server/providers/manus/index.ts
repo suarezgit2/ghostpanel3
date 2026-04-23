@@ -459,6 +459,10 @@ export class ManusProvider {
       
       // STEP 5: Register account with authCommandCmd
       await logger.info("step_5_register", "Registrando conta...", { email, authCommandCmd }, jobId);
+      
+      // DEBUG: Verificar se authCommandCmd está em rpcOptions
+      console.log('[DEBUG-AUTH-CMD] rpcOptions.authCommandCmd:', rpcOptions.authCommandCmd);
+      console.log('[DEBUG-AUTH-CMD] authCommandCmd original:', authCommandCmd);
 
       const registerResult = await rpc.registerByEmail(email, password, emailCode!, rpcOptions);
       const jwtToken = registerResult.token;
