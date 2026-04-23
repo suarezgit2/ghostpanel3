@@ -588,8 +588,9 @@ export class ManusProvider {
                 // Adicionar delay maior antes de tentar novamente
                 await sleep(8000 + Math.random() * 12000, signal);
                 
-                // Tentar novamente com MESMO fingerprint
-                continue;
+                // Retornar sem lançar erro - permite que o SMS service tente outro número
+                // O fingerprint permanece o mesmo para a próxima tentativa
+                return;
               }
 
               throw new AccountBannedError(
