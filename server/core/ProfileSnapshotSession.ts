@@ -39,6 +39,13 @@ export interface ProfileSnapshot {
   languages: string[];
   firstEntry: string;
   
+  // v10.2: Campos adicionais para consistencia 100%
+  platform: string; // Win32, MacIntel, Linux x86_64
+  hardwareConcurrency: number;
+  deviceMemory: number;
+  webglVendor: string;
+  webglRenderer: string;
+  
   // Metadata
   createdAt: number;
 }
